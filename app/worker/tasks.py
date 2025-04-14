@@ -1,24 +1,25 @@
 # app/worker/tasks.py
 import time
-# import random # Remove random simulation parts
+import random
 import shutil
 import logging
 from pathlib import Path
 from copy import deepcopy
-# --- ADD Typing Imports ---
-from typing import Union, Optional, List, Dict, Any
-# --- End Add Typing Imports ---
+# Import Union for type hinting
+from typing import Any, Dict, List, Optional, Union
+from datetime import datetime
 
 from celery import shared_task
 import pydicom
 from pydicom.errors import InvalidDicomError
-# Ensure Tag is imported
+# Import the Tag class correctly
 from pydicom.tag import Tag
+from pydicom.datadict import dictionary_VR
 
 # Database access
 from app.db.session import SessionLocal
-# Use the CRUD object directly as imported in app/crud/__init__.py
-from app.crud import ruleset as crud_ruleset
+from sqlalchemy.orm import Session
+from app.crud.crud_rule import ruleset as crud_ruleset
 from app.db.models import RuleSetExecutionMode
 
 # Storage backend
@@ -30,87 +31,95 @@ from app.core.config import settings
 # Get a logger for this module
 logger = logging.getLogger(__name__)
 
-
 # --- Helper Functions ---
 
-def parse_dicom_tag(tag_str: str) -> Tag | None:
+# Use Union for compatibility
+def parse_dicom_tag(tag_str: str) -> Union[Tag, None]:
     """Parses a string like '(0010,0010)' into a pydicom Tag object."""
-    # REMOVED THE FAULTY isinstance check that was here
+    # First try standard Tag constructor which handles various formats
     try:
-        # Attempt to directly convert using pydicom's Tag constructor
+        if not isinstance(tag_str, str):
+            logger.warning(f"Invalid input type for tag parsing (expected str): {type(tag_str)}")
+            return None
         tag = Tag(tag_str)
         return tag
     except ValueError:
-        # Handle cases Tag() constructor can't parse directly (e.g., lacks '()')
+        # Handle cases Tag() constructor might fail on
         try:
-             parts = tag_str.strip("() ").split(',')
+             cleaned_tag_str = tag_str.strip("() ")
+             if not ',' in cleaned_tag_str and not cleaned_tag_str.replace('0x','').isalnum():
+                  logger.warning(f"Tag string appears to be a keyword, not '(gggg,eeee)': {tag_str}")
+                  return None
+
+             parts = cleaned_tag_str.split(',')
              if len(parts) == 2:
-                  return Tag(int(parts[0], 16), int(parts[1], 16))
+                  group_str = parts[0].strip()
+                  elem_str = parts[1].strip()
+                  group = int(group_str, 16)
+                  element = int(elem_str, 16)
+                  return Tag(group, element)
              else:
                   logger.warning(f"Could not parse tag string (wrong parts): {tag_str}")
                   return None
         except ValueError:
-             logger.warning(f"Could not parse tag string (ValueError): {tag_str}", exc_info=True) # Log traceback on error
+             logger.warning(f"Could not parse tag string (ValueError on manual parse): {tag_str}", exc_info=False)
              return None
-    except Exception as e: # Catch any other unexpected errors during Tag creation
-        logger.error(f"Unexpected error parsing tag string '{tag_str}': {e}", exc_info=True)
+        except Exception as e:
+             logger.error(f"Unexpected error manually parsing tag string '{tag_str}': {e}", exc_info=True)
+             return None
+    except Exception as e:
+        logger.error(f"Unexpected error parsing tag string '{tag_str}' with Tag(): {e}", exc_info=True)
         return None
+
 
 def check_match(dataset: pydicom.Dataset, criteria: dict) -> bool:
     """
     Checks if a dataset matches the given criteria dictionary.
     Basic implementation: Exact match or wildcard '*' for strings.
-    Assumes criteria values are strings for simplicity initially.
     """
-    if not criteria: # Empty criteria always matches? Or never matches? Assume matches.
-        return True
+    if not isinstance(criteria, dict):
+        logger.error(f"Match criteria must be a dictionary, received: {type(criteria)}")
+        return False
 
     for tag_key, expected_value in criteria.items():
         tag = parse_dicom_tag(tag_key)
         if not tag:
             logger.warning(f"Skipping invalid tag key in match criteria: {tag_key}")
-            continue # Skip this criterion if tag is invalid
-
-        actual_value = dataset.get(tag, None)
-
-        if actual_value is None:
-            # Tag doesn't exist in dataset. Does it match if expected_value is also None?
-            # Let's decide: If criteria expects null/None, and tag is missing, consider it a match.
-            if expected_value is None:
-                continue # Tag missing and expected to be missing (or null), matches.
-            else:
-                return False # Tag missing, but criteria expected a value. No match.
-
-        # If we reach here, actual_value is not None (it has a value).
-        if expected_value is None:
-             return False # Tag has a value, but criteria expected it to be missing/None. No match.
-
-        # Convert actual value to string for basic comparison
-        # TODO: Handle different VRs more robustly (dates, numbers, sequences)
-        actual_value_str = str(actual_value.value)
-        expected_value_str = str(expected_value) # Ensure expected is also string
-
-        # Simple matching logic (case-sensitive for now)
-        if expected_value_str == '*': # Wildcard matches anything (if tag exists and value not None)
             continue
-        elif '*' in expected_value_str:
-             # Simple wildcard: only check start/end for now
-            if expected_value_str.startswith('*') and expected_value_str.endswith('*'):
-                 if expected_value_str.strip('*') not in actual_value_str:
-                      return False
-            elif expected_value_str.startswith('*'):
-                 if not actual_value_str.endswith(expected_value_str.lstrip('*')):
-                      return False
-            elif expected_value_str.endswith('*'):
-                  if not actual_value_str.startswith(expected_value_str.rstrip('*')):
-                       return False
-            else: # Treat as literal if wildcard isn't only start/end
-                 if actual_value_str != expected_value_str:
-                      return False
-        elif actual_value_str != expected_value_str:
-            return False # Exact match failed
 
-    return True # All criteria matched
+        actual_data_element = dataset.get(tag, None)
+
+        if actual_data_element is None:
+            if expected_value is None or expected_value == "__MISSING__":
+                 logger.debug(f"Match check: Tag {tag_key} correctly missing as expected.")
+                 continue
+            else:
+                 logger.debug(f"Match check: Tag {tag_key} missing, expected '{expected_value}', NO MATCH.")
+                 return False
+
+        actual_value = actual_data_element.value
+
+        # --- Start Enhanced Matching Block (NEEDS FURTHER DEVELOPMENT) ---
+        try:
+            actual_value_str = str(actual_value)
+        except Exception as e:
+            logger.warning(f"Could not convert actual value of tag {tag_key} to string for matching: {e}")
+            actual_value_str = "[CONVERSION_ERROR]"
+
+        expected_value_str = str(expected_value) if expected_value is not None else ""
+
+        if expected_value_str == '*':
+            logger.debug(f"Match check: Tag {tag_key} wildcard '*' matched value '{actual_value_str}'.")
+            continue
+        elif actual_value_str != expected_value_str:
+            logger.debug(f"Match check: Tag {tag_key} value '{actual_value_str}' != expected '{expected_value_str}', NO MATCH.")
+            return False
+        else:
+            logger.debug(f"Match check: Tag {tag_key} value '{actual_value_str}' == expected '{expected_value_str}', MATCH.")
+        # --- End Enhanced Matching Block ---
+
+    logger.debug("All criteria specified were matched successfully.")
+    return True
 
 
 def apply_modifications(dataset: pydicom.Dataset, modifications: dict):
@@ -118,10 +127,10 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: dict):
     Applies tag modifications to the dataset IN-PLACE.
     modifications format: {'(gggg,eeee)': 'new_value', '(gggg,eeee)': None} (None deletes)
     """
-    if not modifications:
-        return # Nothing to do
+    if not isinstance(modifications, dict):
+        logger.error(f"Tag modifications must be a dictionary, received: {type(modifications)}")
+        return
 
-    logger.debug(f"Applying modifications: {modifications}")
     for tag_key, new_value in modifications.items():
         tag = parse_dicom_tag(tag_key)
         if not tag:
@@ -129,40 +138,51 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: dict):
             continue
 
         try:
-            if new_value is None:
-                # Delete the tag if it exists
+            if new_value is None or new_value == "__DELETE__":
                 if tag in dataset:
                     del dataset[tag]
                     logger.debug(f"Deleted tag {tag_key} ({tag})")
                 else:
-                    logger.debug(f"Tag {tag_key} ({tag}) not present, cannot delete.")
+                    logger.debug(f"Attempted to delete non-existent tag {tag_key} ({tag}). Ignoring.")
             else:
-                # Add or update the tag
-                # CRITICAL TODO: Handle VR correctly! Lookup VR from dict or require in modifications.
-                # Using existing VR if tag exists, defaulting to 'LO' otherwise (HIGHLY UNSAFE)
+                vr = None
                 if tag in dataset:
-                    # Existing tag: Check if VR needs update? Generally no, just update value.
-                    dataset[tag].value = new_value
-                    logger.debug(f"Updated tag {tag_key} ({tag}) to '{new_value}'")
-                else:
-                    # New tag: Need VR. Defaulting to 'LO' is wrong long-term.
-                    vr = 'LO' # FIXME: Determine VR properly
-                    # Use DataElement instead of add_new for more control if needed
-                    dataset.add_new(tag, vr, new_value)
-                    logger.warning(f"Added new tag {tag_key} ({tag}) = '{new_value}' with guessed VR '{vr}'") # Warn about guessing VR
+                    if isinstance(dataset[tag], pydicom.DataElement):
+                         vr = dataset[tag].VR
+                    else:
+                         logger.warning(f"Attempting to modify tag {tag_key} which is part of a sequence. Simple modification might not work as expected.")
+                         continue
+                if not vr:
+                    try:
+                        vr = dictionary_VR(tag)
+                        logger.debug(f"Looked up VR for new tag {tag_key}: '{vr}'")
+                    except KeyError:
+                        vr = 'UN'
+                        logger.warning(f"VR for new tag {tag_key} not found in dictionary, defaulting to 'UN'. Specify VR in modifications if needed.")
+
+                value_to_set = new_value
+                if isinstance(new_value, dict) and 'Value' in new_value:
+                    value_to_set = new_value.get('Value')
+                    if 'VR' in new_value:
+                        override_vr = new_value.get('VR')
+                        if isinstance(override_vr, str) and len(override_vr) == 2 and override_vr.isalpha() and override_vr.isupper():
+                             vr = override_vr
+                             logger.debug(f"Overriding VR for tag {tag_key} to '{vr}' from modification config.")
+                        else:
+                            logger.warning(f"Invalid VR '{override_vr}' specified in modification config for tag {tag_key}. Using determined VR '{vr}'.")
+
+                # TODO: Value Type Conversion based on VR
+
+                dataset.add_new(tag, vr, value_to_set)
+                log_value = (str(value_to_set)[:50] + '...') if isinstance(value_to_set, str) and len(value_to_set) > 53 else str(value_to_set)
+                logger.debug(f"Set tag {tag_key} ({tag}) to '{log_value}' (VR: {vr})")
 
         except Exception as e:
-            logger.error(f"Failed to apply modification for tag {tag_key} ('{new_value}'): {e}", exc_info=True)
-            # Decide whether to continue applying other modifications or fail the task
-            # For now, log and continue
-
+            logger.error(f"Failed to apply modification for tag {tag_key} to value '{new_value}': {e}", exc_info=True)
 
 # --- Celery Task ---
 
-# Define retryable exceptions (e.g., network issues, temporary DB errors)
-# Consider adding specific database errors if applicable (e.g., from psycopg2.errors)
-RETRYABLE_EXCEPTIONS = (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError, TimeoutError,
-                        StorageBackendError) # Add DB/other transient errors later if needed
+RETRYABLE_EXCEPTIONS = (ConnectionRefusedError, StorageBackendError, TimeoutError)
 
 @shared_task(bind=True, name="process_dicom_file_task",
              acks_late=True,
@@ -171,216 +191,232 @@ RETRYABLE_EXCEPTIONS = (ConnectionRefusedError, ConnectionAbortedError, Connecti
              autoretry_for=RETRYABLE_EXCEPTIONS,
              retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
 def process_dicom_file_task(self, dicom_filepath_str: str):
-    """
-    Celery task to process a single DICOM file:
-    1. Read DICOM file.
-    2. Query active rulesets.
-    3. Match rules based on criteria.
-    4. Apply tag modifications.
-    5. Send to configured destinations.
-    6. Clean up original file on full success.
-    """
-    task_id = self.request.id
+    """ Celery task to process a single DICOM file. """
+    task_id = self.request.id if self.request else 'NO_REQUEST_ID'
     original_filepath = Path(dicom_filepath_str)
-    logger.info(f"Task {task_id}: Starting processing for DICOM file: {original_filepath}")
+    log_prefix = f"Task {task_id} ({original_filepath.name})"
+    logger.info(f"{log_prefix}: Received request.")
 
     if not original_filepath.exists():
-        logger.error(f"Task {task_id}: File not found: {original_filepath}. Cannot process.")
+        logger.error(f"{log_prefix}: File not found: {original_filepath}. Cannot process.")
         return {"status": "error", "message": "File not found", "filepath": dicom_filepath_str}
 
-    db: SessionLocal | None = None
-    original_ds: pydicom.Dataset | None = None
+    db: Session | None = None
+    ds: pydicom.Dataset | None = None
     modified_ds: pydicom.Dataset | None = None
-    applied_rules_info = []
-    destinations_to_process = []
-    success_status = {}
+    applied_rules_info: List[str] = []
+    destinations_to_process: List[Dict[str, Any]] = []
+    success_status: Dict[str, Dict[str, Any]] = {}
+    final_status = "unknown" # Initialize final status
+    final_message = "Processing did not complete."
 
     try:
         # --- 1. Read DICOM File ---
-        logger.debug(f"Task {task_id}: Reading DICOM file...")
+        logger.debug(f"{log_prefix}: Reading DICOM file...")
         try:
-            original_ds = pydicom.dcmread(original_filepath, stop_before_pixels=False) # Read full file for now
-            # Deep copy for modifications - ensures original is unchanged for matching
-            modified_ds = deepcopy(original_ds)
+            ds = pydicom.dcmread(original_filepath, stop_before_pixels=True)
+            modified_ds = deepcopy(ds)
+            logger.debug(f"{log_prefix}: DICOM read successfully. PatientName='{ds.get('PatientName', 'N/A')}', SOP UID='{ds.get('SOPInstanceUID', 'N/A')}'")
         except InvalidDicomError as e:
-            logger.error(f"Task {task_id}: Invalid DICOM file {original_filepath}: {e}", exc_info=True)
-            raise # Re-raise to be caught by outer try/except for error handling
+            logger.error(f"{log_prefix}: Invalid DICOM file: {e}", exc_info=False)
+            raise
 
         # --- 2. Get Rules from Database ---
-        logger.debug(f"Task {task_id}: Opening database session...")
+        logger.debug(f"{log_prefix}: Opening database session...")
         db = SessionLocal()
-        logger.debug(f"Task {task_id}: Querying active rulesets...")
+        logger.debug(f"{log_prefix}: Querying active rulesets...")
         rulesets = crud_ruleset.get_active_ordered(db)
         if not rulesets:
-             logger.info(f"Task {task_id}: No active rulesets found. Processing complete for {original_filepath.name}.")
-             return {"status": "success", "message": "No active rulesets configured", "filepath": dicom_filepath_str}
+             logger.info(f"{log_prefix}: No active rulesets found. Processing complete (no rules applied).")
+             final_status="success_no_rules"
+             final_message="No active rulesets found"
+             # Skip directly to cleanup
 
-        # --- 3. Rule Matching & Modification ---
-        logger.debug(f"Task {task_id}: Evaluating {len(rulesets)} rulesets...")
-        matched_a_rule = False # Track if *any* rule matched across all sets
+        else:
+            # --- 3. Rule Matching & Modification ---
+            logger.debug(f"{log_prefix}: Evaluating {len(rulesets)} rulesets...")
+            matched_in_any_ruleset = False
 
-        for ruleset_obj in rulesets:
-            logger.debug(f"Task {task_id}: Evaluating RuleSet '{ruleset_obj.name}' (ID: {ruleset_obj.id}, Priority: {ruleset_obj.priority})")
-            if not ruleset_obj.is_active: # Double check, though query filters
-                 logger.debug(f"Task {task_id}: Ruleset '{ruleset_obj.name}' is inactive. Skipping.")
-                 continue
-            if not ruleset_obj.rules:
-                 logger.debug(f"Task {task_id}: Ruleset '{ruleset_obj.name}' has no rules. Skipping.")
-                 continue
+            for ruleset_obj in rulesets:
+                if not ruleset_obj.is_active: continue
 
-            # Flag to track match within the current ruleset for FIRST_MATCH logic
-            matched_in_this_ruleset = False
-            # Rules are already ordered by priority due to model relationship definition
-            for rule_obj in ruleset_obj.rules:
-                 if not rule_obj.is_active:
-                     logger.debug(f"Task {task_id}: Rule '{rule_obj.name}' (ID: {rule_obj.id}) is inactive. Skipping.")
+                ruleset_log_prefix = f"{log_prefix} [RuleSet: {ruleset_obj.name} (ID: {ruleset_obj.id})]"
+                logger.debug(f"{ruleset_log_prefix}: Evaluating (Priority: {ruleset_obj.priority})")
+                if not ruleset_obj.rules:
+                     logger.debug(f"{ruleset_log_prefix}: Has no associated rules. Skipping.")
                      continue
 
-                 logger.debug(f"Task {task_id}: Checking rule '{rule_obj.name}' (ID: {rule_obj.id}, Priority: {rule_obj.priority})")
-                 try:
-                     criteria = rule_obj.match_criteria
-                     if not criteria:
-                          logger.debug(f"Task {task_id}: Rule '{rule_obj.name}' has no criteria, assuming match.")
-                          is_match = True
-                     else:
-                          is_match = check_match(original_ds, criteria) # Match against the original dataset
+                matched_rule_in_this_set = False
+                active_rules_in_set = [r for r in ruleset_obj.rules if r.is_active]
+                if not active_rules_in_set:
+                    logger.debug(f"{ruleset_log_prefix}: Has no *active* rules. Skipping.")
+                    continue
 
-                     if is_match:
-                         logger.info(f"Task {task_id}: Rule '{ruleset_obj.name}' / '{rule_obj.name}' MATCHED.")
-                         matched_in_this_ruleset = True
-                         matched_a_rule = True # Mark that at least one rule matched overall
+                for rule_obj in active_rules_in_set:
+                     rule_log_prefix = f"{ruleset_log_prefix} [Rule: {rule_obj.name} (ID: {rule_obj.id})]"
+                     logger.debug(f"{rule_log_prefix}: Checking (Priority: {rule_obj.priority})")
+                     try:
+                         criteria = rule_obj.match_criteria
+                         if check_match(ds, criteria):
+                             logger.info(f"{rule_log_prefix}: MATCHED.")
+                             matched_rule_in_this_set = True
+                             matched_in_any_ruleset = True
 
-                         # Apply modifications (in-place on modified_ds)
-                         modifications = rule_obj.tag_modifications
-                         if modifications:
-                              apply_modifications(modified_ds, modifications)
-                         else:
-                              logger.debug(f"Task {task_id}: Rule '{rule_obj.name}' has no modifications.")
+                             modifications = rule_obj.tag_modifications
+                             if modifications:
+                                  logger.debug(f"{rule_log_prefix}: Applying modifications...")
+                                  apply_modifications(modified_ds, modifications)
+                             else:
+                                  logger.debug(f"{rule_log_prefix}: No modifications defined.")
 
-                         # Add destinations from this rule to the list to process
-                         destinations_to_process.extend(rule_obj.destinations or []) # Handle potentially null/empty list
+                             if rule_obj.destinations:
+                                  logger.debug(f"{rule_log_prefix}: Adding {len(rule_obj.destinations)} destinations.")
+                                  destinations_to_process.extend(rule_obj.destinations)
+                             else:
+                                   logger.debug(f"{rule_log_prefix}: No destinations defined.")
 
-                         applied_rules_info.append(f"RuleSet: {ruleset_obj.name} (ID: {ruleset_obj.id}) / Rule: {rule_obj.name} (ID: {rule_obj.id})")
+                             applied_rules_info.append(f"RuleSet: {ruleset_obj.name} (ID: {ruleset_obj.id}) / Rule: {rule_obj.name} (ID: {rule_obj.id})")
 
-                         # Check ruleset execution mode
-                         if ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH:
-                             logger.debug(f"Task {task_id}: Ruleset '{ruleset_obj.name}' mode is FIRST_MATCH. Stopping rule evaluation for this set.")
-                             break # Stop processing further rules in THIS ruleset
+                             if ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH:
+                                 logger.debug(f"{ruleset_log_prefix}: Mode is FIRST_MATCH. Stopping rule evaluation for this set.")
+                                 break
+                     except Exception as match_exc:
+                         logger.error(f"{rule_log_prefix}: Error during processing: {match_exc}", exc_info=True)
 
-                 except Exception as match_exc:
-                     # Log error but continue evaluating other rules/rulesets
-                     logger.error(f"Task {task_id}: Error processing matching/modification for rule '{ruleset_obj.name}/{rule_obj.name}': {match_exc}", exc_info=True)
+                if matched_rule_in_this_set and ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH:
+                     pass
 
-            # If in FIRST_MATCH mode and a rule in this set matched, don't evaluate subsequent rulesets
-            if ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH and matched_in_this_ruleset:
-                 logger.debug(f"Task {task_id}: FIRST_MATCH triggered in ruleset '{ruleset_obj.name}'. Stopping ruleset evaluation.")
-                 break # Stop processing further rulesets
+            # --- 4. Destination Processing ---
+            if not destinations_to_process:
+                 if matched_in_any_ruleset:
+                      logger.info(f"{log_prefix}: Rules matched, but no destinations were configured for matched rules.")
+                      final_status="success_no_destinations"
+                      final_message="Rules matched, no destinations specified."
+                 else:
+                      logger.info(f"{log_prefix}: No matching rules found after evaluating all rulesets.")
+                      final_status="success_no_match"
+                      final_message="No matching rules found"
 
-        # --- 4. Destination Processing ---
-        if not matched_a_rule:
-            logger.info(f"Task {task_id}: No rules matched for {original_filepath.name}. Processing complete.")
-            return {"status": "success", "message": "No matching rules found", "filepath": dicom_filepath_str}
+            else: # Destinations were found
+                 unique_dest_configs_map = {str(d): d for d in destinations_to_process}
+                 unique_dest_configs = list(unique_dest_configs_map.values())
+                 if len(unique_dest_configs) < len(destinations_to_process):
+                      logger.warning(f"{log_prefix}: Duplicate destinations specified, processing {len(unique_dest_configs)} unique destinations.")
 
-        if not destinations_to_process:
-            logger.info(f"Task {task_id}: Matching rules were found, but none configured destinations for {original_filepath.name}.")
-            # If modifications were applied, we might still want to save it somewhere? Or discard?
-            # Current logic: considered success, but nothing stored. Original file cleanup depends on destination success.
-            return {"status": "success", "message": "Rules matched, but no destinations configured", "applied_rules": applied_rules_info, "filepath": dicom_filepath_str}
+                 logger.info(f"{log_prefix}: Processing {len(unique_dest_configs)} unique destination actions...")
+                 if modified_ds is None:
+                      logger.error(f"{log_prefix}: Internal error: modified dataset is missing before storage processing!")
+                      raise ValueError("Internal error: modified dataset not available for storage.")
 
-        # Deduplicate destinations if necessary? Or allow sending multiple times? Currently allows multiple.
-        logger.info(f"Task {task_id}: Processing {len(destinations_to_process)} destination actions for {original_filepath.name}...")
-        logger.debug(f"Task {task_id}: Final dataset PatientName: {modified_ds.get('PatientName', 'N/A')}, PatientID: {modified_ds.get('PatientID', 'N/A')}")
+                 pat_name = modified_ds.get("PatientName", "N/A")
+                 pat_id = modified_ds.get("PatientID", "N/A")
+                 inst_name = modified_ds.get("InstitutionName", "N/A")
+                 logger.debug(f"{log_prefix}: Final modified dataset tags (examples): PatientName='{pat_name}', PatientID='{pat_id}', InstitutionName='{inst_name}'")
 
-        all_destinations_succeeded = True
-        for i, dest_config in enumerate(destinations_to_process):
-            if not isinstance(dest_config, dict) or not dest_config.get("type"):
-                logger.error(f"Task {task_id}: Invalid destination config at index {i}: {dest_config}. Skipping.")
-                all_destinations_succeeded = False # Mark failure as config is bad
-                success_status[f"Dest_{i+1}_Invalid"] = {"status": "error", "message": "Invalid destination config format"}
-                continue
+                 all_destinations_succeeded = True
+                 for i, dest_config in enumerate(unique_dest_configs):
+                      dest_type = dest_config.get('type','unknown_type')
+                      dest_details_parts = []
+                      if dest_type == "filesystem":
+                           dest_details_parts.append(f"path={dest_config.get('path', '?')}")
+                      elif dest_type == "cstore":
+                           dest_details_parts.append(f"ae={dest_config.get('ae_title','?')}")
+                           dest_details_parts.append(f"host={dest_config.get('host','?')}")
+                           dest_details_parts.append(f"port={dest_config.get('port','?')}")
+                      dest_id = f"Dest_{i+1}_{dest_type}({', '.join(dest_details_parts)})"
 
-            dest_id = f"Dest_{i+1}_{dest_config['type']}"
-            logger.debug(f"Task {task_id}: Attempting destination {dest_id}: {dest_config}")
-            try:
-                storage_backend = get_storage_backend(dest_config)
-                # Ensure the modified dataset has file_meta for backends that might need it
-                if not hasattr(modified_ds, 'file_meta'):
-                     modified_ds.file_meta = deepcopy(original_ds.file_meta) # Copy from original if missing
-                store_result = storage_backend.store(modified_ds, original_filepath)
-                logger.info(f"Task {task_id}: Destination {dest_id} completed successfully.")
-                success_status[dest_id] = {"status": "success", "result": str(store_result)} # Ensure result is serializable
-            except StorageBackendError as e:
-                logger.error(f"Task {task_id}: Failed to store to destination {dest_id} (StorageBackendError): {e}", exc_info=False) # Log less verbosely for expected storage errors
-                all_destinations_succeeded = False
-                success_status[dest_id] = {"status": "error", "message": str(e)}
-            except Exception as e:
-                 logger.error(f"Task {task_id}: Unexpected error during storage to {dest_id}: {e}", exc_info=True)
-                 all_destinations_succeeded = False
-                 success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
+                      logger.debug(f"{log_prefix}: Attempting destination {dest_id}")
+                      try:
+                          storage_backend = get_storage_backend(dest_config)
+                          store_result = storage_backend.store(modified_ds, original_filepath)
+                          logger.info(f"{log_prefix}: Destination {dest_id} completed successfully.")
+                          success_status[dest_id] = {"status": "success", "result": str(store_result)}
+                      except StorageBackendError as e:
+                          logger.error(f"{log_prefix}: Failed to store to destination {dest_id}: {e}", exc_info=True)
+                          all_destinations_succeeded = False
+                          success_status[dest_id] = {"status": "error", "message": str(e)}
+                      except Exception as e:
+                           logger.error(f"{log_prefix}: Unexpected error during storage process for {dest_id}: {e}", exc_info=True)
+                           all_destinations_succeeded = False
+                           success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
+
+                 # Assign final status based on destination outcomes
+                 if all_destinations_succeeded:
+                      final_status = "success"
+                      final_message = "Processed and stored successfully to all destinations."
+                 else:
+                      final_status = "partial_failure"
+                      final_message = "Processing complete, but one or more destinations failed."
 
         # --- 5. Cleanup ---
-        if all_destinations_succeeded:
-            logger.info(f"Task {task_id}: All {len(destinations_to_process)} destinations succeeded. Deleting original file: {original_filepath}")
-            try:
-                original_filepath.unlink(missing_ok=True)
-            except OSError as e:
-                 logger.warning(f"Task {task_id}: Failed to delete original file {original_filepath} after successful processing: {e}")
-            final_status = "success"
-            final_message = "Processed and stored successfully to all destinations."
-        else:
-            logger.warning(f"Task {task_id}: One or more destinations failed. Original file NOT deleted: {original_filepath}")
-            final_status = "partial_failure"
-            final_message = "Processing complete, but one or more destinations failed."
-            # NOTE: This currently prevents Celery auto-retry unless the StorageBackendError bubbles up
-            # and is in RETRYABLE_EXCEPTIONS. If we want partial failures to retry,
-            # we might need to re-raise an appropriate exception here.
+        # Cleanup if processing was successful overall, even if no destinations needed
+        if final_status in ["success", "success_no_destinations", "success_no_rules", "success_no_match"]:
+            # Only delete if the original file still exists (important if error occurred before this point)
+            if original_filepath.is_file():
+                 logger.info(f"{log_prefix}: Processing deemed successful. Deleting original file: {original_filepath}")
+                 try:
+                     original_filepath.unlink(missing_ok=True)
+                 except OSError as e:
+                     logger.warning(f"{log_prefix}: Failed to delete original file {original_filepath} after successful processing: {e}")
+            else:
+                 logger.info(f"{log_prefix}: Processing deemed successful, original file already gone: {original_filepath}")
 
+        else: # Handles "partial_failure" and potentially unknown if logic missed a case
+            if original_filepath.is_file():
+                 logger.warning(f"{log_prefix}: Processing resulted in status '{final_status}'. Original file NOT deleted: {original_filepath}")
+            else:
+                 logger.warning(f"{log_prefix}: Processing resulted in status '{final_status}'. Original file was already gone: {original_filepath}")
+
+        # Return final result
+        if db: db.close() # Close DB session before returning
         return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "destinations": success_status}
 
     except InvalidDicomError:
-         logger.error(f"Task {task_id}: Invalid DICOM error caught for {original_filepath.name}. Moving to errors.")
+         logger.error(f"{log_prefix}: Invalid DICOM error caught. Moving to errors.")
+         if db: db.close()
          move_to_error_dir(original_filepath, task_id)
-         # Don't retry invalid files
          return {"status": "error", "message": "Invalid DICOM file format", "filepath": dicom_filepath_str}
     except Exception as exc:
-        logger.error(f"Task {task_id}: Unhandled exception during processing {original_filepath.name}: {exc!r}", exc_info=True)
-        # Check if autoretry is configured and hasn't handled this specific exception type
-        # This path handles errors *before* destination processing typically
-        # If this exception is NOT in RETRYABLE_EXCEPTIONS, autoretry won't trigger.
-        if isinstance(exc, RETRYABLE_EXCEPTIONS):
-             logger.warning(f"Task {task_id}: Caught retryable exception, allowing autoretry mechanism to handle: {exc!r}")
-             raise exc # Re-raise so Celery's autoretry_for catches it
-        else:
-             # Non-retryable error encountered before or during core processing
-             logger.error(f"Task {task_id}: Non-retryable error for {original_filepath.name}. Moving to errors.")
-             move_to_error_dir(original_filepath, task_id)
-             return {"status": "error", "message": f"Non-retryable processing error: {exc!r}", "filepath": dicom_filepath_str}
+        logger.error(f"{log_prefix}: Unhandled exception during processing: {exc!r}", exc_info=True)
+        if db: db.close()
+        try:
+            retries_done = self.request.retries if self.request else 0
+            max_retries_allowed = getattr(self, 'max_retries', 0) or 0
+            is_final_retry = retries_done >= max_retries_allowed
+            is_non_retryable_error_type = not isinstance(exc, RETRYABLE_EXCEPTIONS)
+
+            if is_final_retry or is_non_retryable_error_type:
+                 log_reason = "Max retries exceeded" if is_final_retry else "Non-retryable error type"
+                 logger.error(f"{log_prefix}: {log_reason} for error: {exc!r}. Moving to errors.")
+                 move_to_error_dir(original_filepath, task_id)
+                 return {"status": "error", "message": f"{log_reason}: {exc!r}", "filepath": dicom_filepath_str}
+            else:
+                 logger.warning(f"{log_prefix}: Re-raising exception to allow Celery autoretry: {exc!r}")
+                 raise exc
+        except Exception as final_error_handling_exc:
+             logger.critical(f"{log_prefix}: CRITICAL Error during final error handling for primary exception {exc!r}: {final_error_handling_exc!r}", exc_info=True)
+             return {"status": "error", "message": f"CRITICAL error during error handling: {final_error_handling_exc!r}", "filepath": dicom_filepath_str}
 
     finally:
-        # --- Ensure DB Session is Closed ---
-        if db:
-            logger.debug(f"Task {task_id}: Closing database session.")
+        if db and db.is_active:
+            logger.warning(f"{log_prefix}: Database session found active in final 'finally' block. Closing.")
             db.close()
 
 
 def move_to_error_dir(filepath: Path, task_id: str):
     """Moves a file to the designated error directory."""
-    if not filepath.exists():
-         logger.warning(f"Task {task_id}: Original file {filepath} not found for moving to error dir.")
+    log_prefix = f"Task {task_id} ({filepath.name})"
+    if not filepath.is_file():
+         logger.warning(f"{log_prefix}: Original file {filepath} not found or is not a file. Cannot move to error dir.")
          return
 
     try:
-        # Define error path relative to incoming base (adjust if layout differs)
-        error_base_dir = Path(settings.DICOM_STORAGE_PATH).parent
-        error_dir = error_base_dir / "errors"
+        error_dir = filepath.parent.parent / "errors"
         error_dir.mkdir(parents=True, exist_ok=True)
-
-        # Add timestamp or task ID to error filename to avoid collisions?
-        # error_filename = f"{filepath.stem}_{task_id}{filepath.suffix}"
-        error_path = error_dir / filepath.name # Use original name for now
-
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        error_filename = f"{filepath.stem}_{timestamp}{filepath.suffix}"
+        error_path = error_dir / error_filename
         shutil.move(str(filepath), str(error_path))
-        logger.info(f"Task {task_id}: Moved failed/invalid file {filepath.name} to {error_path}")
+        logger.info(f"{log_prefix}: Moved failed file {filepath.name} to {error_path}")
     except Exception as move_err:
-        # Log critical failure - file might be stuck in incoming now
-        logger.critical(f"Task {task_id}: CRITICAL - Could not move file {filepath.name} to error dir: {move_err}", exc_info=True)
+        logger.critical(f"{log_prefix}: CRITICAL - Could not move failed file {filepath.name} to error dir: {move_err}", exc_info=True)
