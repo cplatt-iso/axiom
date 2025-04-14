@@ -1,7 +1,8 @@
 # app/schemas/rule.py
 
 from typing import List, Optional, Dict, Any, Union
-from pydantic import BaseModel, Field, field_validator, ValidationInfo, model_validator
+# Use model_validator from pydantic directly
+from pydantic import BaseModel, Field, field_validator, model_validator
 import enum
 from datetime import datetime
 import re
@@ -35,7 +36,6 @@ class ModifyAction(str, enum.Enum):
 
 # --- Structures for Rules ---
 
-# Use BaseModel for validation within lists
 class MatchCriterion(BaseModel):
     tag: str = Field(..., description="DICOM tag string, e.g., '(0010,0010)'")
     op: MatchOperation = Field(..., description="Matching operation to perform")
@@ -44,18 +44,23 @@ class MatchCriterion(BaseModel):
     @field_validator('tag')
     @classmethod
     def validate_tag_format(cls, v):
-        # Basic validation for (gggg,eeee) format
         if not re.match(r"^\(\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)$", v):
              raise ValueError("Tag must be in the format '(gggg,eeee)'")
         return v
 
-    @model_validator(mode='after') # Use model_validator in Pydantic v2
+    # Corrected model_validator signature for Pydantic v2
+    @model_validator(mode='after')
     def check_value_required(self) -> 'MatchCriterion':
-        if self.op not in [MatchOperation.EXISTS, MatchOperation.NOT_EXISTS] and self.value is None:
-             raise ValueError(f"Value is required for operation '{self.op.value}' on tag '{self.tag}'")
-        if self.op in [MatchOperation.IN, MatchOperation.NOT_IN] and not isinstance(self.value, list):
-             raise ValueError(f"Value must be a list for operation '{self.op.value}' on tag '{self.tag}'")
-        return self
+        op_value = self.op # Access attributes directly via self in 'after' validator
+        value_value = self.value
+        tag_value = self.tag
+
+        if op_value not in [MatchOperation.EXISTS, MatchOperation.NOT_EXISTS] and value_value is None:
+             raise ValueError(f"Value is required for operation '{op_value.value}' on tag '{tag_value}'")
+        if op_value in [MatchOperation.IN, MatchOperation.NOT_IN] and not isinstance(value_value, list):
+             raise ValueError(f"Value must be a list for operation '{op_value.value}' on tag '{tag_value}'")
+        return self # Return the instance
+
 
 class TagModification(BaseModel):
     action: ModifyAction = Field(..., description="Action to perform (set or delete)")
@@ -66,7 +71,6 @@ class TagModification(BaseModel):
     @field_validator('tag')
     @classmethod
     def validate_tag_format(cls, v):
-        # Basic validation for (gggg,eeee) format
         if not re.match(r"^\(\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)$", v):
              raise ValueError("Tag must be in the format '(gggg,eeee)'")
         return v
@@ -78,36 +82,44 @@ class TagModification(BaseModel):
              raise ValueError("VR must be two uppercase letters")
         return v.upper() if v else None
 
+    # Corrected model_validator signature for Pydantic v2
     @model_validator(mode='after')
     def check_value_for_set(self) -> 'TagModification':
-        if self.action == ModifyAction.SET and self.value is None:
-            raise ValueError(f"Value is required for 'set' action on tag '{self.tag}'")
-        return self
+        action_value = self.action # Access attributes via self
+        value_value = self.value
+        tag_value = self.tag
+
+        if action_value == ModifyAction.SET and value_value is None:
+            raise ValueError(f"Value is required for 'set' action on tag '{tag_value}'")
+        return self # Return the instance
 
 
 class StorageDestination(BaseModel):
-    # Redefine slightly for clarity and potential future additions
     type: str = Field(..., description="Storage type (e.g., 'filesystem', 'cstore', 'gcs')")
     config: Dict[str, Any] = Field(default_factory=dict, description="Backend-specific configuration (e.g., path, ae_title, bucket)")
 
+    # Corrected model_validator signature for Pydantic v2
     @model_validator(mode='after')
     def merge_type_into_config(self) -> 'StorageDestination':
+        # Access via self
+        type_value = self.type
+        config_value = self.config
+
         # Ensure 'type' is also within the config dict for the backend factory
-        if 'type' not in self.config:
-             self.config['type'] = self.type
-        elif self.config['type'].lower() != self.type.lower():
+        if 'type' not in config_value:
+             self.config['type'] = type_value # Modify self directly
+        elif config_value.get('type', '').lower() != type_value.lower(): # Safer access to type in config
              raise ValueError("Mismatch between 'type' field and 'type' within config")
-        return self
+        return self # Return the instance
 
 
-# --- Rule Schemas (Updated) ---
+# --- Rule Schemas (Using corrected definitions above) ---
 
 class RuleBase(BaseModel):
     name: str = Field(..., max_length=100)
     description: Optional[str] = None
     is_active: bool = True
     priority: int = 0
-    # Updated fields to use the new structures
     match_criteria: List[MatchCriterion] = Field(default_factory=list, description="List of criteria (implicit AND)")
     tag_modifications: List[TagModification] = Field(default_factory=list, description="List of modifications to apply")
     destinations: List[StorageDestination] = Field(default_factory=list, description="List of storage destinations")
@@ -127,26 +139,27 @@ class RuleUpdate(BaseModel):
 class RuleInDBBase(RuleBase):
     id: int
     ruleset_id: int
-    created_at: datetime
+    created_at: datetime # Changed to required as per Base model
     updated_at: Optional[datetime] = None
     class Config:
-        from_attributes = True
+        from_attributes = True # Pydantic v2
 
 class Rule(RuleInDBBase):
     pass
 
 
-# --- RuleSet Schemas (Unchanged for now, but rules list uses new Rule schema) ---
+# --- RuleSet Schemas ---
 
 class RuleSetBase(BaseModel):
     name: str = Field(..., max_length=100)
     description: Optional[str] = None
     is_active: bool = True
-    priority: int = 0
+    priority: int = 0 # Removed default from here, should be set in RuleSetCreate if needed
     execution_mode: RuleSetExecutionMode = RuleSetExecutionMode.FIRST_MATCH
 
 class RuleSetCreate(RuleSetBase):
-    pass
+    # Default values are defined in RuleSetBase or can be set here if different for create
+    priority: int = 0 # Explicitly setting default here for clarity
 
 class RuleSetUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
@@ -157,13 +170,14 @@ class RuleSetUpdate(BaseModel):
 
 class RuleSetInDBBase(RuleSetBase):
     id: int
-    created_at: datetime
+    created_at: datetime # Changed to required
     updated_at: Optional[datetime] = None
-    rules: List[Rule] = [] # Uses the updated Rule schema
+    rules: List[Rule] = []
     class Config:
-        from_attributes = True
+        from_attributes = True # Pydantic v2
 
-class RuleSet(RuleSetInDBBase):
+# *** This is the class that was failing to import ***
+class RuleSet(RuleSetInDBBase): # Definition exists here
     pass
 
 class RuleSetSummary(BaseModel):
@@ -175,4 +189,4 @@ class RuleSetSummary(BaseModel):
     execution_mode: RuleSetExecutionMode
     rule_count: int
     class Config:
-        from_attributes = True
+        from_attributes = True # Pydantic v2

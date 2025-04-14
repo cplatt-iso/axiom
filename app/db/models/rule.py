@@ -1,11 +1,12 @@
 # app/db/models/rule.py
 import enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any # Make sure Dict is imported
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Boolean, Text, ForeignKey, JSON, Enum as DBEnum, Integer
+    String, Boolean, Text, ForeignKey, JSON, Enum as DBEnum, Integer
 )
+# NOTE: Removed Column import as it's not used here anymore
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -29,7 +30,7 @@ class RuleSet(Base):
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
     priority: Mapped[int] = mapped_column(default=0, index=True, comment="Lower numbers execute first")
     execution_mode: Mapped[RuleSetExecutionMode] = mapped_column(
-        DBEnum(RuleSetExecutionMode, name="ruleset_execution_mode_enum"), # Give DB enum a name
+        DBEnum(RuleSetExecutionMode, name="ruleset_execution_mode_enum"),
         default=RuleSetExecutionMode.FIRST_MATCH,
         nullable=False
     )
@@ -41,17 +42,16 @@ class RuleSet(Base):
     # created_by_user: Mapped[Optional["User"]] = relationship(back_populates="created_rulesets", lazy="selectin", init=False)
 
     # Relationship: One RuleSet has many Rules
-    # Use Mapped[List["Rule"]] type hint
     rules: Mapped[List["Rule"]] = relationship(
         back_populates="ruleset",
-        cascade="all, delete-orphan", # Delete rules if ruleset is deleted
-        order_by="Rule.priority", # Process rules within a set in order (auto-applied)
-        lazy="selectin", # Load rules efficiently when loading a ruleset
-        # init=False # Not typically initialized directly
+        cascade="all, delete-orphan",
+        order_by="Rule.priority",
+        lazy="selectin",
     )
 
     def __repr__(self):
         return f"<RuleSet(id={self.id}, name='{self.name}', is_active={self.is_active})>"
+
 
 class Rule(Base):
     """
@@ -68,13 +68,16 @@ class Rule(Base):
 
     ruleset_id: Mapped[int] = mapped_column(ForeignKey('rule_sets.id', ondelete="CASCADE"), index=True)
 
-    # --- Core Rule Logic (Still JSON, but structure expected is List[Dict]) ---
-    match_criteria: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSON, nullable=False, default=list, comment="List of criteria objects (implicit AND)"
+    # --- Core Rule Logic --- CORRECTED TYPES ---
+    # Should be Dict (object), not List[Dict]
+    match_criteria: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, comment="Criteria object (implicit AND)"
     )
-    tag_modifications: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSON, nullable=False, default=list, comment="List of modification action objects"
+    # Should be Dict (object), not List[Dict]
+    tag_modifications: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, comment="Modification action object"
     )
+    # Destinations remains List[Dict]
     destinations: Mapped[List[Dict[str, Any]]] = mapped_column(
         JSON, nullable=False, default=list, comment="List of storage destination objects"
     )

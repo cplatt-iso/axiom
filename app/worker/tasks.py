@@ -15,6 +15,7 @@ from pydicom.errors import InvalidDicomError
 from pydicom.tag import Tag, BaseTag
 from pydicom.datadict import dictionary_VR, tag_for_keyword, keyword_for_tag
 from pydicom.valuerep import DSfloat, IS, DSdecimal # Import specific VR types
+from typing import Optional
 
 # Database access
 from app.db.session import SessionLocal
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 # --- Helper Functions ---
 
 # Enhanced Tag Parsing (Handles keywords too)
-def parse_dicom_tag(tag_str: str) -> Tag | None:
+def parse_dicom_tag(tag_str: str) -> Optional[BaseTag]:
     """Parses a string like '(0010,0010)' or 'PatientName' into a pydicom Tag object."""
     tag_str = tag_str.strip()
     # Check for (gggg,eeee) format
