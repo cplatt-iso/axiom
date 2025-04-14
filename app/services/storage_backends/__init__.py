@@ -1,14 +1,10 @@
 # app/services/storage_backends/__init__.py
 
 from typing import Dict, Any
-from .base_backend import BaseStorageBackend
+from .base_backend import BaseStorageBackend, StorageBackendError
 from .filesystem import FilesystemStorage
 from .dicom_cstore import CStoreStorage
 # from .gcs import GcsStorage # Import when implemented
-
-class StorageBackendError(Exception):
-    """Custom exception for storage backend errors."""
-    pass
 
 def get_storage_backend(config: Dict[str, Any]) -> BaseStorageBackend:
     """

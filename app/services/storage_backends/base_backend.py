@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, Dict
 from pydicom.dataset import Dataset # Type hint for modified dataset
 
+class StorageBackendError(Exception):
+    """Custom exception for storage backend errors."""
+    pass
+
 class BaseStorageBackend(ABC):
     """Abstract base class for storage backends."""
 
