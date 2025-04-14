@@ -53,7 +53,6 @@ class RuleSet(Base):
     def __repr__(self):
         return f"<RuleSet(id={self.id}, name='{self.name}', is_active={self.is_active})>"
 
-
 class Rule(Base):
     """
     An individual DICOM processing rule.
@@ -62,30 +61,28 @@ class Rule(Base):
     """
     __tablename__ = 'rules'
 
-    name: Mapped[str] = mapped_column(String(100)) # Name within ruleset might not be unique globally
+    name: Mapped[str] = mapped_column(String(100))
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
     priority: Mapped[int] = mapped_column(default=0, index=True, comment="Lower numbers execute first within a ruleset")
 
-    # Foreign Key to RuleSet
-    # Use Mapped[int], specify nullable=False explicitly if needed
     ruleset_id: Mapped[int] = mapped_column(ForeignKey('rule_sets.id', ondelete="CASCADE"), index=True)
 
-    # --- Core Rule Logic ---
-    # Use JSON type hint directly for JSON columns
-    # `Dict` for objects, `List` for arrays
-    # `default=dict/list` is fine, lambda sometimes needed for complex defaults
-    match_criteria: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    tag_modifications: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    destinations: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    # --- Core Rule Logic (Still JSON, but structure expected is List[Dict]) ---
+    match_criteria: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="List of criteria objects (implicit AND)"
+    )
+    tag_modifications: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="List of modification action objects"
+    )
+    destinations: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="List of storage destination objects"
+    )
 
     # Timestamps inherited from Base
 
-    # Relationship: Many Rules belong to one RuleSet
-    # Use Mapped["RuleSet"] (or Mapped[Optional["RuleSet"]] if FK nullable)
     ruleset: Mapped["RuleSet"] = relationship(
         back_populates="rules",
-        # init=False
     )
 
     def __repr__(self):
