@@ -33,28 +33,28 @@ logger = logging.getLogger(__name__)
 
 # --- Helper Functions ---
 
-# --- FIX Type Hint ---
-# Use Optional[Tag] which comes from `typing`
-def parse_dicom_tag(tag_str: str) -> Optional[Tag]:
-# --- End FIX Type Hint ---
+def parse_dicom_tag(tag_str: str) -> Tag | None:
     """Parses a string like '(0010,0010)' into a pydicom Tag object."""
+    # REMOVED THE FAULTY isinstance check that was here
     try:
-        # Check if tag_str is already a Tag object (defensive check)
-        if isinstance(tag_str, Tag):
-            return tag_str
-        parts = tag_str.strip("() ").split(',')
-        if len(parts) == 2:
-            return Tag(int(parts[0], 16), int(parts[1], 16))
-        else:
-            logger.warning(f"Could not parse non-standard tag string: {tag_str}")
-            return None
+        # Attempt to directly convert using pydicom's Tag constructor
+        tag = Tag(tag_str)
+        return tag
     except ValueError:
-        logger.warning(f"Could not parse tag string (ValueError): {tag_str}")
-        return None
-    except Exception as e:
+        # Handle cases Tag() constructor can't parse directly (e.g., lacks '()')
+        try:
+             parts = tag_str.strip("() ").split(',')
+             if len(parts) == 2:
+                  return Tag(int(parts[0], 16), int(parts[1], 16))
+             else:
+                  logger.warning(f"Could not parse tag string (wrong parts): {tag_str}")
+                  return None
+        except ValueError:
+             logger.warning(f"Could not parse tag string (ValueError): {tag_str}", exc_info=True) # Log traceback on error
+             return None
+    except Exception as e: # Catch any other unexpected errors during Tag creation
         logger.error(f"Unexpected error parsing tag string '{tag_str}': {e}", exc_info=True)
         return None
-
 
 def check_match(dataset: pydicom.Dataset, criteria: dict) -> bool:
     """
