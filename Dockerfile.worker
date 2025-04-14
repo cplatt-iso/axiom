@@ -1,0 +1,35 @@
+# Dockerfile.worker
+
+# Use an official Python runtime as a parent image
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV POETRY_NO_INTERACTION=1 \
+    POETRY_VIRTUALENVS_IN_PROJECT=false \
+    POETRY_VIRTUALENVS_CREATE=false \
+    PIP_NO_CACHE_DIR=off \
+    PIP_DISABLE_PIP_VERSION_CHECK=on
+
+# Set work directory
+WORKDIR /app
+
+# Copy requirements file
+COPY requirements.txt .
+
+# Install dependencies
+# Use cache mount for faster builds
+RUN --mount=type=cache,target=/root/.cache \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy project code
+# We need the full application context for Celery tasks
+COPY ./app /app/app
+
+# Command to run the Celery worker
+# Make sure 'app.worker.celery_app' points to your Celery app instance
+# Set concurrency level as needed
+CMD ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info", "-Q", "default", "-c", "4"]
+# Example: Run on specific queues:
+# CMD ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info", "-Q", "dicom_processing,notifications", "-c", "8"]

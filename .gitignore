@@ -1,0 +1,74 @@
+# Environment Variables
+.env
+.env.*
+!.env.example
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# Flycheck
+*.flycheck
+
+# VS Code
+.vscode/
+
+# Docker
+# Avoid committing potentially large volume data if stored locally
+postgres_data/
+rabbitmq_data/
+dicom_incoming/  # Consider if local test data should be committed
+dicom_processed/ # Consider if local test data should be committed
+dicom_errors/    # Consider if local test data should be committed
+
+# OS-specific files
+.DS_Store
+Thumbs.db

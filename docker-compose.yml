@@ -1,0 +1,107 @@
+# docker-compose.yml
+services:
+  db:
+    image: postgres:15-alpine # Use a specific version
+    container_name: dicom_processor_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dicom_processor_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-dicom_processor_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432" # Expose DB port to host (use .env or default)
+    healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dicom_processor_user} -d ${POSTGRES_DB:-dicom_processor_db}"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine # Use specific version with management UI
+    container_name: dicom_processor_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      # RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/} # Usually not needed unless changing vhost
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"   # AMQP port
+      - "15672:15672" # Management UI port (access via http://localhost:15672)
+    healthcheck:
+        test: ["CMD", "rabbitmqctl", "status"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq/
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dicom_processor_api
+    # Load environment variables from .env file for the container
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy # Wait for DB to be ready
+      rabbitmq:
+        condition: service_healthy # Wait for RabbitMQ to be ready
+    ports:
+      - "8001:80" # Map host port 8000 to container port 80 (where uvicorn runs)
+    volumes:
+      - ./app:/app/app # Mount local 'app' directory into container for live reload
+    # Override command for development to enable reload
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload"]
+    restart: unless-stopped
+
+  # Example worker service - scale this as needed
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dicom_processor_worker
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db: # Worker might need DB access too
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app # Mount code for consistency, though reload isn't typical for workers
+      # Mount DICOM data directories if using filesystem storage/input within docker
+      - dicom_incoming:/dicom_data/incoming
+      - dicom_processed:/dicom_data/processed
+    # The CMD from Dockerfile.worker is used unless overridden here
+    # command: ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info", "-c", "2"] # Example override
+    restart: unless-stopped
+
+  listener: # 
+    build:
+      context: .
+      dockerfile: Dockerfile.listener # Use the new Dockerfile
+    container_name: dicom_processor_listener
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq: # Needs rabbitmq to dispatch tasks
+        condition: service_healthy
+    ports:
+      # Map the host DICOM port to the container DICOM port
+      # Use the port defined in .env or default to 11112
+      - "${DICOM_SCP_PORT:-11112}:${DICOM_SCP_PORT:-11112}/tcp" # Specify TCP explicitly
+    volumes:
+      - ./app:/app/app # Mount code for consistency
+      - dicom_incoming:/dicom_data/incoming # Needs write access to the incoming volume
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  dicom_incoming:
+  dicom_processed:
+  dicom_errors:

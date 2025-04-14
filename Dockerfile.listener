@@ -1,0 +1,28 @@
+# Dockerfile.listener
+
+# Use an official Python runtime as a parent image
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV PIP_NO_CACHE_DIR=off \
+    PIP_DISABLE_PIP_VERSION_CHECK=on
+
+# Set work directory
+WORKDIR /app
+
+# Copy requirements file
+COPY requirements.txt .
+
+# Install dependencies
+# Use cache mount for faster builds
+RUN --mount=type=cache,target=/root/.cache \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy project code
+# We need the full application context for Celery tasks and config
+COPY ./app /app/app
+
+# Command to run the DICOM listener script
+CMD ["python", "-m", "app.services.network.dimse.server"]
