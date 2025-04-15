@@ -7,6 +7,7 @@ uvicorn[standard] # ASGI server
 # Settings Management
 pydantic
 pydantic-settings
+pydantic[email,timezone]
 
 # Database ORM & Driver
 sqlalchemy[asyncio] # Add asyncio extras for potential async DB operations later
@@ -33,6 +34,7 @@ celery[redis, librabbitmq] # Include extras for Redis result backend & efficient
 
 # Cloud Storage (Optional - Google Cloud initially)
 google-cloud-storage
+google-auth
 
 # Utilities
 python-dotenv # To load .env files for local dev (handled by pydantic-settings now, but good practice)
@@ -41,3 +43,10 @@ python-multipart # For form data/file uploads in FastAPI
 # Add other dependencies as needed (e.g., requests/httpx for API PUTs, security libraries)
 # celery[redis, librabbitmq] 
 celery[librabbitmq] # if no redis backend needed
+
+python-jose[cryptography]
+passlib[bcrypt]
+
+pika
+
+CacheControl

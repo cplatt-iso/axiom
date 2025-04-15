@@ -107,8 +107,8 @@ class Settings(BaseSettings):
     DEFAULT_STORAGE_BACKEND: str = "filesystem" # Options: filesystem, cstore, gcs
     FILESYSTEM_STORAGE_PATH: str = "/dicom_data/processed"
     CSTORE_DESTINATION_AE_TITLE: str = "REMOTE_PACS"
-    CSTORE_DESTINATION_HOST: str = "192.168.1.100"
-    CSTORE_DESTINATION_PORT: int = 104
+    CSTORE_DESTINATION_HOST: str = "192.168.88.115"
+    CSTORE_DESTINATION_PORT: int = 11113
     # Optional: GCS settings (only needed if gcs backend is used)
     GCS_BUCKET_NAME: Optional[str] = None
     GCS_PROJECT_ID: Optional[str] = None
@@ -122,6 +122,8 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     ALGORITHM: str = "HS256" # For JWT token signing
 
+    # --- Add Google Client ID ---
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
 
 # Instantiate the settings
 settings = Settings()

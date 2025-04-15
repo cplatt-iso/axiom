@@ -9,6 +9,7 @@
 #   from app.crud import ruleset
 
 from .crud_rule import ruleset, rule
+from . import crud_user
 
 # Add imports for other CRUD modules as they are created:
 # from .crud_user import user, role
