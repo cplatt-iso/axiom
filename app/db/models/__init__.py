@@ -10,3 +10,5 @@ from app.db.base import Base
 # Import models here to make them easily accessible via app.db.models
 from .user import User, Role, user_role_association
 from .rule import RuleSet, Rule, RuleSetExecutionMode
+
+from .api_key import ApiKey

@@ -1,4 +1,7 @@
 # app/core/security.py (New File)
+import secrets
+import string
+
 from datetime import datetime, timedelta, timezone
 from typing import Any, Union
 
@@ -6,6 +9,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext # Keep for potential future password use
 
 from app.core.config import settings
+
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -77,3 +81,26 @@ async def verify_google_token(token: str) -> dict | None:
     except Exception as e:
         print(f"Unexpected error verifying Google token: {e}")
         raise ValueError("Could not verify Google Token due to unexpected error.")
+
+
+# --- API Key Configuration ---
+API_KEY_PREFIX_LENGTH = 8 # Length of the non-sensitive prefix
+API_KEY_SECRET_LENGTH = 32 # Length of the random secret part
+API_KEY_CHARS = string.ascii_letters + string.digits # Characters allowed in the key
+
+# --- API Key Generation and Hashing ---
+def generate_api_key_string() -> tuple[str, str]:
+    """Generates a secure API key string (prefix + secret)."""
+    prefix = "".join(secrets.choice(API_KEY_CHARS) for _ in range(API_KEY_PREFIX_LENGTH))
+    secret = "".join(secrets.choice(API_KEY_CHARS) for _ in range(API_KEY_SECRET_LENGTH))
+    full_key = f"{prefix}_{secret}" # e.g., "AbCd1234_xxxxx..."
+    return prefix, full_key
+
+def get_api_key_hash(api_key: str) -> str:
+    """Hashes an API key using the same context as passwords."""
+    # Using the same context is fine, bcrypt is suitable for high-entropy secrets too
+    return pwd_context.hash(api_key)
+
+def verify_api_key(plain_api_key: str, hashed_api_key: str) -> bool:
+    """Verifies a plain API key against a stored hash."""
+    return pwd_context.verify(plain_api_key, hashed_api_key)

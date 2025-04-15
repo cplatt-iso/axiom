@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, SessionTransaction # Import SessionTransacti
 from sqlalchemy import select
 import logging # Import logging
 
-from app.db.models.user import User
+from app.db.models.user import User, Role
 from app.schemas.user import UserCreate
 from app.core.security import get_password_hash
 
@@ -41,6 +41,20 @@ def create_user_from_google(db: Session, *, google_info: dict) -> User:
         is_superuser=False,
         hashed_password=get_password_hash("!") # Use an unusable hash
     )
+
+    # --- Assign Default 'User' Role ---
+    default_role_name = "User"
+    default_role = db.query(Role).filter(Role.name == default_role_name).first()
+    if default_role:
+        logger.info(f"Assigning default role '{default_role_name}' to new user {email}")
+        db_user.roles.append(default_role)
+    else:
+        # This should ideally not happen if seeding works, but handle it
+        logger.error(f"Default role '{default_role_name}' not found in database. Cannot assign to new user.")
+        # Decide if this should prevent user creation or just log a warning
+        # raise ValueError(f"Default role '{default_role_name}' missing.")
+    # --- End Role Assignment ---
+
     db.add(db_user)
 
     try:
@@ -51,6 +65,7 @@ def create_user_from_google(db: Session, *, google_info: dict) -> User:
         logger.info(f"Successfully created user ID: {db_user.id}")
         # Log timestamps to verify they are loaded
         logger.debug(f"User timestamps after refresh - Created: {db_user.created_at}, Updated: {db_user.updated_at}")
+        logger.debug(f"User roles: {[role.name for role in db_user.roles]}")
         return db_user
     except Exception as e:
         logger.error(f"Error during user creation commit/refresh: {e}", exc_info=True)

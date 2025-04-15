@@ -10,6 +10,8 @@ from sqlalchemy.sql import func
 
 from app.db.base import Base
 
+from .api_key import ApiKey
+
 # Association Table for User <-> Role (Many-to-Many)
 user_role_association = Table(
     'user_role_association',
@@ -72,6 +74,11 @@ class User(Base):
         back_populates="users",
         lazy="selectin", # Eagerly load roles when loading a user
         # cascade="all, delete-orphan" # Consider cascade options carefully
+    )
+
+    api_keys: Mapped[List["ApiKey"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan" # Delete keys if user is deleted
     )
 
     # Relationships to other models if needed (e.g., track creator)

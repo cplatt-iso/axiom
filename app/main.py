@@ -3,11 +3,11 @@ import logging
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware # Ensure CORS is imported
 from sqlalchemy.orm import Session
-
 from app.core.config import settings
-# --- Corrected Import for get_db ---
 from app.db.session import get_db # Import get_db from its actual location
-# --- End Correction ---
+from app.api import deps
+from app.db import models
+from app import schemas
 from app.db.session import engine, try_connect_db # Import engine and try_connect_db
 from app.api.api_v1.api import api_router # Import the main V1 router
 
@@ -17,6 +17,38 @@ logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# --- Seed Default Roles --- #
+def seed_default_roles(db: Session):
+    """Checks for default roles and creates them if missing."""
+    logger = logging.getLogger(__name__)
+    default_roles = [
+        schemas.RoleCreate(name="Admin", description="Full administrative privileges"),
+        schemas.RoleCreate(name="User", description="Standard user privileges"),
+        # Add other default roles as needed (e.g., "Editor", "Viewer")
+    ]
+    roles_created_count = 0
+    for role_in in default_roles:
+        try:
+            existing_role = db.query(models.Role).filter(models.Role.name == role_in.name).first()
+            if not existing_role:
+                logger.info(f"Creating default role: '{role_in.name}'")
+                role = models.Role(**role_in.model_dump())
+                db.add(role)
+                roles_created_count += 1
+            # else: logger.debug(f"Default role '{role_in.name}' already exists.")
+        except Exception as e:
+            logger.error(f"Error creating role '{role_in.name}': {e}", exc_info=True)
+            # Decide if this should be fatal
+
+    if roles_created_count > 0:
+        try:
+            db.commit()
+            logger.info(f"Committed {roles_created_count} new default roles.")
+        except Exception as e:
+            logger.error(f"Error committing default roles: {e}", exc_info=True)
+            db.rollback()
+    else:
+        logger.info("Default roles already exist.")
 
 # --- Optional: Database Table Creation ---
 def create_tables():
@@ -30,6 +62,7 @@ def create_tables():
         logger.error(f"Error creating database tables: {e}", exc_info=True)
         # raise e # Decide if you want to halt startup on DB error
 
+
 # Uncomment/manage table creation as needed
 # if settings.DEBUG:
 #     logger.warning("Development mode: Creating database tables on startup if needed!")
@@ -42,10 +75,10 @@ app_version = getattr(settings, 'PROJECT_VERSION', '0.1.0')
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=f"{settings.API_V1_STR}/docs",
+    redoc_url=f"{settings.API_V1_STR}/redoc",
     version=app_version,
-    description="DICOM Tag Morphing and Routing Engine",
+    description="axiom flow api",
     debug=settings.DEBUG,
 )
 
@@ -109,15 +142,28 @@ async def health_check(db: Session = Depends(get_db)): # <-- Use get_db directly
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
-# --- Optional: Run test connection on startup ---
-# @app.on_event("startup")
-# async def startup_event():
-#     logger.info("Application starting up...")
-#     logger.info(f"CORS allowed origins: {settings.BACKEND_CORS_ORIGINS}")
-#     if settings.DEBUG:
-#         logger.info("Running startup database connection test...")
-#         if not try_connect_db(): # Make sure try_connect_db is imported if using
-#              logger.error("Startup database connection test FAILED.")
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Application starting up...")
+    logger.info(f"CORS allowed origins: {settings.BACKEND_CORS_ORIGINS}")
+
+    # --- Seed Roles on Startup ---
+    # Use a context manager for the session
+    logger.info("Attempting to seed default roles...")
+    db: Optional[Session] = None
+    try:
+        db = deps.SessionLocal() # Get a new session
+        seed_default_roles(db)
+    except Exception as e:
+        logger.error(f"Failed to seed roles during startup: {e}", exc_info=True)
+    finally:
+        if db:
+            db.close()
+    # --- End Seed Roles ---
+    if settings.DEBUG:
+        # ... (existing debug startup checks like try_connect_db) ...
+        pass
+
 
 
 @app.on_event("shutdown")

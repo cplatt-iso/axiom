@@ -28,3 +28,12 @@ from .token import (
     TokenResponse,
 )
 
+from .api_key import ( # Add this block
+    ApiKeyBase,
+    ApiKeyCreate,
+    ApiKeyCreateResponse,
+    ApiKeyUpdate,
+    ApiKey,
+    ApiKeyInDB,
+)
+
