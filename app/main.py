@@ -17,6 +17,9 @@ logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+run_environment = getattr(settings, 'ENVIRONMENT', 'development').lower()
+root_path_setting = settings.API_V1_STR if run_environment != "development" else ""
+
 # --- Seed Default Roles --- #
 def seed_default_roles(db: Session):
     """Checks for default roles and creates them if missing."""
@@ -80,6 +83,7 @@ app = FastAPI(
     version=app_version,
     description="axiom flow api",
     debug=settings.DEBUG,
+    root_path=root_path_setting
 )
 
 # --- Middleware ---

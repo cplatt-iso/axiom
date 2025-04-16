@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     )
 
     # --- Core Application Settings ---
-    PROJECT_NAME: str = "DICOM Processor"
+    PROJECT_NAME: str = "Axiom flow"
     API_V1_STR: str = "/api/v1"
     # Set DEBUG = False in production
     DEBUG: bool = False

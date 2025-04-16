@@ -55,7 +55,7 @@ services:
     volumes:
       - ./app:/app/app # Mount local 'app' directory into container for live reload
     # Override command for development to enable reload
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload", "--proxy-headers", "--forwarded-allow-ips='*'"]
     restart: unless-stopped
 
   # Example worker service - scale this as needed

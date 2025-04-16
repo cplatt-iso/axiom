@@ -30,6 +30,7 @@ class UserBase(BaseModel):
     is_superuser: bool = False
     full_name: Optional[str] = None
     google_id: Optional[str] = None # Add google_id here
+    picture: Optional[str] = None
 
 class UserCreate(UserBase):
     """Properties required to create a new user."""

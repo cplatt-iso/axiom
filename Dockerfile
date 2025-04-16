@@ -39,6 +39,7 @@ COPY ./app /app/app
 # Use 0.0.0.0 to allow connections from outside the container
 # --reload is useful for development, remove for production
 # Increase workers for production based on CPU cores
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5173", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--proxy-headers", "--forwarded-allow-ips='*'"]
+# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5173", "--reload"]
 # Production CMD example:
 # CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]

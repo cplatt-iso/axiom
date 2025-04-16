@@ -60,6 +60,7 @@ class User(Base):
 
     # Consolidated name field, often populated from Google login
     full_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    picture: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     # Hashed password for potential future local login strategy
     # Keep non-nullable, use an unusable hash for external auth users
