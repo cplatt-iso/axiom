@@ -1,14 +1,15 @@
 # app/db/models/rule.py
 import enum
-from typing import List, Optional, Dict, Any # Make sure Dict is imported
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from sqlalchemy import (
     String, Boolean, Text, ForeignKey, JSON, Enum as DBEnum, Integer
 )
-# NOTE: Removed Column import as it's not used here anymore
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+# Import dialects for specific JSON type if needed (though often handled by default)
+from sqlalchemy.dialects.postgresql import JSONB # Use JSONB for better indexing/performance
 
 from app.db.base import Base
 # from .user import User # Import User if relationship uncommented
@@ -46,7 +47,9 @@ class RuleSet(Base):
         back_populates="ruleset",
         cascade="all, delete-orphan",
         order_by="Rule.priority",
-        lazy="selectin",
+        lazy="selectin", # Consider changing to 'subquery' or 'joined' if performance dictates
+                         # especially if rules are always needed when loading a ruleset.
+                         # 'selectin' is good but can issue many queries if loading many rulesets.
     )
 
     def __repr__(self):
@@ -68,24 +71,44 @@ class Rule(Base):
 
     ruleset_id: Mapped[int] = mapped_column(ForeignKey('rule_sets.id', ondelete="CASCADE"), index=True)
 
-    # --- Core Rule Logic --- CORRECTED TYPES ---
-    # Should be Dict (object), not List[Dict]
+    # --- Core Rule Logic ---
+    # Using JSON/JSONB for flexible criteria, modifications, destinations
+    # Note: Pydantic schemas should handle validation of the structure within these JSON fields.
     match_criteria: Mapped[Dict[str, Any]] = mapped_column(
-        JSON, nullable=False, default=dict, comment="Criteria object (implicit AND)"
+        JSONB, # Use JSONB
+        nullable=False,
+        default={}, # Use empty dict for default
+        comment="Criteria object (structure defined/validated by Pydantic schema)"
     )
-    # Should be Dict (object), not List[Dict]
-    tag_modifications: Mapped[Dict[str, Any]] = mapped_column(
-        JSON, nullable=False, default=dict, comment="Modification action object"
+    tag_modifications: Mapped[List[Dict[str, Any]]] = mapped_column( # Changed from Dict to List
+        JSONB, # Use JSONB
+        nullable=False,
+        default=[], # Use empty list for default
+        comment="List of modification action objects (validated by Pydantic)"
     )
-    # Destinations remains List[Dict]
     destinations: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSON, nullable=False, default=list, comment="List of storage destination objects"
+        JSONB, # Use JSONB
+        nullable=False,
+        default=[], # Use empty list for default
+        comment="List of storage destination objects (validated by Pydantic)"
     )
+
+    # --- NEW FIELD ---
+    # Store as a list of strings within a JSONB column
+    applicable_sources: Mapped[Optional[List[str]]] = mapped_column(
+        JSONB,
+        nullable=True, # Rule applies to all sources if this is NULL or empty list
+        index=True, # Index if you anticipate querying rules by source often
+        comment="List of source identifiers (e.g., 'scp_listener_a', 'api_json'). Applies to all if null/empty."
+    )
+    # --- END NEW FIELD ---
+
 
     # Timestamps inherited from Base
 
     ruleset: Mapped["RuleSet"] = relationship(
         back_populates="rules",
+        lazy="joined" # Usually want the ruleset when querying a rule
     )
 
     def __repr__(self):

@@ -37,6 +37,22 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq/
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine # Use a specific alpine version
+    container_name: dicom_processor_redis
+    command: redis-server --save 60 1 --loglevel warning # Optional: Persistence & log level
+    volumes:
+      - redis_data:/data
+#    ports:
+      # Optional: Expose Redis port to host ONLY if needed for external debugging
+      # - "6379:6379"
+    healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 5s
+        timeout: 3s
+        retries: 5
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -50,6 +66,8 @@ services:
         condition: service_healthy # Wait for DB to be ready
       rabbitmq:
         condition: service_healthy # Wait for RabbitMQ to be ready
+      redis:
+        condition: service_healthy
     ports:
       - "8001:80" # Map host port 8000 to container port 80 (where uvicorn runs)
     volumes:
@@ -71,6 +89,8 @@ services:
         condition: service_healthy
       db: # Worker might need DB access too
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./app:/app/app # Mount code for consistency, though reload isn't typical for workers
       # Mount DICOM data directories if using filesystem storage/input within docker
@@ -90,6 +110,8 @@ services:
     depends_on:
       rabbitmq: # Needs rabbitmq to dispatch tasks
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       # Map the host DICOM port to the container DICOM port
       # Use the port defined in .env or default to 11112
@@ -105,3 +127,4 @@ volumes:
   dicom_incoming:
   dicom_processed:
   dicom_errors:
+  redis_data:
