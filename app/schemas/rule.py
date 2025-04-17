@@ -44,8 +44,9 @@ class MatchCriterion(BaseModel):
     @field_validator('tag')
     @classmethod
     def validate_tag_format(cls, v):
-        if not re.match(r"^\(\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)$", v):
-             raise ValueError("Tag must be in the format '(gggg,eeee)'")
+        # Allow format GGGG,EEEE without parentheses, allow optional whitespace around comma
+        if not re.match(r"^[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}$", v):
+             raise ValueError("Tag must be in the format 'GGGG,EEEE'")
         return v
 
     # Corrected model_validator signature for Pydantic v2
@@ -71,8 +72,9 @@ class TagModification(BaseModel):
     @field_validator('tag')
     @classmethod
     def validate_tag_format(cls, v):
-        if not re.match(r"^\(\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)$", v):
-             raise ValueError("Tag must be in the format '(gggg,eeee)'")
+        # Allow format GGGG,EEEE without parentheses, allow optional whitespace around comma
+        if not re.match(r"^[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}$", v):
+             raise ValueError("Tag must be in the format 'GGGG,EEEE'")
         return v
 
     @field_validator('vr')
