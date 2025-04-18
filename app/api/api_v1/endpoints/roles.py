@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get(
-    "/",
+    "",
     response_model=List[schemas.Role],
     summary="List all available roles",
     dependencies=[Depends(deps.get_current_active_user)] # Require login to see roles

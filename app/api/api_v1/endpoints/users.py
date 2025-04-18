@@ -31,7 +31,7 @@ def read_users_me(
 # --- Admin Protected Routes ---
 
 @router.get(
-    "/",
+    "",
     response_model=List[schemas.User],
     summary="List users (Admin only)",
     dependencies=[Depends(deps.require_role("Admin"))] # Require Admin role

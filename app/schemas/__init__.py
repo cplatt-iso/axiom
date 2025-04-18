@@ -1,3 +1,5 @@
+# app/schemas/__init__.py
+
 from .rule import (
     RuleBase,
     RuleCreate,
@@ -7,20 +9,24 @@ from .rule import (
     RuleSetCreate,
     RuleSetUpdate,
     RuleSet,
+    RuleSetSummary, # Add if defined and needed
     MatchCriterion,
-    TagModification,
+    TagModification, # Basic version, will change later
     StorageDestination,
+    MatchOperation, # Export enums too
+    ModifyAction,
+    RuleSetExecutionMode,
 )
 
 from .user import (
     UserBase,
-    UserCreate,
+    # UserCreate, # Maybe not needed if only Google Auth?
     UserUpdate,
     User,
-    UserInDB, # Import if needed internally
-    RoleBase,
-    RoleCreate,
-    Role,
+    # UserInDB, # Internal representation, maybe not needed for API surface
+    # RoleBase, # Often part of Role
+    RoleCreate, # Often part of Role
+    Role, # Export main Role schema
 )
 
 from .token import (
@@ -28,12 +34,21 @@ from .token import (
     TokenResponse,
 )
 
-from .api_key import ( # Add this block
+from .api_key import (
     ApiKeyBase,
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyUpdate,
     ApiKey,
-    ApiKeyInDB,
+    # ApiKeyInDB, # Internal representation
 )
 
+from .health import (
+    ComponentStatus,
+    HealthCheckResponse,
+)
+
+from .processing import (
+    JsonProcessRequest,
+    JsonProcessResponse,
+)
