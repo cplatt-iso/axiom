@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Optional, Any, List, Dict, Tuple, Union
 from datetime import date, time as dt_time, datetime
 from decimal import Decimal
+from pydantic import TypeAdapter
 
 import pydicom
 from pydicom.errors import InvalidDicomError
@@ -428,7 +429,9 @@ def process_dicom_instance(
                      if rule.tag_modifications and modified_ds is not None:
                           # Assuming rule.tag_modifications is list of dicts compatible with TagModification union
                           try:
-                              mod_schemas = [pydicom.serialization.pydantic_validate_json(TagModification, mod) for mod in rule.tag_modifications]
+                          #    mod_schemas = [pydicom.serialization.pydantic_validate_json(TagModification, mod) for mod in rule.tag_modifications]
+                            ta_tag_modification = TypeAdapter(TagModification) # Create adapter
+                            mod_schemas = [ta_tag_modification.validate_python(mod) for mod in rule.tag_modifications]
                           except Exception as val_err:
                                logger.error(f"Rule '{rule.name}': Failed to validate tag_modifications against schema: {val_err}. Skipping modifications.", exc_info=True)
                                mod_schemas = [] # Skip mods for this rule

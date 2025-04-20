@@ -1,5 +1,7 @@
 # requirements.txt
 
+requests
+
 # Core Web Framework
 fastapi
 uvicorn[standard] # ASGI server
@@ -51,3 +53,5 @@ pika
 
 CacheControl
 redis>=4.0.0,<5.0.0
+
+alembic

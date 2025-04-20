@@ -1,5 +1,6 @@
 # app/worker/celery_app.py
 from celery import Celery
+from celery.schedules import crontab # Import crontab or timedelta
 from app.core.config import settings
 
 # Initialize Celery
@@ -12,7 +13,8 @@ app = Celery(
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND, # Can be None if results aren't stored
     include=[
-        'app.worker.tasks' # List modules containing your tasks here
+        'app.worker.tasks', # List modules containing your tasks here
+        'app.worker.dicomweb_poller',
         ]
 )
 
@@ -38,14 +40,20 @@ app.conf.update(
     # task_default_routing_key = 'task.default',
 )
 
-
+app.conf.beat_schedule = {
+    'poll-all-dicomweb-sources-every-minute': { # Descriptive name
+        'task': 'poll_all_dicomweb_sources', # Name of the task in dicomweb_poller.py
+        'schedule': 60.0,  # Run every 60 seconds
+        # Alternatively, use crontab: 'schedule': crontab(minute='*/1'), # Every minute
+        # 'args': (), # Add arguments if the task takes any
+    },
 # Optional: Setup periodic tasks (Celery Beat) if needed later
 # app.conf.beat_schedule = {
 #     'cleanup-old-files-every-day': {
 #         'task': 'app.worker.tasks.cleanup_task',
 #         'schedule': crontab(hour=0, minute=0), # Runs daily at midnight
 #     },
-# }
+}
 
 
 if __name__ == '__main__':

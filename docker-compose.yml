@@ -72,8 +72,61 @@ services:
       - "8001:80" # Map host port 8000 to container port 80 (where uvicorn runs)
     volumes:
       - ./app:/app/app # Mount local 'app' directory into container for live reload
+      - ./alembic.ini:/app/alembic.ini     # <-- ADD: Mount alembic.ini to /app/
+      - ./alembic:/app/alembic             # <-- ADD: Mount alembic dir to /app/
     # Override command for development to enable reload
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload", "--proxy-headers", "--forwarded-allow-ips='*'"]
+    restart: unless-stopped
+
+  orthanc: # <--- ADD THIS NEW SERVICE
+    image: orthancteam/orthanc:24.3.4
+    container_name: orthanc
+    restart: unless-stopped
+    ports:
+      - "8042:8042" # Expose Orthanc's HTTP port (for Web UI & DICOMweb)
+      - "4242:4242" # Expose Orthanc's DICOM C-STORE port (for uploading data)
+    volumes:
+      - ./orthanc/config:/etc/orthanc # Mount local config directory
+      - orthanc_db:/var/lib/orthanc/db # Persistent storage for Orthanc data/db
+    environment:
+      # Set credentials Orthanc will use (adjust as needed)
+      ORTHANC_USERNAME: orthancuser
+      ORTHANC_PASSWORD: orthancpassword
+      VERBOSE_ENABLED: "true" # Enable verbose logging within Orthanc container
+      # Set default Orthanc Storage location (matches volume mount)
+      # ORTHANC__STORAGE_DIRECTORY: "/var/lib/orthanc/db"
+      # Enable PostgreSQL backend (Optional - Requires DB setup inside Orthanc)
+      # POSTGRES_HOST: "db" # Needs to talk to your 'db' service
+      # POSTGRES_PORT: "5432"
+      # POSTGRES_USER: "${ORTHANC_DB_USER:-orthanc_db_user}" # Use a separate DB user?
+      # POSTGRES_PASSWORD: "${ORTHANC_DB_PASSWORD:-changeme_orthanc_db}"
+      # POSTGRES_DATABASE: "${ORTHANC_DB_NAME:-orthanc_db}"
+      # ORTHANC__POSTGRESQL__ENABLE_STORAGE: "true" # Enable Postgres storage area
+      # ORTHANC__POSTGRESQL__ENABLE_INDEX: "true" # Enable Postgres index
+      # Leave PostgreSQL commented out for now to use default SQLite for simplicity
+    healthcheck:
+        test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8042/app/explorer.html"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker # Can use the same image as worker
+    container_name: dicom_processor_beat
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db: # Might need DB access if schedule stored in DB later
+         condition: service_healthy
+    # Command to start beat
+    command: ["celery", "-A", "app.worker.celery_app.app", "beat", "--loglevel=info"] # Example using DB scheduler
+    # OR use default scheduler: command: ["celery", "-A", "app.worker.celery_app.app", "beat", "--loglevel=info"]
     restart: unless-stopped
 
   # Example worker service - scale this as needed
@@ -128,3 +181,4 @@ volumes:
   dicom_processed:
   dicom_errors:
   redis_data:
+  orthanc_db:

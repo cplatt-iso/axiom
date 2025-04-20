@@ -233,3 +233,4 @@ dicom_errors/
 ehthumbs.db
 Thumbs.db
 venv/
+orthanc/

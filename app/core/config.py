@@ -1,12 +1,40 @@
 # app/core/config.py
 import os
-from typing import List, Optional, Union, Any
-from pydantic import AnyHttpUrl, PostgresDsn, field_validator, ValidationInfo
+import json # <--- Import json
+from typing import List, Optional, Union, Any, Dict # <--- Add Dict
+from pydantic import (
+    AnyHttpUrl, PostgresDsn, field_validator, ValidationInfo, BaseModel as PydanticBaseModel, # Import BaseModel
+    constr # Import constr for constrained strings
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 
 # Determine the base directory of the project
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+# --- Define Pydantic Models for DICOMweb Configuration ---
+
+class DicomWebSourceAuth(PydanticBaseModel):
+    """Authentication details for a DICOMweb source."""
+    type: str = 'none' # e.g., 'none', 'basic', 'bearer', 'apikey'
+    username: Optional[str] = None
+    password: Optional[str] = None # Store securely, consider secrets management
+    token: Optional[str] = None # For bearer tokens
+    header_name: Optional[str] = None # For apikey in header
+    header_value: Optional[str] = None # For apikey in header
+
+class DicomWebSourceConfig(PydanticBaseModel):
+    """Configuration for a single DICOMweb source poller."""
+    name: constr(strip_whitespace=True, min_length=1) # Unique name, acts as source_identifier
+    qido_url_prefix: AnyHttpUrl
+    wado_url_prefix: AnyHttpUrl
+    is_enabled: bool = True
+    polling_interval_seconds: int = 300 # Default: 5 minutes
+    qido_query_params: Dict[str, str] = {"Modality": "CT", "StudyDate": "-1"} # Example: CTs from yesterday, '-1' means yesterday
+    auth: DicomWebSourceAuth = DicomWebSourceAuth() # Default to no auth
+    request_headers: Optional[Dict[str, str]] = None # e.g., {"Accept": "application/dicom+json"}
+
+# --- Main Settings Class ---
 
 class Settings(BaseSettings):
     """
@@ -96,81 +124,127 @@ class Settings(BaseSettings):
 
     # --- Known Input Source Identifiers ---
     # Define the canonical identifiers for different ways data can enter the system.
-    # These will be used in the UI and for rule matching.
     # Default list defined here, can be overridden by ENV var (comma-separated)
+    # We will automatically add DICOMweb source names to this list later.
     KNOWN_INPUT_SOURCES: List[str] = [
         "dicom_scp_main", # Default identifier for the main C-STORE SCP
-        "api_json",       # Identifier for the upcoming JSON API endpoint
-        "dicomweb_stow",  # Identifier for the future DICOMweb STOW-RS input
+        "api_json",       # Identifier for the JSON API endpoint
         "filesystem_poll" # Identifier for a future filesystem polling input
+        # DICOMweb source names will be added dynamically
     ]
 
     @field_validator("KNOWN_INPUT_SOURCES", mode='before')
     @classmethod
     def assemble_known_sources(cls, v: Union[str, List[str]]) -> List[str]:
         """Allow defining known sources as a comma-separated string in ENV VARS."""
-        default_sources = [ # Define the default list locally
-            "dicom_scp_main", "api_json", "dicomweb_stow", "filesystem_poll"
-        ]
+        # Initial default list (without dynamic sources yet)
+        default_sources = ["dicom_scp_main", "api_json", "filesystem_poll"]
+        parsed_sources = []
         if isinstance(v, str) and not v.startswith("["):
-            # Parse from comma-separated string
-            sources = [i.strip() for i in v.split(",") if i.strip()]
-            return sources if sources else default_sources # Return parsed or default if empty
+            parsed_sources = [i.strip() for i in v.split(",") if i.strip()]
         elif isinstance(v, list):
-            # Use the list provided (e.g., from code default)
-             return v if v else default_sources # Return provided or default if empty
-        # Fallback to default if invalid type provided
-        return default_sources
+            parsed_sources = v # Use the list provided
+
+        # Return parsed sources if available, otherwise default
+        # We'll add DICOMweb sources in model_post_init
+        return parsed_sources if parsed_sources else default_sources
+
+
+    # --- DICOMweb Poller Configuration ---
+    # Can be overridden by setting DICOMWEB_SOURCES_JSON environment variable
+    # to a JSON string representing a list of DicomWebSourceConfig objects.
+    DICOMWEB_SOURCES_JSON: Optional[str] = None # Allow override via ENV
+    DICOMWEB_SOURCES: List[DicomWebSourceConfig] = [
+        # Example configuration (add more as needed, or override via ENV):
+        # DicomWebSourceConfig(
+        #     name="orthanc_local",
+        #     qido_url_prefix="http://localhost:8042/dicom-web",
+        #     wado_url_prefix="http://localhost:8042/dicom-web",
+        #     is_enabled=True,
+        #     polling_interval_seconds=60,
+        #     qido_query_params={"StudyDate": "-1"}, # Studies from yesterday
+        #     auth=DicomWebSourceAuth(type='basic', username='orthanc', password='changeme')
+        # ),
+        # DicomWebSourceConfig(
+        #     name="public_idc_cr",
+        #     qido_url_prefix="https://proxy.cancerimagingarchive.net/proxy/idc-external-016/dicomweb",
+        #     wado_url_prefix="https://proxy.cancerimagingarchive.net/proxy/idc-external-016/dicomweb",
+        #     is_enabled=False, # Disabled by default
+        #     polling_interval_seconds=3600,
+        #     qido_query_params={"Modality": "CR", "StudyDate": "20220101-20220105"}, # Example date range
+        #     auth=DicomWebSourceAuth(type='none')
+        # ),
+    ]
+
+    @field_validator('DICOMWEB_SOURCES', mode='before')
+    def assemble_dicomweb_sources(cls, v: Any, info: ValidationInfo) -> List[Dict[str, Any]]:
+        """Loads DICOMweb sources from JSON string if provided in environment."""
+        json_str = info.data.get('DICOMWEB_SOURCES_JSON')
+        sources = []
+        if json_str:
+            try:
+                sources = json.loads(json_str)
+                if not isinstance(sources, list):
+                    raise ValueError("DICOMWEB_SOURCES_JSON must be a JSON array.")
+                print(f"Loaded {len(sources)} DICOMweb sources from DICOMWEB_SOURCES_JSON environment variable.")
+                return sources # Use the JSON from ENV VAR if valid
+            except json.JSONDecodeError as e:
+                print(f"Error decoding DICOMWEB_SOURCES_JSON: {e}. Falling back to code default.")
+                return v # Fallback to default list defined in code
+            except ValueError as e:
+                print(f"Error validating DICOMWEB_SOURCES_JSON structure: {e}. Falling back to code default.")
+                return v # Fallback to default list defined in code
+        else:
+            # If JSON env var is not set, use the default list from code
+            print(f"Using default DICOMweb sources defined in code ({len(v)} sources).")
+            return v
+
 
     # --- Function to build derived settings after initialization ---
     def model_post_init(self, __context: Any) -> None:
         """Build derived settings and perform post-initialization validation."""
-        # Build Database URI if not provided directly
+        # Build Database URI
         if self.SQLALCHEMY_DATABASE_URI is None:
             try:
                 self.SQLALCHEMY_DATABASE_URI = str(PostgresDsn.build(
-                    scheme="postgresql+psycopg", # Use psycopg driver
-                    username=self.POSTGRES_USER,
-                    password=self.POSTGRES_PASSWORD,
-                    host=self.POSTGRES_SERVER,
-                    port=self.POSTGRES_PORT,
+                    scheme="postgresql+psycopg",
+                    username=self.POSTGRES_USER, password=self.POSTGRES_PASSWORD,
+                    host=self.POSTGRES_SERVER, port=self.POSTGRES_PORT,
                     path=f"{self.POSTGRES_DB or ''}",
                 ))
             except Exception as e:
                  print(f"Error building SQLAlchemy URI: {e}")
-                 # Decide how to handle this - raise error? Set to None?
-                 self.SQLALCHEMY_DATABASE_URI = None # Set to None if build fails
+                 self.SQLALCHEMY_DATABASE_URI = None
 
-        # Build Celery Broker URL if not provided directly
+        # Build Celery Broker URL
         if self.CELERY_BROKER_URL is None:
             try:
-                user = self.RABBITMQ_USER
-                password = self.RABBITMQ_PASSWORD
-                host = self.RABBITMQ_HOST
-                port = self.RABBITMQ_PORT
-                vhost = self.RABBITMQ_VHOST
-                vhost_part = "" if vhost == "/" else f"/{vhost.lstrip('/')}"
-                self.CELERY_BROKER_URL = f"amqp://{user}:{password}@{host}:{port}{vhost_part}"
+                user, pw = self.RABBITMQ_USER, self.RABBITMQ_PASSWORD
+                host, port = self.RABBITMQ_HOST, self.RABBITMQ_PORT
+                vhost_part = "" if self.RABBITMQ_VHOST == "/" else f"/{self.RABBITMQ_VHOST.lstrip('/')}"
+                self.CELERY_BROKER_URL = f"amqp://{user}:{pw}@{host}:{port}{vhost_part}"
             except Exception as e:
                  print(f"Error building Celery Broker URL: {e}")
                  self.CELERY_BROKER_URL = None
 
-        # Build Redis URL if not provided directly
+        # Build Redis URL
         if self.REDIS_URL is None:
-             try:
-                  self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
-             except Exception as e:
-                  print(f"Error building Redis URL: {e}")
-                  self.REDIS_URL = None
+             try: self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+             except Exception as e: print(f"Error building Redis URL: {e}"); self.REDIS_URL = None
+
 
         # --- Post-init Validation/Correction ---
-        # Ensure the default SCP source ID is actually in the known list AFTER initialization
-        if self.DEFAULT_SCP_SOURCE_ID not in self.KNOWN_INPUT_SOURCES:
-             print(f"Warning: DEFAULT_SCP_SOURCE_ID '{self.DEFAULT_SCP_SOURCE_ID}' was not in the initial KNOWN_INPUT_SOURCES list. Adding it.")
-             # Prepend it to ensure it's present
-             self.KNOWN_INPUT_SOURCES.insert(0, self.DEFAULT_SCP_SOURCE_ID)
-             # Remove duplicates if it happened to be added some other way
-             self.KNOWN_INPUT_SOURCES = sorted(list(set(self.KNOWN_INPUT_SOURCES)))
+
+        # Ensure known sources are unique and include defaults/DICOMweb
+        current_known_sources = set(self.KNOWN_INPUT_SOURCES)
+        # Add the default SCP source if missing
+        current_known_sources.add(self.DEFAULT_SCP_SOURCE_ID)
+        # Add names from configured DICOMweb sources
+        dicomweb_source_names = {src.name for src in self.DICOMWEB_SOURCES}
+        current_known_sources.update(dicomweb_source_names)
+        # Update the list, keeping it sorted
+        self.KNOWN_INPUT_SOURCES = sorted(list(current_known_sources))
+
 
 # Instantiate the settings
 settings = Settings()
@@ -187,13 +261,15 @@ except Exception as e:
 # Optional: Print key settings on startup (consider removing sensitive ones)
 print(f"--- Axiom Flow Configuration ---")
 print(f"DEBUG mode: {settings.DEBUG}")
-db_uri_display = '*** masked ***' if settings.SQLALCHEMY_DATABASE_URI else 'Not Set'
+db_uri_display = '***' if settings.POSTGRES_PASSWORD and settings.SQLALCHEMY_DATABASE_URI else settings.SQLALCHEMY_DATABASE_URI or 'Not Set'
 print(f"Database URI: {db_uri_display}")
-broker_url_display = '*** masked ***' if settings.CELERY_BROKER_URL else 'Not Set'
+broker_url_display = '***' if settings.RABBITMQ_PASSWORD and settings.CELERY_BROKER_URL else settings.CELERY_BROKER_URL or 'Not Set'
 print(f"Celery Broker URL: {broker_url_display}")
 print(f"Redis URL: {settings.REDIS_URL or 'Not Set'}")
 print(f"DICOM SCP AE Title: {settings.LISTENER_AE_TITLE} Port: {settings.LISTENER_PORT} Host: {settings.LISTENER_HOST}")
 print(f"DICOM SCP Default Source ID: {settings.DEFAULT_SCP_SOURCE_ID}")
 print(f"Incoming DICOM Path: {settings.DICOM_STORAGE_PATH}")
+# Print DICOMweb sources count/names (optional)
+print(f"Configured DICOMweb Sources ({len(settings.DICOMWEB_SOURCES)}): {', '.join([s.name for s in settings.DICOMWEB_SOURCES]) if settings.DICOMWEB_SOURCES else 'None'}")
 print(f"Known Input Sources: {settings.KNOWN_INPUT_SOURCES}")
 print(f"------------------------------")
