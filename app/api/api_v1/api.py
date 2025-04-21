@@ -10,7 +10,8 @@ from app.api.api_v1.endpoints import (
     users,
     roles,
     dashboard, # Assuming dashboard exists
-    system # <-- Import the new system router
+    system, # <-- Import the new system router
+    dicomweb,
 )
 
 api_router = APIRouter()
@@ -25,3 +26,4 @@ api_router.include_router(api_keys.router, prefix="/apikeys", tags=["API Keys"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(roles.router, prefix="/roles", tags=["Roles"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
+api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["dicomweb"])

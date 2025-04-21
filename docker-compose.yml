@@ -160,10 +160,14 @@ services:
     container_name: dicom_processor_listener
     env_file:
       - .env
+    environment:
+      - AXIOM_INSTANCE_ID=listener_main_${DICOM_SCP_PORT:-11112}
     depends_on:
       rabbitmq: # Needs rabbitmq to dispatch tasks
         condition: service_healthy
       redis:
+        condition: service_healthy
+      db:
         condition: service_healthy
     ports:
       # Map the host DICOM port to the container DICOM port

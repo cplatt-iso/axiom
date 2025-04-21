@@ -1,57 +1,75 @@
-# requirements.txt
-
-requests
-
-# Core Web Framework
-fastapi
-uvicorn[standard] # ASGI server
-
-# Settings Management
-pydantic
-pydantic-settings
-pydantic[email,timezone]
-
-# Database ORM & Driver
-sqlalchemy[asyncio] # Add asyncio extras for potential async DB operations later
-psycopg[binary] # PostgreSQL driver (binary version is easier)
-
-# DICOM
-pydicom
-pynetdicom
-
-# DICOM Compression Libraries
-pylibjpeg # For various JPEG types (Baseline, Extended, Lossless P14)
-pylibjpeg-rle # For RLE Lossless
-pillow # For JPEG 2000 support (used by pylibjpeg)
-# python-gdcm # Alternative, powerful C++ library (requires specific installation)
-# pydicom[jpeg_ls] # Or install pydicom with optional extras (might pull pylibjpeg/jpeg_ls)
-# Note: Check specific versions/compatibility if issues arise
-
-# To directly install jpeg_ls C library if needed (check pylibjpeg docs)
-# jpeg_ls # Usually handled via system packages or wheels now
-
-# Task Queue
-celery[redis, librabbitmq] # Include extras for Redis result backend & efficient RabbitMQ comms
-# flower # Optional: Celery monitoring UI
-
-# Cloud Storage (Optional - Google Cloud initially)
-google-cloud-storage
-google-auth
-
-# Utilities
-python-dotenv # To load .env files for local dev (handled by pydantic-settings now, but good practice)
-python-multipart # For form data/file uploads in FastAPI
-
-# Add other dependencies as needed (e.g., requests/httpx for API PUTs, security libraries)
-# celery[redis, librabbitmq] 
-celery[librabbitmq] # if no redis backend needed
-
-python-jose[cryptography]
-passlib[bcrypt]
-
-pika
-
-CacheControl
-redis>=4.0.0,<5.0.0
-
+amqp==5.3.1
+annotated-types==0.7.0
+anyio==4.9.0
+bcrypt==4.3.0
+billiard==4.2.1
+CacheControl==0.14.2
+cachetools==5.5.2
+celery==5.5.1
+certifi==2025.1.31
+cffi==1.17.1
+charset-normalizer==3.4.1
+click==8.1.8
+click-didyoumean==0.3.1
+click-plugins==1.1.1
+click-repl==0.3.0
+cryptography==44.0.2
+dnspython==2.7.0
+ecdsa==0.19.1
+email_validator==2.2.0
+fastapi==0.115.12
+google-api-core==2.24.2
+google-auth==2.39.0
+google-cloud-core==2.4.3
+google-cloud-storage==3.1.0
+google-crc32c==1.7.1
+google-resumable-media==2.7.2
+googleapis-common-protos==1.70.0
+greenlet==3.2.0
+h11==0.14.0
+httptools==0.6.4
+idna==3.10
+kombu==5.5.3
+msgpack==1.1.0
+numpy==2.2.4
+passlib==1.7.4
+pika==1.3.2
+pillow==11.2.1
+prompt_toolkit==3.0.51
+proto-plus==1.26.1
+protobuf==6.30.2
+psycopg==3.2.6
+psycopg-binary==3.2.6
+pyasn1==0.4.8
+pyasn1_modules==0.4.1
+pycparser==2.22
+pydantic==2.11.3
+pydantic-settings==2.8.1
+pydantic_core==2.33.1
+pydicom==2.4.4
+pylibjpeg==2.0.1
+pylibjpeg-rle==2.0.0
+pynetdicom==2.1.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.1.0
+python-jose==3.4.0
+python-multipart==0.0.20
+PyYAML==6.0.2
+redis==5.2.1
+requests==2.32.3
+rsa==4.9.1
+six==1.17.0
+sniffio==1.3.1
+SQLAlchemy==2.0.40
+starlette==0.46.2
+typing-inspection==0.4.0
+typing_extensions==4.13.2
+tzdata==2025.2
+urllib3==2.4.0
+uvicorn==0.34.1
+uvloop==0.21.0
+vine==5.1.0
+watchfiles==1.0.5
+wcwidth==0.2.13
+websockets==15.0.1
 alembic

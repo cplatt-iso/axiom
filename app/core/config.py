@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     # --- Celery Worker Settings ---
     CELERY_RESULT_BACKEND: Optional[str] = None
     CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    # --- Celery Task Retry Settings (NEW) ---
+    CELERY_TASK_MAX_RETRIES: int = 3        # Default max retries for tasks
+    CELERY_TASK_RETRY_DELAY: int = 60       # Default delay (seconds) before retrying
 
     # --- DICOM SCP (Receiver) Settings ---
     DICOM_SCP_AE_TITLE: str = "DICOM_PROCESSOR"
@@ -107,6 +110,16 @@ class Settings(BaseSettings):
     CSTORE_DESTINATION_PORT: int = 11113
     GCS_BUCKET_NAME: Optional[str] = None
     GCS_PROJECT_ID: Optional[str] = None
+
+    # --- Error Handling & Worker Behavior ---
+    DICOM_ERROR_PATH: str = "/dicom_data/errors"
+    DELETE_UNMATCHED_FILES: bool = False # Delete files if no rules match?
+    DELETE_ON_NO_DESTINATION: bool = False # Delete if rules match but no destinations?
+    DELETE_ON_SUCCESS: bool = True # Delete original file after all destinations succeed?
+    MOVE_TO_ERROR_ON_PARTIAL_FAILURE: bool = False # Move to error dir if some destinations fail?
+
+    # --- Temporary File Handling (NEW - Optional but recommended) ---
+    TEMP_DIR: Optional[str] = None # Base directory for temporary files (e.g., STOW), None uses system default
 
     # --- Security Settings ---
     SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
@@ -207,7 +220,7 @@ class Settings(BaseSettings):
         if self.SQLALCHEMY_DATABASE_URI is None:
             try:
                 self.SQLALCHEMY_DATABASE_URI = str(PostgresDsn.build(
-                    scheme="postgresql+psycopg",
+                    scheme="postgresql+psycopg", # Changed from psycopg2 for wider compatibility? Or keep psycopg2 if installed.
                     username=self.POSTGRES_USER, password=self.POSTGRES_PASSWORD,
                     host=self.POSTGRES_SERVER, port=self.POSTGRES_PORT,
                     path=f"{self.POSTGRES_DB or ''}",
@@ -227,11 +240,13 @@ class Settings(BaseSettings):
                  print(f"Error building Celery Broker URL: {e}")
                  self.CELERY_BROKER_URL = None
 
-        # Build Redis URL
+        # Build Redis URL (needed for Celery result backend if not set explicitly)
         if self.REDIS_URL is None:
              try: self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
              except Exception as e: print(f"Error building Redis URL: {e}"); self.REDIS_URL = None
-
+        # Build Celery Result Backend using Redis URL if not set directly
+        if self.CELERY_RESULT_BACKEND is None and self.REDIS_URL:
+            self.CELERY_RESULT_BACKEND = self.REDIS_URL
 
         # --- Post-init Validation/Correction ---
 
@@ -240,8 +255,16 @@ class Settings(BaseSettings):
         # Add the default SCP source if missing
         current_known_sources.add(self.DEFAULT_SCP_SOURCE_ID)
         # Add names from configured DICOMweb sources
-        dicomweb_source_names = {src.name for src in self.DICOMWEB_SOURCES}
-        current_known_sources.update(dicomweb_source_names)
+        # Note: Need to ensure DICOMWEB_SOURCES has been parsed into models here.
+        # The validator runs *before* model_post_init, so we work with the raw list here
+        # if loaded from JSON, or models if using the default.
+        if self.DICOMWEB_SOURCES:
+            if isinstance(self.DICOMWEB_SOURCES[0], DicomWebSourceConfig): # Check if already parsed
+                 dicomweb_source_names = {src.name for src in self.DICOMWEB_SOURCES}
+            else: # Assume it's still a list of dicts from JSON override
+                 dicomweb_source_names = {src.get('name') for src in self.DICOMWEB_SOURCES if src.get('name')}
+            current_known_sources.update(dicomweb_source_names)
+
         # Update the list, keeping it sorted
         self.KNOWN_INPUT_SOURCES = sorted(list(current_known_sources))
 
@@ -254,8 +277,15 @@ try:
     Path(settings.DICOM_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
     if settings.DEFAULT_STORAGE_BACKEND == 'filesystem' and settings.FILESYSTEM_STORAGE_PATH:
          Path(settings.FILESYSTEM_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
+    # Create error path too
+    if settings.DICOM_ERROR_PATH:
+        Path(settings.DICOM_ERROR_PATH).mkdir(parents=True, exist_ok=True)
+    # Create temp dir if specified
+    if settings.TEMP_DIR:
+        Path(settings.TEMP_DIR).mkdir(parents=True, exist_ok=True)
+
 except Exception as e:
-     print(f"Error creating storage directories: {e}")
+     print(f"Error creating storage/error/temp directories: {e}")
 
 
 # Optional: Print key settings on startup (consider removing sensitive ones)
@@ -265,11 +295,22 @@ db_uri_display = '***' if settings.POSTGRES_PASSWORD and settings.SQLALCHEMY_DAT
 print(f"Database URI: {db_uri_display}")
 broker_url_display = '***' if settings.RABBITMQ_PASSWORD and settings.CELERY_BROKER_URL else settings.CELERY_BROKER_URL or 'Not Set'
 print(f"Celery Broker URL: {broker_url_display}")
+print(f"Celery Result Backend: {settings.CELERY_RESULT_BACKEND or 'Not Set'}") # Use the derived value
 print(f"Redis URL: {settings.REDIS_URL or 'Not Set'}")
 print(f"DICOM SCP AE Title: {settings.LISTENER_AE_TITLE} Port: {settings.LISTENER_PORT} Host: {settings.LISTENER_HOST}")
 print(f"DICOM SCP Default Source ID: {settings.DEFAULT_SCP_SOURCE_ID}")
 print(f"Incoming DICOM Path: {settings.DICOM_STORAGE_PATH}")
+print(f"Error DICOM Path: {settings.DICOM_ERROR_PATH}")
+print(f"Temporary Files Path: {settings.TEMP_DIR or 'System Default'}")
 # Print DICOMweb sources count/names (optional)
-print(f"Configured DICOMweb Sources ({len(settings.DICOMWEB_SOURCES)}): {', '.join([s.name for s in settings.DICOMWEB_SOURCES]) if settings.DICOMWEB_SOURCES else 'None'}")
+# Correctly handle parsed models vs dicts after potential override
+dicomweb_names_to_print = []
+if settings.DICOMWEB_SOURCES:
+    if isinstance(settings.DICOMWEB_SOURCES[0], DicomWebSourceConfig):
+        dicomweb_names_to_print = [s.name for s in settings.DICOMWEB_SOURCES]
+    else: # Assume list of dicts
+        dicomweb_names_to_print = [s.get('name', '?') for s in settings.DICOMWEB_SOURCES]
+print(f"Configured DICOMweb Sources ({len(settings.DICOMWEB_SOURCES)}): {', '.join(dicomweb_names_to_print) if settings.DICOMWEB_SOURCES else 'None'}")
+
 print(f"Known Input Sources: {settings.KNOWN_INPUT_SOURCES}")
 print(f"------------------------------")
