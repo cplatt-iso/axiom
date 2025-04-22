@@ -11,9 +11,24 @@
 from .crud_rule import ruleset, rule
 from . import crud_user, crud_api_key
 from . import crud_role
-from .crud_dicomweb_source_state import dicomweb_state
+from .crud_dicomweb_source_state import dicomweb_state # For state updates
 from .crud_dimse_listener_state import crud_dimse_listener_state
+from .crud_dicomweb_source import dicomweb_source # <-- ADDED: For config CRUD
+
 # Add imports for other CRUD modules as they are created:
 # from .crud_user import user, role
 # from .crud_audit import audit_log
 # etc.
+
+# If you want to define what is exported when using 'from app.crud import *'
+# you can uncomment and populate __all__
+# __all__ = [
+#     "ruleset",
+#     "rule",
+#     "crud_user",
+#     "crud_api_key",
+#     "crud_role",
+#     "dicomweb_state",
+#     "crud_dimse_listener_state",
+#     "dicomweb_source", # <-- ADDED here too if using __all__
+# ]

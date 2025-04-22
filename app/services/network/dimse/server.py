@@ -3,90 +3,98 @@
 import logging
 import sys
 import time
-import socket # Import socket to get hostname
-import threading # Import threading
-import signal # Import signal for graceful shutdown
+import socket
+import threading
+import signal
 import os
 from pathlib import Path
-from datetime import datetime,timezone # Import datetime
+from datetime import datetime, timezone
 
-# --- Imports ---
-from pynetdicom import AE, StoragePresentationContexts, evt, ALL_TRANSFER_SYNTAXES
+# Third-party imports
+from pynetdicom import AE, StoragePresentationContexts, evt, ALL_TRANSFER_SYNTAXES, build_context
 from pynetdicom.sop_class import Verification
-# --- Removed Redis Import ---
-# import redis
+from pynetdicom.presentation import PresentationContext # Import for type hint if needed
+
+# Application imports
 from app.core.config import settings
 from app.services.network.dimse.handlers import handle_store, handle_echo
-
-# --- DB Imports (NEW) ---
 from app.db.session import SessionLocal
 from app.crud import crud_dimse_listener_state
-# --- End DB Imports ---
 
 # --- Logging Setup ---
+# Configure logging for this listener service
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("dicom_listener")
 logger.setLevel(logging.INFO if not settings.DEBUG else logging.DEBUG)
+
+# Configure pynetdicom's internal logger separately
+pynetdicom_logger = logging.getLogger('pynetdicom')
+pynetdicom_logger.setLevel(logging.INFO if settings.DEBUG else logging.WARNING) # INFO logs associations, WARNING is quieter
+
+# Add stream handlers if not already configured (e.g., by a central logging setup)
 if not logger.handlers:
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(log_formatter)
     logger.addHandler(stream_handler)
-pynetdicom_logger = logging.getLogger('pynetdicom')
-# Set pynetdicom log level (optional, INFO logs association details, WARNING is less verbose)
-pynetdicom_logger.setLevel(logging.INFO if settings.DEBUG else logging.WARNING)
 if not pynetdicom_logger.handlers:
     pynetdicom_stream_handler = logging.StreamHandler(sys.stdout)
     pynetdicom_stream_handler.setFormatter(log_formatter)
     pynetdicom_logger.addHandler(pynetdicom_stream_handler)
 
-
-# --- Configuration ---
-AE_TITLE = settings.LISTENER_AE_TITLE
-PORT = settings.LISTENER_PORT
-HOSTNAME = settings.LISTENER_HOST # Address to bind to (e.g., 0.0.0.0)
+# --- Configuration from Settings ---
+AE_TITLE = settings.DICOM_LISTENER_AET
+PORT = settings.DICOM_LISTENER_PORT
+HOSTNAME = settings.LISTENER_HOST # Address to bind to (e.g., 0.0.0.0 for all interfaces)
 INCOMING_DIR = Path(settings.DICOM_STORAGE_PATH)
-INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+INCOMING_DIR.mkdir(parents=True, exist_ok=True) # Ensure storage path exists
 
-# --- Listener State Config (NEW) ---
-LISTENER_ID = os.environ.get("AXIOM_INSTANCE_ID", "dimse_listener_unknown") # Use Fully Qualified Domain Name as default ID
-if LISTENER_ID == "dimse_listener_unknown":
-     logger.warning("Environment variable AXIOM_INSTANCE_ID not set! Using default ID. Multiple listeners might overwrite status.")
-HEARTBEAT_INTERVAL_SECONDS = 30 # How often to update DB heartbeat
+# --- Listener State Configuration ---
+# Unique ID for this listener instance, used for DB status tracking
+LISTENER_ID = os.environ.get("AXIOM_INSTANCE_ID", f"dimse_{socket.getfqdn()}_{PORT}")
+if "unknown" in LISTENER_ID or "localhost" in LISTENER_ID:
+     logger.warning(f"Using potentially non-unique listener ID: {LISTENER_ID}")
+     logger.warning("Set AXIOM_INSTANCE_ID environment variable for a stable unique ID if running multiple listeners.")
+HEARTBEAT_INTERVAL_SECONDS = 30 # Frequency (seconds) for updating DB status/heartbeat
 
-# --- Presentation Contexts Preparation ---
-# (storage_contexts and contexts setup remains the same)
+# --- Presentation Contexts ---
+# Define the transfer syntaxes this SCP will support for storage operations
 SUPPORTED_TRANSFER_SYNTAXES = [
+    '1.2.840.10008.1.2.1', # Explicit VR Little Endian (Preferred)
     '1.2.840.10008.1.2',   # Implicit VR Little Endian
-    '1.2.840.10008.1.2.1', # Explicit VR Little Endian
-    '1.2.840.10008.1.2.2', # Explicit VR Big Endian (less common)
-    # Add other commonly supported transfer syntaxes (JPEG, J2K, etc.) if needed
+    '1.2.840.10008.1.2.2', # Explicit VR Big Endian
     '1.2.840.10008.1.2.5', # RLE Lossless
     '1.2.840.10008.1.2.4.50', # JPEG Baseline
     '1.2.840.10008.1.2.4.70', # JPEG Lossless, Non-Hierarchical
     '1.2.840.10008.1.2.4.90', # JPEG 2000 Image Compression Lossless Only
     '1.2.840.10008.1.2.4.91', # JPEG 2000 Image Compression
 ]
-# Use default StoragePresentationContexts and add our transfer syntaxes
+# Build a list of supported presentation contexts using the default storage SOP classes
 contexts = []
-for context in StoragePresentationContexts:
-    # Create a new context object to avoid modifying the defaults globally
-    new_context = context # Or copy if needed: new_context = context.copy()
-    new_context.transfer_syntax = SUPPORTED_TRANSFER_SYNTAXES
+for default_context in StoragePresentationContexts: # Iterate through pynetdicom's default storage contexts
+    sop_class_uid = default_context.abstract_syntax # Get the SOP Class UID
+    # Create a new context for this SOP class with our supported transfer syntaxes
+    new_context = build_context(sop_class_uid, SUPPORTED_TRANSFER_SYNTAXES)
     contexts.append(new_context)
 
-# --- Event Handlers Mapping ---
-# (HANDLERS list remains the same, maybe add more logging)
+# --- Event Handlers ---
+# Helper to log association-related events
 def log_assoc_event(event, msg_prefix):
-    """Helper to log association events."""
+    """Logs details about an association event."""
     try:
-        remote_info = f"{event.assoc.requestor.ae_title} @ {event.assoc.requestor.address}:{event.assoc.requestor.port}"
-        logger.info(f"{msg_prefix}: {remote_info} (Assoc ID: {event.assoc.native_id})")
+        # Attempt to get detailed remote AE info
+        remote_ae = event.assoc.requestor.ae_title
+        remote_addr = event.assoc.requestor.address
+        remote_port = event.assoc.requestor.port
+        assoc_id = event.assoc.native_id
+        logger.info(f"{msg_prefix}: {remote_ae} @ {remote_addr}:{remote_port} (Assoc ID: {assoc_id})")
     except Exception:
-        logger.info(f"{msg_prefix}: {event.assoc}") # Fallback logging
+        # Fallback if association details aren't fully available
+        logger.info(f"{msg_prefix}: {event.assoc}")
 
+# Map pynetdicom event types to corresponding handler functions or logging callbacks
 HANDLERS = [
-    (evt.EVT_C_STORE, handle_store),
-    (evt.EVT_C_ECHO, handle_echo),
+    (evt.EVT_C_STORE, handle_store),        # Handle incoming C-STORE requests
+    (evt.EVT_C_ECHO, handle_echo),          # Handle incoming C-ECHO requests
     (evt.EVT_ACCEPTED, lambda event: log_assoc_event(event, "Association Accepted from")),
     (evt.EVT_ESTABLISHED, lambda event: log_assoc_event(event, "Association Established with")),
     (evt.EVT_REJECTED, lambda event: log_assoc_event(event, "Association Rejected by")),
@@ -95,191 +103,157 @@ HANDLERS = [
     (evt.EVT_CONN_CLOSE, lambda event: log_assoc_event(event, "Connection Closed by")),
 ]
 
-# --- Global variable to signal shutdown ---
-shutdown_event = threading.Event()
-server_thread_exception = None # Store exception from server thread if it fails
+# --- Global State for Shutdown Coordination ---
+shutdown_event = threading.Event() # Event to signal threads to stop
+server_thread_exception = None # To store any exception from the server thread
 
-# --- Server Thread Function ---
-def _run_server_thread(ae, address):
-    """Target function for the server thread."""
+# --- Server Thread Target Function ---
+def _run_server_thread(ae: AE, address: tuple):
+    """Target function run in a separate thread to host the pynetdicom server."""
     global server_thread_exception
     try:
-        # start_server is blocking when block=True (default)
-        logger.info("Server thread started, starting pynetdicom server...")
+        logger.info("Server thread started, starting pynetdicom AE server...")
+        # ae.start_server is blocking until ae.shutdown() is called or an error occurs
         ae.start_server(address, evt_handlers=HANDLERS, block=True)
         logger.info("pynetdicom server stopped normally in thread.")
     except Exception as e:
-        logger.error(f"Exception in server thread: {e}", exc_info=True)
-        server_thread_exception = e # Store exception for main thread
+        logger.error(f"Exception in pynetdicom server thread: {e}", exc_info=True)
+        server_thread_exception = e # Make exception available to main thread
     finally:
         logger.info("Server thread finished.")
-        # Signal main thread that server stopped (expectedly or unexpectedly)
-        shutdown_event.set() # Ensure main loop exits if server stops
+        # Ensure main thread knows the server stopped, regardless of reason
+        shutdown_event.set()
 
 
 # --- Main Execution Function ---
 def run_dimse_server():
-    """Configures and runs the DICOM DIMSE SCP server with DB heartbeat."""
+    """Configures and runs the DICOM DIMSE SCP server, including DB status updates."""
     global shutdown_event, server_thread_exception
-    db = None # Initialize db to None
+    db: Optional[Session] = None # Ensure db is defined in scope
 
-    # --- Initial DB Status Update (Keep as is, using update_listener_state which handles create) ---
+    # Attempt initial DB status update before starting the server
     try:
         db = SessionLocal()
         logger.info(f"Updating DIMSE listener state for '{LISTENER_ID}' to 'starting'...")
         crud_dimse_listener_state.update_listener_state(
-            db=db,
-            listener_id=LISTENER_ID,
-            status="starting",
+            db=db, listener_id=LISTENER_ID, status="starting",
             status_message="Listener process initializing.",
-            host=HOSTNAME,
-            port=PORT,
-            ae_title=AE_TITLE
+            host=HOSTNAME, port=PORT, ae_title=AE_TITLE
         )
-        db.commit()  # <-- COMMIT after initial update
+        db.commit()
         logger.info(f"Initial status 'starting' committed for '{LISTENER_ID}'.")
     except Exception as e:
         logger.error(f"Failed to set initial 'starting' status in DB for '{LISTENER_ID}': {e}", exc_info=True)
-        if db: db.rollback() # <-- ROLLBACK on error
-        # Continue starting server, but log the DB error
+        if db: db.rollback()
     finally:
-        if db: db.close() # Close session after initial update
+        if db: db.close()
 
-    # --- Configure AE ---
-    # (Keep AE configuration as is)
+    # Configure the Application Entity (AE)
     ae = AE(ae_title=AE_TITLE)
-    logger.info(f"Adding {len(contexts)} Storage contexts...")
-    for context in contexts:
-        ae.add_supported_context(context.abstract_syntax, transfer_syntax=context.transfer_syntax)
+    logger.info(f"Setting {len(contexts)} supported Storage presentation contexts...")
+    ae.supported_contexts = contexts # Assign the generated list
     logger.info("Adding Verification context (C-ECHO)...")
-    ae.add_supported_context(Verification)
+    ae.add_supported_context(Verification) # Add C-ECHO support
+
     logger.info(f"Starting DICOM DIMSE Listener Service:")
     logger.info(f"  Listener ID: {LISTENER_ID}")
     logger.info(f"  AE Title: {AE_TITLE}")
     logger.info(f"  Bind Address: {HOSTNAME}:{PORT}")
-    logger.info(f"  DB Heartbeat Enabled (Interval: {HEARTBEAT_INTERVAL_SECONDS}s)")
+    logger.info(f"  DB Heartbeat Interval: {HEARTBEAT_INTERVAL_SECONDS}s")
 
-    # --- Start Server Thread ---
-    # (Keep server thread start as is)
+    # Start the pynetdicom server in a background thread
     address = (HOSTNAME, PORT)
     server_thread = threading.Thread(target=_run_server_thread, args=(ae, address), daemon=True)
     server_thread.start()
     logger.info("Server thread launched.")
-    time.sleep(2) # Give thread a moment to start server and potentially error early
+    time.sleep(1) # Brief pause allows server thread to initialize/potentially fail early
 
-    # --- Main Loop for Heartbeat ---
-    last_heartbeat_update = time.time()
-    current_status = "running" # Assume running after successful start
-    status_message = "Listener active and accepting associations." # Default message
+    # Main loop: Monitor server thread health and send periodic DB heartbeats
+    last_heartbeat_update_time = time.monotonic() # Use monotonic clock for intervals
+    current_status = "running" # Initial assumption after successful start
+    status_message = "Listener active and accepting associations."
 
     try:
         while not shutdown_event.is_set():
-            # Check if server thread is still alive
+            # Check if server thread died unexpectedly
             if not server_thread.is_alive() and current_status == "running":
-                logger.error("Server thread terminated unexpectedly!")
+                logger.error("Pynetdicom server thread terminated unexpectedly!")
                 current_status = "error"
-                status_message = f"Server thread stopped unexpectedly. Error: {server_thread_exception or 'Unknown'}"
-                # Use current time for comparison below to force immediate DB update attempt
-                now = time.time()
-            else:
-                # Still running (or just detected error), proceed with potential heartbeat update
-                now = time.time()
+                error_details = f"Error: {server_thread_exception or 'Unknown Reason'}"
+                status_message = f"Server thread stopped unexpectedly. {error_details}"
+                # Force immediate DB update attempt below
 
-
-            # Periodic Heartbeat Update OR Immediate Update on Error
-            # Update if interval passed OR if status just changed to non-running
-            if (now - last_heartbeat_update >= HEARTBEAT_INTERVAL_SECONDS) or current_status != "running":
+            now_monotonic = time.monotonic()
+            # Update DB if heartbeat interval passed OR if status just changed to non-running
+            if (now_monotonic - last_heartbeat_update_time >= HEARTBEAT_INTERVAL_SECONDS) or current_status != "running":
                 db = None
                 try:
                     db = SessionLocal()
-                    # --- REVISED UPDATE LOGIC ---
-                    # 1. Get the existing record
-                    db_obj = crud_dimse_listener_state.get_listener_state(db=db, listener_id=LISTENER_ID)
-
-                    if db_obj:
-                        # 2. Update attributes directly
-                        db_obj.status = current_status
-                        # Only set status_message if not 'running' to avoid clearing error messages accidentally
-                        db_obj.status_message = status_message if current_status != "running" else None
-                        db_obj.last_heartbeat = datetime.now(timezone.utc) # Update heartbeat timestamp
-                        # Host/Port/AE Title likely don't change, no need to update unless desired
-
-                        # 3. Commit the session
-                        db.commit() # Commit the changes made to db_obj
-                        last_heartbeat_update = now # Update time only on successful commit
-                        logger.debug(f"DIMSE Listener DB status committed for '{LISTENER_ID}': '{current_status}'")
-                    else:
-                        # This case should ideally not happen after initial start, but log if it does
-                        logger.error(f"Listener state record not found for ID '{LISTENER_ID}' during heartbeat update. Attempting re-creation.")
-                        # Attempt to recreate the record using the update function (which handles create)
-                        crud_dimse_listener_state.update_listener_state(
-                             db=db, listener_id=LISTENER_ID, status=current_status,
-                             status_message=status_message if current_status != "running" else None,
-                             host=HOSTNAME, port=PORT, ae_title=AE_TITLE
-                        )
-                        db.commit() # Commit the recreation attempt
-                        last_heartbeat_update = now
-                        logger.info(f"Recreated listener state record for '{LISTENER_ID}' with status '{current_status}'.")
-
-                    # --- END REVISED UPDATE LOGIC ---
-
+                    # Use the CRUD helper which handles create or update
+                    crud_dimse_listener_state.update_listener_state(
+                         db=db, listener_id=LISTENER_ID, status=current_status,
+                         # Only set specific message on error/stopped states
+                         status_message=status_message if current_status != "running" else "Listener active.",
+                         host=HOSTNAME, port=PORT, ae_title=AE_TITLE
+                    )
+                    db.commit()
+                    last_heartbeat_update_time = now_monotonic # Reset timer only on success
+                    logger.debug(f"DIMSE Listener DB status/heartbeat committed for '{LISTENER_ID}': '{current_status}'")
                 except Exception as e:
-                    logger.error(f"Failed to update/commit listener status in DB: {e}", exc_info=settings.DEBUG)
-                    if db: db.rollback() # Rollback on any exception during the block
+                    logger.error(f"Failed to update listener status/heartbeat in DB: {e}", exc_info=settings.DEBUG)
+                    if db: db.rollback()
                 finally:
-                    if db: db.close() # Always close the session
+                    if db: db.close()
 
-            # Exit loop immediately if status is no longer 'running'
-            if current_status != "running":
-                 break
+                # If status became non-running, exit the main loop after updating DB
+                if current_status != "running":
+                    break
 
-            # Sleep until next heartbeat check or shutdown signal
-            shutdown_event.wait(timeout=1.0) # Wait for 1 sec or until event is set
+            # Wait efficiently for the next check or shutdown signal
+            shutdown_event.wait(timeout=1.0)
 
     except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
         logger.info("Shutdown signal (KeyboardInterrupt) received.")
         current_status = "stopped"
         status_message = "Listener stopped by user signal."
-        shutdown_event.set() # Signal server thread to stop
+        shutdown_event.set() # Ensure shutdown event is set
 
-    except Exception as main_loop_exc: # Catch unexpected errors in main loop
+    except Exception as main_loop_exc:
+         # Catch any other unexpected errors in this monitoring loop
          logger.error(f"Unexpected error in main listener loop: {main_loop_exc}", exc_info=True)
          current_status = "error"
-         status_message = f"Main loop failed: {main_loop_exc}"
-         shutdown_event.set() # Attempt graceful shutdown
+         status_message = f"Main loop failed unexpectedly: {main_loop_exc}"
+         shutdown_event.set() # Trigger shutdown on unexpected main loop failure
 
     finally:
+        # Final actions before the process exits
         logger.info(f"Initiating final shutdown sequence (final status: '{current_status}')...")
 
-        # --- Final DB Status Update (using revised fetch-update-commit logic) ---
+        # Attempt one last DB status update
         db = None
         try:
             db = SessionLocal()
-            # 1. Get the existing record
-            db_obj = crud_dimse_listener_state.get_listener_state(db=db, listener_id=LISTENER_ID)
-            if db_obj:
-                # 2. Update attributes
-                db_obj.status = current_status
-                db_obj.status_message = status_message # Set final message
-                db_obj.last_heartbeat = datetime.now(timezone.utc) # Update heartbeat one last time
-                # 3. Commit
-                db.commit()
-                logger.info(f"Final DIMSE listener status update committed for '{LISTENER_ID}'.")
-            else:
-                # Log if record couldn't be found for final update
-                logger.warning(f"Could not find listener state record for '{LISTENER_ID}' during final shutdown update.")
-
+            crud_dimse_listener_state.update_listener_state(
+                db=db, listener_id=LISTENER_ID, status=current_status,
+                status_message=status_message # Record the final reason
+            )
+            db.commit()
+            logger.info(f"Final DIMSE listener status update committed for '{LISTENER_ID}'.")
         except Exception as e:
             logger.error(f"Failed to set final status '{current_status}' in DB: {e}", exc_info=True)
             if db: db.rollback()
         finally:
             if db: db.close()
 
-        # --- Shutdown pynetdicom Server ---
+        # Explicitly tell the pynetdicom server to stop accepting connections
+        ae.shutdown()
+
+        # Wait for the server thread to complete its shutdown
         logger.info("Waiting for server thread to finish...")
-        server_thread.join(timeout=10) # Wait for thread to exit
+        server_thread.join(timeout=10) # Give it time to exit
         if server_thread.is_alive():
-             logger.warning("Server thread did not exit cleanly after 10 seconds.")
+             logger.warning("Server thread did not exit cleanly within timeout.")
         else:
              logger.info("Server thread joined successfully.")
 
@@ -287,14 +261,18 @@ def run_dimse_server():
 
 # --- Signal Handler ---
 def handle_signal(signum, frame):
-    """Handle termination signals gracefully."""
-    logger.warning(f"Received signal {signum}. Triggering graceful shutdown...")
+    """Callback function to handle OS signals for graceful shutdown."""
+    signal_name = signal.Signals(signum).name
+    logger.warning(f"Received signal {signal_name} ({signum}). Triggering graceful shutdown...")
+    # Set the event to break the main loop and signal the server thread
     shutdown_event.set()
 
-# Register signal handlers for SIGINT (Ctrl+C) and SIGTERM (kill/docker stop)
-signal.signal(signal.SIGINT, handle_signal)
-signal.signal(signal.SIGTERM, handle_signal)
+# Register handlers for common termination signals
+signal.signal(signal.SIGINT, handle_signal)  # Ctrl+C
+signal.signal(signal.SIGTERM, handle_signal) # kill, docker stop
 
-# --- Run Main Function ---
+# --- Script Entry Point ---
 if __name__ == "__main__":
+    # Allows running the listener directly, e.g., python -m app.services.network.dimse.server
+    logger.info("Starting DICOM Listener Service directly...")
     run_dimse_server()

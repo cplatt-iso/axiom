@@ -2,7 +2,8 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional # Import Optional
+
 from pydicom.dataset import Dataset # Type hint for modified dataset
 
 class StorageBackendError(Exception):
@@ -28,13 +29,23 @@ class BaseStorageBackend(ABC):
         pass
 
     @abstractmethod
-    def store(self, modified_ds: Dataset, original_filepath: Path) -> Any:
+    def store(
+        self,
+        modified_ds: Dataset,
+        original_filepath: Optional[Path] = None, # Allow None
+        filename_context: Optional[str] = None, # Allow None
+        source_identifier: Optional[str] = None, # Add source_identifier
+        **kwargs: Any # Accept other potential future arguments
+        ) -> Any:
         """
         Store the modified DICOM dataset.
 
         Args:
             modified_ds: The pydicom Dataset object after modifications.
-            original_filepath: The path to the original file (useful for naming or context).
+            original_filepath: The path to the original file (if applicable).
+            filename_context: A context string for deriving the filename (e.g., SOPInstanceUID).
+            source_identifier: The identifier of the source system providing the data.
+            **kwargs: For forward compatibility.
 
         Returns:
             Implementation-specific result, e.g., destination path, True/False, API response.
