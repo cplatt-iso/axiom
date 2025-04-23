@@ -84,7 +84,7 @@ class CRUDDimseListenerState:
         """
         # Attempt to get the existing record for this listener ID
         db_obj = self.get_listener_state(db, listener_id=listener_id)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(timezone.utc) # Still needed for created_at
 
         if db_obj:
             # Update existing record
@@ -97,7 +97,11 @@ class CRUDDimseListenerState:
             if host is not None: db_obj.host = host
             if port is not None: db_obj.port = port
             if ae_title is not None: db_obj.ae_title = ae_title
-            db_obj.last_heartbeat = now_utc # Always update heartbeat on state change/update
+            # --- REMOVE MANUAL HEARTBEAT UPDATE ---
+            # db_obj.last_heartbeat = now_utc # REMOVE THIS LINE - rely on onupdate=func.now()
+            # --- END REMOVE ---
+            db.add(db_obj) # Ensure object is marked dirty
+            db.flush() # Flush to potentially trigger onupdate before refresh
         else:
             # Create new record if it doesn't exist
             logger.info(f"Creating new DIMSE listener state for '{listener_id}': status='{status}'")
@@ -108,11 +112,12 @@ class CRUDDimseListenerState:
                 host=host,
                 port=port,
                 ae_title=ae_title,
-                last_heartbeat=now_utc,
-                created_at=now_utc # Set creation time for new records
+                # Let server_default handle created_at and initial last_heartbeat
+                # last_heartbeat=now_utc, # Let server_default handle initial
+                # created_at=now_utc # Let server_default handle
             )
             db.add(db_obj)
-            db.flush() # Flush to get the object ready in the session, potentially assign defaults
+            db.flush() # Flush to get the object ready in the session, assign defaults
 
         # Refresh the object to get the latest state from the DB after flush/commit
         # Note: Commit must happen outside this function.
@@ -121,7 +126,8 @@ class CRUDDimseListenerState:
 
     def update_listener_heartbeat(self, db: Session, *, listener_id: str) -> Optional[models.DimseListenerState]:
         """
-        Specifically updates only the 'last_heartbeat' timestamp for a listener.
+        Specifically updates only the 'last_heartbeat' timestamp for a listener
+        using a direct SQL UPDATE for reliability with onupdate triggers.
         Useful for periodic updates when the status hasn't changed.
         Requires the caller to commit the transaction.
 
@@ -130,18 +136,32 @@ class CRUDDimseListenerState:
             listener_id: The unique ID of the listener.
 
         Returns:
-            The updated DimseListenerState model instance if found, otherwise None.
+            The potentially updated DimseListenerState model instance if found (state might be stale until commit), otherwise None.
         """
-        db_obj = self.get_listener_state(db, listener_id=listener_id)
-        if db_obj:
-            logger.debug(f"Updating DIMSE listener heartbeat for '{listener_id}'")
-            db_obj.last_heartbeat = datetime.now(timezone.utc)
-            db.flush() # Ensure change is ready to be committed
-            db.refresh(db_obj)
-            return db_obj
-        else:
+        logger.debug(f"Updating DIMSE listener heartbeat for '{listener_id}' using direct SQL UPDATE.")
+        # --- USE DIRECT SQL UPDATE ---
+        from sqlalchemy import update as sql_update, func # Import func for now()
+
+        stmt = (
+            sql_update(models.DimseListenerState)
+            .where(models.DimseListenerState.listener_id == listener_id)
+            .values(last_heartbeat=func.now()) # Use database's NOW() function
+            .execution_options(synchronize_session=False) # Don't sync session immediately
+        )
+        result = db.execute(stmt)
+
+        if result.rowcount == 0:
             logger.warning(f"Cannot update heartbeat for non-existent listener_id: '{listener_id}'")
             return None
+        else:
+            # Don't flush/refresh here as it might not reflect the DB state until commit
+            # Return the existing object from the session, but acknowledge it might be slightly stale
+            # Or, we could just return True/False indicating if the UPDATE statement affected rows.
+            # Let's return the object from the session as it might be useful, but caller beware of staleness pre-commit.
+            # Fetching it again would be safest post-commit by the caller.
+            db_obj = self.get_listener_state(db, listener_id=listener_id) # Get possibly stale session object
+            return db_obj
+        # --- END DIRECT SQL UPDATE ---
 
 # Create a singleton instance of the CRUD class for easy import and use
 crud_dimse_listener_state = CRUDDimseListenerState()

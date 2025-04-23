@@ -7,19 +7,25 @@ import socket
 import threading
 import signal
 import os
+import re
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional
 
 # Third-party imports
 from pynetdicom import AE, StoragePresentationContexts, evt, ALL_TRANSFER_SYNTAXES, build_context
 from pynetdicom.sop_class import Verification
 from pynetdicom.presentation import PresentationContext # Import for type hint if needed
 
+# SQLAlchemy Core imports
+from sqlalchemy import select, update as sql_update, func
+
 # Application imports
 from app.core.config import settings
 from app.services.network.dimse.handlers import handle_store, handle_echo
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, Session # Import Session type
 from app.crud import crud_dimse_listener_state
+from app.db import models # Import models for the direct query check
 
 # --- Logging Setup ---
 # Configure logging for this listener service
@@ -129,21 +135,23 @@ def _run_server_thread(ae: AE, address: tuple):
 def run_dimse_server():
     """Configures and runs the DICOM DIMSE SCP server, including DB status updates."""
     global shutdown_event, server_thread_exception
-    db: Optional[Session] = None # Ensure db is defined in scope
+    db: Optional[Session] = None
 
     # Attempt initial DB status update before starting the server
+    initial_status = "starting"
+    initial_message = "Listener process initializing."
     try:
         db = SessionLocal()
-        logger.info(f"Updating DIMSE listener state for '{LISTENER_ID}' to 'starting'...")
+        logger.info(f"Updating DIMSE listener state for '{LISTENER_ID}' to '{initial_status}'...")
         crud_dimse_listener_state.update_listener_state(
-            db=db, listener_id=LISTENER_ID, status="starting",
-            status_message="Listener process initializing.",
+            db=db, listener_id=LISTENER_ID, status=initial_status,
+            status_message=initial_message,
             host=HOSTNAME, port=PORT, ae_title=AE_TITLE
         )
         db.commit()
-        logger.info(f"Initial status 'starting' committed for '{LISTENER_ID}'.")
+        logger.info(f"Initial status '{initial_status}' committed for '{LISTENER_ID}'.")
     except Exception as e:
-        logger.error(f"Failed to set initial 'starting' status in DB for '{LISTENER_ID}': {e}", exc_info=True)
+        logger.error(f"Failed to set initial '{initial_status}' status in DB for '{LISTENER_ID}': {e}", exc_info=True)
         if db: db.rollback()
     finally:
         if db: db.close()
@@ -151,9 +159,9 @@ def run_dimse_server():
     # Configure the Application Entity (AE)
     ae = AE(ae_title=AE_TITLE)
     logger.info(f"Setting {len(contexts)} supported Storage presentation contexts...")
-    ae.supported_contexts = contexts # Assign the generated list
+    ae.supported_contexts = contexts
     logger.info("Adding Verification context (C-ECHO)...")
-    ae.add_supported_context(Verification) # Add C-ECHO support
+    ae.add_supported_context(Verification)
 
     logger.info(f"Starting DICOM DIMSE Listener Service:")
     logger.info(f"  Listener ID: {LISTENER_ID}")
@@ -166,51 +174,96 @@ def run_dimse_server():
     server_thread = threading.Thread(target=_run_server_thread, args=(ae, address), daemon=True)
     server_thread.start()
     logger.info("Server thread launched.")
-    time.sleep(1) # Brief pause allows server thread to initialize/potentially fail early
+    time.sleep(1)
 
     # Main loop: Monitor server thread health and send periodic DB heartbeats
-    last_heartbeat_update_time = time.monotonic() # Use monotonic clock for intervals
-    current_status = "running" # Initial assumption after successful start
-    status_message = "Listener active and accepting associations."
+    last_heartbeat_update_time = time.monotonic()
+    current_status = initial_status # Start with the status we hopefully wrote initially
+    status_message = initial_message
+    first_successful_run_completed = False # Flag to track if we've updated to 'running' yet
 
     try:
         while not shutdown_event.is_set():
             # Check if server thread died unexpectedly
-            if not server_thread.is_alive() and current_status == "running":
+            if not server_thread.is_alive() and current_status != "error":
                 logger.error("Pynetdicom server thread terminated unexpectedly!")
                 current_status = "error"
                 error_details = f"Error: {server_thread_exception or 'Unknown Reason'}"
                 status_message = f"Server thread stopped unexpectedly. {error_details}"
-                # Force immediate DB update attempt below
 
             now_monotonic = time.monotonic()
-            # Update DB if heartbeat interval passed OR if status just changed to non-running
-            if (now_monotonic - last_heartbeat_update_time >= HEARTBEAT_INTERVAL_SECONDS) or current_status != "running":
+
+            # Determine if DB update is needed
+            should_update_db = False
+            if current_status == "error": # Always try to update if error occurred
+                 should_update_db = True
+            elif not first_successful_run_completed: # Always try to update until first success
+                 should_update_db = True
+            elif now_monotonic - last_heartbeat_update_time >= HEARTBEAT_INTERVAL_SECONDS: # Update on interval
+                 should_update_db = True
+
+            # Perform DB Update
+            if should_update_db:
                 db = None
                 try:
                     db = SessionLocal()
-                    # Use the CRUD helper which handles create or update
-                    crud_dimse_listener_state.update_listener_state(
-                         db=db, listener_id=LISTENER_ID, status=current_status,
-                         # Only set specific message on error/stopped states
-                         status_message=status_message if current_status != "running" else "Listener active.",
-                         host=HOSTNAME, port=PORT, ae_title=AE_TITLE
-                    )
-                    db.commit()
-                    last_heartbeat_update_time = now_monotonic # Reset timer only on success
-                    logger.debug(f"DIMSE Listener DB status/heartbeat committed for '{LISTENER_ID}': '{current_status}'")
-                except Exception as e:
-                    logger.error(f"Failed to update listener status/heartbeat in DB: {e}", exc_info=settings.DEBUG)
-                    if db: db.rollback()
-                finally:
-                    if db: db.close()
+                    update_committed = False
 
-                # If status became non-running, exit the main loop after updating DB
-                if current_status != "running":
+                    # Determine target status based on current state and thread health
+                    target_status = current_status
+                    target_message = status_message
+                    if current_status != "error" and current_status != "stopped": # If not already in terminal state
+                         if server_thread.is_alive():
+                              target_status = "running" # Assume running if thread is alive
+                              target_message = "Listener active and accepting associations."
+                         else: # Thread died but status wasn't 'error' yet
+                              target_status = "error"
+                              target_message = f"Server thread stopped unexpectedly. {server_thread_exception or 'Unknown Reason'}"
+
+                    logger.debug(f"DB Update Check: Current Internal Status='{current_status}', Target DB Status='{target_status}', Thread Alive={server_thread.is_alive()}, First Run Flag={first_successful_run_completed}")
+
+                    # Always use the full update method to ensure status consistency
+                    logger.debug(f"Attempting full state update for '{LISTENER_ID}' to target status '{target_status}'...")
+                    updated_obj = crud_dimse_listener_state.update_listener_state(
+                         db=db,
+                         listener_id=LISTENER_ID,
+                         status=target_status,
+                         status_message=target_message if target_status != "running" else "Listener active.", # Set specific message only if not running
+                         host=HOSTNAME,
+                         port=PORT,
+                         ae_title=AE_TITLE
+                    )
+
+                    db.commit() # Commit the state change
+                    update_committed = True
+                    current_status = target_status # Update internal status *after* successful commit
+                    status_message = target_message if target_status != "running" else "Listener active."
+
+                    # Set flag only AFTER successful commit of 'running' state
+                    if current_status == "running" and not first_successful_run_completed:
+                         first_successful_run_completed = True
+                         logger.info(f"Listener '{LISTENER_ID}' status successfully set to 'running' in DB.")
+
+                    last_heartbeat_update_time = now_monotonic # Reset timer
+                    logger.debug(f"DB transaction committed for '{LISTENER_ID}'. Status written: '{current_status}'.")
+
+                except Exception as e:
+                    logger.error(f"Failed DB transaction for listener status/heartbeat: {e}", exc_info=settings.DEBUG)
+                    if db:
+                         try: db.rollback()
+                         except Exception as rb_exc: logger.error(f"Error during rollback attempt: {rb_exc}")
+                finally:
+                    if db:
+                        try: db.close()
+                        except Exception as close_exc: logger.error(f"Error closing DB session: {close_exc}")
+
+                # Exit loop if status is terminal (error or stopped)
+                if current_status != "running" and current_status != "starting": # Also exit if still 'starting' after update attempt fails? No, let it retry.
+                    logger.info(f"Listener status is terminal ('{current_status}'), exiting main loop.")
                     break
 
             # Wait efficiently for the next check or shutdown signal
-            shutdown_event.wait(timeout=1.0)
+            shutdown_event.wait(timeout=1.0) # Check every second
 
     except KeyboardInterrupt:
         # Handle Ctrl+C gracefully
@@ -229,14 +282,12 @@ def run_dimse_server():
     finally:
         # Final actions before the process exits
         logger.info(f"Initiating final shutdown sequence (final status: '{current_status}')...")
-
-        # Attempt one last DB status update
         db = None
         try:
             db = SessionLocal()
             crud_dimse_listener_state.update_listener_state(
                 db=db, listener_id=LISTENER_ID, status=current_status,
-                status_message=status_message # Record the final reason
+                status_message=status_message
             )
             db.commit()
             logger.info(f"Final DIMSE listener status update committed for '{LISTENER_ID}'.")
@@ -246,16 +297,18 @@ def run_dimse_server():
         finally:
             if db: db.close()
 
-        # Explicitly tell the pynetdicom server to stop accepting connections
-        ae.shutdown()
+        if 'ae' in locals() and ae: # Check if ae exists
+            ae.shutdown()
 
-        # Wait for the server thread to complete its shutdown
-        logger.info("Waiting for server thread to finish...")
-        server_thread.join(timeout=10) # Give it time to exit
-        if server_thread.is_alive():
-             logger.warning("Server thread did not exit cleanly within timeout.")
+        if 'server_thread' in locals() and server_thread.is_alive(): # Check if thread exists and started
+            logger.info("Waiting for server thread to finish...")
+            server_thread.join(timeout=10) # Give it time to exit
+            if server_thread.is_alive():
+                 logger.warning("Server thread did not exit cleanly within timeout.")
+            else:
+                 logger.info("Server thread joined successfully.")
         else:
-             logger.info("Server thread joined successfully.")
+             logger.info("Server thread was not running or already finished.")
 
         logger.info("Listener service shut down complete.")
 
