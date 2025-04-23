@@ -9,10 +9,11 @@ from app.api.api_v1.endpoints import (
     api_keys,
     users,
     roles,
-    dashboard, # Assuming dashboard exists
+    dashboard,
     system,
     dicomweb,
-    config_dicomweb, # <-- Import the new DICOMweb config router
+    config_dicomweb,
+    config_dimse_listeners, 
 )
 
 api_router = APIRouter()
@@ -25,11 +26,17 @@ api_router.include_router(api_keys.router, prefix="/apikeys", tags=["API Keys"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(roles.router, prefix="/roles", tags=["Roles"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
-api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["DICOMweb"]) # Renamed tag slightly
-# --- Add the new DICOMweb config router ---
+api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["DICOMweb"])
+
+# Configuration Routers
 api_router.include_router(
     config_dicomweb.router,
-    prefix="/config/dicomweb-sources", # Define the specific prefix
-    tags=["Configuration - DICOMweb Sources"] # Use a descriptive tag
+    prefix="/config/dicomweb-sources",
+    tags=["Configuration - DICOMweb Sources"]
 )
-# --- End new router inclusion ---
+
+api_router.include_router(
+    config_dimse_listeners.router,
+    prefix="/config/dimse-listeners", # Define the specific prefix
+    tags=["Configuration - DIMSE Listeners"] # Use a descriptive tag
+)

@@ -1,87 +1,55 @@
 # alembic/env.py
-import os
-import sys
-from pathlib import Path # Use pathlib for robust path handling
-
+import os # Added import
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
-# from sqlalchemy import create_engine # Only needed if setting URL directly from settings
 
 from alembic import context
 
-# --- START Project Specific Setup ---
-
-# Add project root directory to Python path (assuming env.py is in project_root/alembic/)
-# The root is the parent directory of the 'alembic' directory
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-# Import Base from your application's model base
-# Ensure this path matches your project structure
-from app.db.base import Base
-
-# Import all your models here so Base.metadata knows about them
-# This relies on your models/__init__.py importing all necessary model files
-from app.db import models
-
-# Import settings to get DB URL details for interpolation in alembic.ini
+# --- ADDED: Import Settings ---
 from app.core.config import settings
-
-# --- END Project Specific Setup ---
-
+# --- END ADDED ---
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-# --- START Set .ini variables from Settings ---
-# Make database connection details from your .env/settings available
-# for interpolation in alembic.ini's sqlalchemy.url. This allows
-# alembic.ini to use generic placeholders like %(POSTGRES_USER)s
-# while the actual values come securely from your Settings object (loaded from .env).
-if settings.POSTGRES_USER:
-    config.set_main_option('POSTGRES_USER', settings.POSTGRES_USER)
-if settings.POSTGRES_PASSWORD:
-    # Be cautious committing this if the password isn't set via ENV VAR in production
-    config.set_main_option('POSTGRES_PASSWORD', settings.POSTGRES_PASSWORD)
-if settings.POSTGRES_DB:
-    config.set_main_option('POSTGRES_DB', settings.POSTGRES_DB)
-
-# Ensure the host is 'db' (the service name) when running inside docker
-# This overrides any host setting (like 'localhost') that might be in settings
-# specifically for Alembic running within the docker network.
-config.set_main_option('POSTGRES_HOST', 'db')
-
-# The port should be the internal PostgreSQL port (5432) used within the Docker network
-config.set_main_option('POSTGRES_PORT', str(settings.POSTGRES_PORT)) # Usually 5432
-
-# Optional: Set the sqlalchemy.url directly from settings if needed
-# if settings.SQLALCHEMY_DATABASE_URI:
-#     config.set_main_option('sqlalchemy.url', settings.SQLALCHEMY_DATABASE_URI)
-# else:
-#     print("Warning: SQLALCHEMY_DATABASE_URI not found in settings. Relying solely on alembic.ini interpolation.")
-
-# --- END Set .ini variables ---
-
-
 # Interpret the config file for Python logging.
-# Ensure this is done AFTER setting up sys.path if your logging config relies on app modules
+# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-# --- START Target Metadata Setup ---
-target_metadata = Base.metadata # Point Alembic to your Base's metadata
-# --- END Target Metadata Setup ---
+# --- ADDED: Import Base and models ---
+from app.db.base import Base
+# Import your models here so Alembic can see them
+# This relies on app/db/models/__init__.py importing all model classes
+from app.db import models # noqa F401 - Imports __init__, which imports all models
+target_metadata = Base.metadata
+# --- END ADDED ---
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
+def get_url():
+    """Builds the database URL from settings."""
+    # Ensure settings are loaded
+    db_uri = settings.SQLALCHEMY_DATABASE_URI
+    if db_uri:
+        return str(db_uri) # Convert Pydantic DSN type to string
+    else:
+         # Fallback or error if URI isn't constructed in settings
+         # This part should ideally not be reached if settings are correct
+         user = os.getenv("POSTGRES_USER", "dicom_processor_user")
+         password = os.getenv("POSTGRES_PASSWORD", "changeme") # Fallback password
+         server = os.getenv("POSTGRES_SERVER", "db")
+         port = os.getenv("POSTGRES_PORT", "5432")
+         db = os.getenv("POSTGRES_DB", "dicom_processor_db")
+         return f"postgresql+psycopg://{user}:{password}@{server}:{port}/{db}"
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
@@ -95,18 +63,31 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    # Get the URL interpolated from alembic.ini using the options we set above
-    url = config.get_main_option("sqlalchemy.url")
+    # --- UPDATED: Use get_url() ---
+    # url = config.get_main_option("sqlalchemy.url")
+    url = get_url()
+    # --- END UPDATED ---
     context.configure(
         url=url,
-        target_metadata=target_metadata, # Use the imported Base.metadata
+        target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+         # Add naming convention for offline mode too
+        compare_type=True, # Compare column types
+        render_as_batch=True, # Enable batch mode for SQLite compatibility if needed, generally safe
+        include_schemas=True, # Ensure schemas are considered if using PostgreSQL schemas
+        # Naming convention for constraints
+        naming_convention={
+            "ix": "ix_%(column_0_label)s",
+            "uq": "uq_%(table_name)s_%(column_0_name)s",
+            "ck": "ck_%(table_name)s_%(constraint_name)s",
+            "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+            "pk": "pk_%(table_name)s",
+        },
     )
 
     with context.begin_transaction():
         context.run_migrations()
-
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
@@ -115,22 +96,51 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # This reads connection info from alembic.ini, using the interpolated values
-    # config.get_section(config.config_main_option name) returns the [alembic] section
+    # --- MODIFIED: Build config from settings ---
+    # Use the get_url() function to build the URL consistently
+    configuration = config.get_section(config.config_ini_section, {})
+    configuration["sqlalchemy.url"] = get_url() # Set the URL from our function
+
+    # Example of setting other options from settings if needed, ensuring they are strings
+    # password_value = settings.POSTGRES_PASSWORD.get_secret_value() if hasattr(settings.POSTGRES_PASSWORD, 'get_secret_value') else str(settings.POSTGRES_PASSWORD)
+    # configuration['POSTGRES_PASSWORD'] = password_value # Example if needed directly in config
+
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}), # Use config_ini_section
-        prefix="sqlalchemy.", # Look for keys starting with 'sqlalchemy.'
+        configuration, # Use the modified configuration dict
+        prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    # --- END MODIFIED ---
 
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
-            target_metadata=target_metadata # Use the imported Base.metadata
+            target_metadata=target_metadata,
+            compare_type=True, # Compare column types
+            render_as_batch=True, # Enable batch mode for SQLite compatibility if needed, generally safe
+            include_schemas=True, # Ensure schemas are considered if using PostgreSQL schemas
+             # Naming convention for constraints
+            naming_convention={
+                "ix": "ix_%(column_0_label)s",
+                "uq": "uq_%(table_name)s_%(column_0_name)s",
+                "ck": "ck_%(table_name)s_%(constraint_name)s",
+                "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+                "pk": "pk_%(table_name)s",
+            },
         )
 
         with context.begin_transaction():
             context.run_migrations()
+
+# --- REMOVED problematic config.set_main_option calls ---
+# config.set_main_option('POSTGRES_USER', settings.POSTGRES_USER)
+# password_value = settings.POSTGRES_PASSWORD.get_secret_value() if hasattr(settings.POSTGRES_PASSWORD, 'get_secret_value') else str(settings.POSTGRES_PASSWORD)
+# config.set_main_option('POSTGRES_PASSWORD', password_value) # Pass the string value
+# config.set_main_option('POSTGRES_SERVER', settings.POSTGRES_SERVER)
+# config.set_main_option('POSTGRES_PORT', str(settings.POSTGRES_PORT)) # Ensure port is string
+# config.set_main_option('POSTGRES_DB', settings.POSTGRES_DB)
+# config.set_main_option("sqlalchemy.url", get_url())
+# --- END REMOVED ---
 
 
 if context.is_offline_mode():

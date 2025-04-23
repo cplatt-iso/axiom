@@ -72,3 +72,10 @@ from .dicomweb import (
     DicomWebSourceConfigRead,
     AuthType
 )
+
+from .dimse_listener_config import (
+    DimseListenerConfigBase,
+    DimseListenerConfigCreate,
+    DimseListenerConfigUpdate,
+    DimseListenerConfigRead,
+)

@@ -1,7 +1,7 @@
 # app/core/config.py
 import os
 import logging
-import json # Import json for parsing list strings if needed
+import json
 from typing import List, Optional, Union, Any, Dict
 from pydantic import (
     AnyHttpUrl, PostgresDsn, field_validator, ValidationInfo, BaseModel,
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # --- Security Settings ---
-    SECRET_KEY: SecretStr = SecretStr("09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7") # Use SecretStr
+    SECRET_KEY: SecretStr = SecretStr("09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7 # 1 week
     ALGORITHM: str = "HS256"
 
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = "dicom_processor_user"
     POSTGRES_PASSWORD: SecretStr = SecretStr("changeme")
     POSTGRES_DB: str = "dicom_processor_db"
-    SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None # Built dynamically
+    SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None
 
     @field_validator("SQLALCHEMY_DATABASE_URI", mode='before')
     @classmethod
@@ -84,27 +84,28 @@ class Settings(BaseSettings):
     RABBITMQ_USER: str = "guest"
     RABBITMQ_PASSWORD: SecretStr = SecretStr("guest")
     RABBITMQ_VHOST: str = "/"
-    CELERY_BROKER_URL: Optional[str] = None # Built dynamically
+    CELERY_BROKER_URL: Optional[str] = None
 
-    # --- Redis Settings (Celery Result Backend / Cache) ---
+    # --- Redis Settings ---
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
-    # --- ADDED REDIS_URL back as Optional ---
-    REDIS_URL: Optional[str] = None # Allow explicit setting or build dynamically
-    # --- END ADDITION ---
-    CELERY_RESULT_BACKEND: Optional[str] = None # Built dynamically
+    REDIS_URL: Optional[str] = None
+    CELERY_RESULT_BACKEND: Optional[str] = None
 
     # --- Celery Task Settings ---
     CELERY_TASK_DEFAULT_QUEUE: str = "default"
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_DELAY: int = 60
 
-    # --- DICOM SCP (Receiver) Settings ---
-    DICOM_LISTENER_AET: str = "AXIOM_FLOW"
-    DICOM_LISTENER_PORT: int = 11112
+    # --- REMOVED Static DICOM Listener Settings ---
+    # DICOM_LISTENER_AET: str = "AXIOM_FLOW"
+    # DICOM_LISTENER_PORT: int = 11112
+    # DEFAULT_SCP_SOURCE_ID: str = "dicom_scp_main"
+    # --- END REMOVED ---
+    # Keep LISTENER_HOST as it determines the bind address (usually 0.0.0.0)
     LISTENER_HOST: str = "0.0.0.0"
-    DEFAULT_SCP_SOURCE_ID: str = "dicom_scp_main"
+
 
     # --- Storage & File Handling Settings ---
     DICOM_STORAGE_PATH: Path = Path("/dicom_data/incoming")
@@ -121,9 +122,9 @@ class Settings(BaseSettings):
     DICOMWEB_POLLER_QIDO_LIMIT: int = 5000
     DICOMWEB_POLLER_MAX_SOURCES: int = 100
 
-    # --- Static Known Input Sources (Base List) ---
+    # --- Static Known Input Sources (Base List - REMOVED SCP ID) ---
     KNOWN_INPUT_SOURCES: List[str] = [
-        DEFAULT_SCP_SOURCE_ID,
+        # DEFAULT_SCP_SOURCE_ID removed here
         "api_json",
         "stow_rs",
     ]
@@ -131,7 +132,10 @@ class Settings(BaseSettings):
     @field_validator("KNOWN_INPUT_SOURCES", mode='before')
     @classmethod
     def assemble_known_sources(cls, v: Union[str, List[str]], info: ValidationInfo) -> List[str]:
-        default_sources = info.data.get("KNOWN_INPUT_SOURCES", [])
+        # Keep default list empty now, rely on env var or static values above
+        default_sources: List[str] = [] # Start empty or use only static ones above
+        static_sources_in_code = ["api_json", "stow_rs"] # Define static ones here
+
         parsed_sources = []
         if isinstance(v, str):
             if v.startswith("["):
@@ -139,7 +143,9 @@ class Settings(BaseSettings):
                  except json.JSONDecodeError: raise ValueError("Invalid JSON string for KNOWN_INPUT_SOURCES")
             else: parsed_sources = [i.strip() for i in v.split(",") if i.strip()]
         elif isinstance(v, list): parsed_sources = v
-        combined = set(default_sources); combined.update(parsed_sources)
+
+        # Combine static code defaults with parsed env var values
+        combined = set(static_sources_in_code); combined.update(parsed_sources)
         return sorted(list(combined))
 
     # --- Dynamic URL Builders & Directory Creation ---
@@ -154,18 +160,16 @@ class Settings(BaseSettings):
                 self.CELERY_BROKER_URL = f"amqp://{user}:{pw}@{host}:{port}{vhost}"
             except Exception as e: logger.error(f"Error building Celery Broker URL: {e}")
 
-        # --- Build REDIS_URL if not set ---
+        # Build REDIS_URL if not set
         if self.REDIS_URL is None:
              try: self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
              except Exception as e: logger.error(f"Error building Redis URL: {e}")
-        # --- End Build REDIS_URL ---
 
         # Build Celery Result Backend URL (using Redis URL)
-        if self.CELERY_RESULT_BACKEND is None and self.REDIS_URL: # Check if REDIS_URL was successfully built
+        if self.CELERY_RESULT_BACKEND is None and self.REDIS_URL:
             self.CELERY_RESULT_BACKEND = self.REDIS_URL
         elif self.CELERY_RESULT_BACKEND is None:
              logger.error("Could not build Celery Result Backend URL (Redis URL missing/invalid)")
-
 
         # Ensure directories exist
         paths_to_create = [self.DICOM_STORAGE_PATH, self.DICOM_ERROR_PATH]
@@ -184,9 +188,11 @@ logger.info(f"DEBUG mode: {settings.DEBUG}")
 db_uri_display = str(settings.SQLALCHEMY_DATABASE_URI).split('@')[-1] if settings.SQLALCHEMY_DATABASE_URI else 'Not Set'
 logger.info(f"Database URI (host/db): {db_uri_display}")
 logger.info(f"Celery Result Backend: {settings.CELERY_RESULT_BACKEND or 'Not Set'}")
-logger.info(f"Redis URL: {settings.REDIS_URL or 'Not Set'}") # Log the Redis URL
-logger.info(f"DICOM SCP AE Title: {settings.DICOM_LISTENER_AET} Port: {settings.DICOM_LISTENER_PORT}")
+logger.info(f"Redis URL: {settings.REDIS_URL or 'Not Set'}")
+# --- REMOVED Static Listener Log ---
+# logger.info(f"DICOM SCP AE Title: {settings.DICOM_LISTENER_AET} Port: {settings.DICOM_LISTENER_PORT}")
+# --- END REMOVED ---
 logger.info(f"Incoming DICOM Path: {settings.DICOM_STORAGE_PATH}")
 logger.info(f"Error DICOM Path: {settings.DICOM_ERROR_PATH}")
-logger.info(f"Known Input Sources: {settings.KNOWN_INPUT_SOURCES}")
+logger.info(f"Known Input Sources (Static + Env): {settings.KNOWN_INPUT_SOURCES}")
 logger.info("---------------------------------------")

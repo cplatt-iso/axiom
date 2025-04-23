@@ -153,15 +153,15 @@ services:
     # command: ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info", "-c", "2"] # Example override
     restart: unless-stopped
 
-  listener: # 
+  listener:
     build:
       context: .
-      dockerfile: Dockerfile.listener # Use the new Dockerfile
-    container_name: dicom_processor_listener
+      dockerfile: Dockerfile.listener
+    container_name: dicom_processor_listener # Or maybe listener_storescp_1? Your choice.
     env_file:
       - .env
     environment:
-      - AXIOM_INSTANCE_ID=listener_main_${DICOM_SCP_PORT:-11112}
+      - AXIOM_INSTANCE_ID=storescp_1 # Unique ID for this instance
     depends_on:
       rabbitmq: # Needs rabbitmq to dispatch tasks
         condition: service_healthy
@@ -170,12 +170,38 @@ services:
       db:
         condition: service_healthy
     ports:
-      # Map the host DICOM port to the container DICOM port
-      # Use the port defined in .env or default to 11112
-      - "${DICOM_SCP_PORT:-11112}:${DICOM_SCP_PORT:-11112}/tcp" # Specify TCP explicitly
+      # Map HOST_PORT to the CONTAINER_PORT defined in the DB config for storescp_1
+      # Example: Expose container port 11112 (matching DB config) as host port 11112
+      - "11112:11112/tcp"
+      # Example: Expose container port 11112 as host port 10104
+      # - "10104:11112/tcp"
     volumes:
       - ./app:/app/app # Mount code for consistency
       - dicom_incoming:/dicom_data/incoming # Needs write access to the incoming volume
+    restart: unless-stopped
+
+  listener_2: # Define the second listener service
+    build:
+      context: .
+      dockerfile: Dockerfile.listener # Can use the same image
+    container_name: dicom_processor_listener_2 # Unique container name
+    env_file:
+      - .env # Use the same common environment variables
+    environment:
+      - AXIOM_INSTANCE_ID=storescp_2 # Unique instance ID matching DB record 2
+    depends_on: # Same dependencies
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      # Map host port 11113 to container port 11113 (matching DB config for storescp_2)
+      - "11113:11113/tcp"
+    volumes: # Same volumes
+      - ./app:/app/app
+      - dicom_incoming:/dicom_data/incoming
     restart: unless-stopped
 
 volumes:

@@ -14,6 +14,7 @@ from . import crud_role
 from .crud_dicomweb_source_state import dicomweb_state # For state updates
 from .crud_dimse_listener_state import crud_dimse_listener_state
 from .crud_dicomweb_source import dicomweb_source # <-- ADDED: For config CRUD
+from .crud_dimse_listener_config import crud_dimse_listener_config
 
 # Add imports for other CRUD modules as they are created:
 # from .crud_user import user, role
