@@ -2,13 +2,20 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Optional # Import Optional
+from typing import Any, Dict, Optional
 
-from pydicom.dataset import Dataset # Type hint for modified dataset
+from pydicom.dataset import Dataset
 
 class StorageBackendError(Exception):
     """Custom exception for storage backend errors."""
-    pass
+    # --- ADDED: Allow optional status_code ---
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        self.status_code = status_code
+        self.message = message
+        # Include status code in the default message if present
+        full_message = f"{message}{f' (Status Code: {status_code})' if status_code else ''}"
+        super().__init__(full_message)
+    # --- END ADDED ---
 
 class BaseStorageBackend(ABC):
     """Abstract base class for storage backends."""
@@ -32,10 +39,10 @@ class BaseStorageBackend(ABC):
     def store(
         self,
         modified_ds: Dataset,
-        original_filepath: Optional[Path] = None, # Allow None
-        filename_context: Optional[str] = None, # Allow None
-        source_identifier: Optional[str] = None, # Add source_identifier
-        **kwargs: Any # Accept other potential future arguments
+        original_filepath: Optional[Path] = None,
+        filename_context: Optional[str] = None,
+        source_identifier: Optional[str] = None,
+        **kwargs: Any
         ) -> Any:
         """
         Store the modified DICOM dataset.

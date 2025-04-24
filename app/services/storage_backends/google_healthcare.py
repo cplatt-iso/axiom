@@ -4,6 +4,7 @@ import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Optional
+import uuid # Import uuid for boundary
 
 import requests # Use requests for HTTP
 from pydicom.dataset import Dataset
@@ -119,34 +120,49 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
 
         logger.debug(f"Attempting STOW-RS to Google Healthcare DICOM Store: {self.stow_url} for {log_identifier}")
 
+        buffer = None # Define buffer outside try for finally block
         try:
             # Get a fresh auth token
             access_token = self._get_auth_token()
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                # Content-Type for multipart/related is set by requests library via 'files' param
-                "Accept": "application/dicom+json" # We expect a JSON response
-            }
 
             # Prepare DICOM data as bytes in memory
             buffer = BytesIO()
             dcmwrite(buffer, modified_ds, write_like_original=False)
             buffer.seek(0)
             dicom_bytes = buffer.getvalue()
-            buffer.close()
+            # buffer closed in finally
 
-            # Construct the multipart/related request using requests 'files' parameter
-            # The key ('dicomfile' here) doesn't usually matter for STOW-RS
-            # requests expects a tuple: (filename, file_content, content_type)
-            files = {
-                'dicomfile': ('dicom.dcm', dicom_bytes, 'application/dicom')
+            # --- Manually Construct Multipart Body and Headers ---
+            boundary = uuid.uuid4().hex
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/dicom+json",
+                # Set the correct Content-Type for STOW-RS
+                "Content-Type": f'multipart/related; type="application/dicom"; boundary="{boundary}"'
             }
 
-            # Make the POST request
+            # Construct the body parts
+            body = b""
+            # Boundary before the part
+            body += f"--{boundary}\r\n".encode('utf-8')
+            # Part headers
+            body += b"Content-Type: application/dicom\r\n"
+            # Content-ID or Content-Location are optional
+            # body += b"Content-Location: /some/path/dicom.dcm\r\n"
+            body += b"\r\n" # Blank line separating headers from payload
+            # Part payload
+            body += dicom_bytes
+            body += b"\r\n" # Newline after payload
+            # Final boundary
+            body += f"--{boundary}--\r\n".encode('utf-8')
+            # --- End Manual Construction ---
+
+            # Make the POST request with raw data and correct headers
             response = requests.post(
                 self.stow_url,
                 headers=headers,
-                files=files, # requests handles multipart/related encoding
+                data=body, # Send the manually constructed body
+                # files=files, # DO NOT use files parameter anymore
                 timeout=120 # Allow longer timeout for uploads
             )
 
@@ -173,7 +189,8 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
                 err_msg = (f"STOW-RS to Google Healthcare failed for {log_identifier}. "
                            f"Status: {response.status_code}, Details: {error_details[:500]}") # Limit error detail length
                 logger.error(err_msg)
-                raise StorageBackendError(err_msg, status_code=response.status_code)
+                # Pass only message string to exception
+                raise StorageBackendError(err_msg)
 
         except requests.exceptions.Timeout as e:
              err_msg = f"Network timeout during STOW-RS to Google Healthcare ({self.stow_url}) for {log_identifier}"
@@ -190,4 +207,8 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
             # Catch other potential errors (pydicom writing, etc.)
             err_msg = f"Unexpected error storing via STOW-RS to Google Healthcare for {log_identifier}"
             logger.error(f"{err_msg}: {e}", exc_info=True)
+            # Wrap the original exception message
             raise StorageBackendError(f"{err_msg}: {e}") from e
+        finally:
+            if buffer: # Check if buffer was assigned
+                buffer.close()
