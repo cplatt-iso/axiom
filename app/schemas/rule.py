@@ -1,16 +1,14 @@
 # app/schemas/rule.py
 
 from typing import List, Optional, Dict, Any, Union, Literal
-# Use model_validator from pydantic directly
-from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints
-# Import Annotated for discriminated union metadata
+from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict # Import ConfigDict
 from typing_extensions import Annotated
 import enum
 from datetime import datetime
 import re
-# No pydicom imports needed here anymore for VR validation
-# import pydicom.valuerep
-# from pydicom.datadict import _dictionary_vr
+# --- ADDED: Import StorageBackendConfigRead ---
+from .storage_backend_config import StorageBackendConfigRead # Import the Read schema
+# --- END ADDED ---
 
 # --- Enums ---
 class RuleSetExecutionMode(str, enum.Enum):
@@ -36,21 +34,17 @@ class MatchOperation(str, enum.Enum):
 class ModifyAction(str, enum.Enum):
     SET = "set"
     DELETE = "delete"
-    PREPEND = "prepend"   # New
-    SUFFIX = "suffix"     # New
-    REGEX_REPLACE = "regex_replace" # New
-    # ADD_ITEM = "add_item" # Future: For sequences
-    # REMOVE_ITEM = "remove_item" # Future: For sequences
+    PREPEND = "prepend"
+    SUFFIX = "suffix"
+    REGEX_REPLACE = "regex_replace"
 
 
 # --- Helper Validator Functions ---
 def _validate_tag_format_or_keyword(v: str) -> str:
     """Shared validator for DICOM tag format or keyword."""
     v = v.strip()
-    # Check for GGGG,EEEE format (flexible spaces, optional parens)
     if re.match(r"^\(?\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)?$", v):
         return v
-    # Basic check for keyword (alphanumeric, no spaces)
     if re.match(r"^[a-zA-Z0-9]+$", v):
         return v
     raise ValueError("Tag must be in 'GGGG,EEEE' format (or 'GGGG, EEEE') or a valid DICOM keyword")
@@ -59,13 +53,8 @@ def _validate_vr_format(v: Optional[str]) -> Optional[str]:
     """Shared validator for VR format (checks format only)."""
     if v is not None:
         v = v.strip().upper()
-        # Only check if it's two uppercase letters.
-        # Delegate strict validation against known VRs to pydicom at runtime.
         if not re.match(r"^[A-Z]{2}$", v):
             raise ValueError("VR must be two uppercase letters")
-        # *** REMOVED check against pydicom's internal dictionary ***
-        # if v not in pydicom.datadict._dictionary_vr.DICT_VR:
-        #    raise ValueError(f"Unknown or unsupported VR: {v}")
         return v
     return None
 
@@ -77,7 +66,6 @@ class MatchCriterion(BaseModel):
     op: MatchOperation = Field(..., description="Matching operation to perform")
     value: Any = Field(None, description="Value to compare against (type depends on 'op', required for most ops)")
 
-    # Re-use validator function
     _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
 
     @model_validator(mode='after')
@@ -121,7 +109,6 @@ class TagSetModification(TagModificationBase):
     action: Literal[ModifyAction.SET] = ModifyAction.SET
     value: Any = Field(..., description="New value for the tag")
     vr: Optional[str] = Field(None, max_length=2, description="Explicit VR (e.g., 'PN', 'DA') - strongly recommended if tag might not exist or to ensure correct type")
-    # Use the simplified VR format validator
     _validate_vr = field_validator('vr')(_validate_vr_format)
 
 class TagDeleteModification(TagModificationBase):
@@ -172,25 +159,12 @@ TagModification = Annotated[
     Field(discriminator="action")
 ]
 
-
-class StorageDestination(BaseModel):
-    type: str = Field(..., description="Storage type (e.g., 'filesystem', 'cstore', 'gcs')")
-    config: Dict[str, Any] = Field(default_factory=dict, description="Backend-specific configuration (e.g., path, ae_title, bucket)")
-
-    @model_validator(mode='after')
-    def merge_type_into_config(self) -> 'StorageDestination':
-        type_value = self.type
-        config_value = self.config
-        if not type_value: raise ValueError("'type' field cannot be empty")
-        config_type_key, found_key = 'type', None
-        for k in config_value.keys():
-            if k.lower() == 'type': found_key = k; break
-        if not found_key: self.config[config_type_key] = type_value
-        elif config_value.get(found_key):
-            if str(config_value[found_key]).lower() != str(type_value).lower():
-                raise ValueError(f"Mismatch between outer 'type' ('{type_value}') and 'type' within config ('{config_value[found_key]}')")
-        else: self.config[found_key] = type_value
-        return self
+# --- REMOVED old StorageDestination schema ---
+# class StorageDestination(BaseModel):
+#     type: str = Field(..., description="Storage type (e.g., 'filesystem', 'cstore', 'gcs', 'google_healthcare', 'stow_rs')")
+#     config: Dict[str, Any] = Field(default_factory=dict, description="Backend-specific configuration (e.g., path, ae_title, bucket, project_id, stow_url)")
+#     # ... (validator removed as well) ...
+# --- END REMOVED ---
 
 
 # --- Rule Schemas ---
@@ -202,7 +176,9 @@ class RuleBase(BaseModel):
     priority: int = 0
     match_criteria: List[MatchCriterion] = Field(default_factory=list)
     tag_modifications: List[TagModification] = Field(default_factory=list)
-    destinations: List[StorageDestination] = Field(default_factory=list)
+    # --- REMOVED old destinations field ---
+    # destinations: List[StorageDestination] = Field(default_factory=list)
+    # --- END REMOVED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Applies to all if null/empty.")
 
     @field_validator('applicable_sources')
@@ -215,6 +191,9 @@ class RuleBase(BaseModel):
 
 class RuleCreate(RuleBase):
     ruleset_id: int
+    # --- ADDED: List of destination config IDs ---
+    destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations.")
+    # --- END ADDED ---
 
 class RuleUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
@@ -223,16 +202,26 @@ class RuleUpdate(BaseModel):
     priority: Optional[int] = None
     match_criteria: Optional[List[MatchCriterion]] = None
     tag_modifications: Optional[List[TagModification]] = None
-    destinations: Optional[List[StorageDestination]] = None
+    # --- REMOVED old destinations field ---
+    # destinations: Optional[List[StorageDestination]] = None
+    # --- END REMOVED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Set to null to apply to all.")
     _validate_sources = field_validator('applicable_sources')(RuleBase.validate_sources_not_empty_strings.__func__)
+    # --- ADDED: List of destination config IDs ---
+    destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations. Replaces existing list.")
+    # --- END ADDED ---
 
 class RuleInDBBase(RuleBase):
     id: int
     ruleset_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    model_config = {"from_attributes": True}
+    # --- ADDED: Eager loaded destinations ---
+    destinations: List[StorageBackendConfigRead] = [] # Use the Read schema for related objects
+    # --- END ADDED ---
+    # --- Use ConfigDict for Pydantic v2 ---
+    model_config = ConfigDict(from_attributes=True)
+    # --- END Use ConfigDict ---
 
 class Rule(RuleInDBBase): pass
 
@@ -258,8 +247,10 @@ class RuleSetInDBBase(RuleSetBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    rules: List[Rule] = []
-    model_config = {"from_attributes": True}
+    rules: List[Rule] = [] # Rules will now contain the populated destinations
+    # --- Use ConfigDict for Pydantic v2 ---
+    model_config = ConfigDict(from_attributes=True)
+    # --- END Use ConfigDict ---
 
 class RuleSet(RuleSetInDBBase): pass
 
@@ -271,4 +262,6 @@ class RuleSetSummary(BaseModel):
     priority: int
     execution_mode: RuleSetExecutionMode
     rule_count: int = Field(..., description="Number of rules in this ruleset")
-    model_config = {"from_attributes": True}
+    # --- Use ConfigDict for Pydantic v2 ---
+    model_config = ConfigDict(from_attributes=True)
+    # --- END Use ConfigDict ---

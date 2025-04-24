@@ -137,6 +137,8 @@ services:
     container_name: dicom_processor_worker
     env_file:
       - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -149,6 +151,7 @@ services:
       # Mount DICOM data directories if using filesystem storage/input within docker
       - dicom_incoming:/dicom_data/incoming
       - dicom_processed:/dicom_data/processed
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
     # The CMD from Dockerfile.worker is used unless overridden here
     # command: ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info", "-c", "2"] # Example override
     restart: unless-stopped

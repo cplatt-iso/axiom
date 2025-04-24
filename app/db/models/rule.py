@@ -1,23 +1,37 @@
 # app/db/models/rule.py
 import enum
+# --- ADDED: Table import ---
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from sqlalchemy import (
-    String, Boolean, Text, ForeignKey, JSON, Enum as DBEnum, Integer
+    String, Boolean, Text, ForeignKey, JSON, Enum as DBEnum, Integer,
+    Table, Column # Import Table and Column
 )
+# --- END ADDED ---
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
-# Import dialects for specific JSON type if needed (though often handled by default)
-from sqlalchemy.dialects.postgresql import JSONB # Use JSONB for better indexing/performance
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.db.base import Base
-# from .user import User # Import User if relationship uncommented
+# --- REMOVED StorageBackendConfig import from here ---
+# from .storage_backend_config import StorageBackendConfig
+# --- END REMOVED ---
 
 # Use the same Enum definition for model and schema consistency
 class RuleSetExecutionMode(str, enum.Enum):
     FIRST_MATCH = "FIRST_MATCH"
     ALL_MATCHES = "ALL_MATCHES"
+
+# --- MOVED: Association Table Definition ---
+# Define the association table *before* it's used in relationships
+rule_destination_association = Table(
+    'rule_destination_association',
+    Base.metadata,
+    Column('rule_id', Integer, ForeignKey('rules.id', ondelete="CASCADE"), primary_key=True),
+    Column('storage_backend_config_id', Integer, ForeignKey('storage_backend_configs.id', ondelete="CASCADE"), primary_key=True)
+)
+# --- END MOVED ---
 
 class RuleSet(Base):
     """
@@ -36,20 +50,11 @@ class RuleSet(Base):
         nullable=False
     )
 
-    # Timestamps inherited from Base
-
-    # Optional relationship to track creator user
-    # created_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
-    # created_by_user: Mapped[Optional["User"]] = relationship(back_populates="created_rulesets", lazy="selectin", init=False)
-
-    # Relationship: One RuleSet has many Rules
     rules: Mapped[List["Rule"]] = relationship(
         back_populates="ruleset",
         cascade="all, delete-orphan",
         order_by="Rule.priority",
-        lazy="selectin", # Consider changing to 'subquery' or 'joined' if performance dictates
-                         # especially if rules are always needed when loading a ruleset.
-                         # 'selectin' is good but can issue many queries if loading many rulesets.
+        lazy="selectin",
     )
 
     def __repr__(self):
@@ -71,45 +76,40 @@ class Rule(Base):
 
     ruleset_id: Mapped[int] = mapped_column(ForeignKey('rule_sets.id', ondelete="CASCADE"), index=True)
 
-    # --- Core Rule Logic ---
-    # Using JSON/JSONB for flexible criteria, modifications, destinations
-    # Note: Pydantic schemas should handle validation of the structure within these JSON fields.
     match_criteria: Mapped[Dict[str, Any]] = mapped_column(
-        JSONB, # Use JSONB
+        JSONB,
         nullable=False,
-        default={}, # Use empty dict for default
+        default={},
         comment="Criteria object (structure defined/validated by Pydantic schema)"
     )
-    tag_modifications: Mapped[List[Dict[str, Any]]] = mapped_column( # Changed from Dict to List
-        JSONB, # Use JSONB
+    tag_modifications: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSONB,
         nullable=False,
-        default=[], # Use empty list for default
+        default=[],
         comment="List of modification action objects (validated by Pydantic)"
     )
-    destinations: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSONB, # Use JSONB
-        nullable=False,
-        default=[], # Use empty list for default
-        comment="List of storage destination objects (validated by Pydantic)"
-    )
 
-    # --- NEW FIELD ---
-    # Store as a list of strings within a JSONB column
     applicable_sources: Mapped[Optional[List[str]]] = mapped_column(
         JSONB,
-        nullable=True, # Rule applies to all sources if this is NULL or empty list
-        index=True, # Index if you anticipate querying rules by source often
+        nullable=True,
+        index=True,
         comment="List of source identifiers (e.g., 'scp_listener_a', 'api_json'). Applies to all if null/empty."
     )
-    # --- END NEW FIELD ---
-
-
-    # Timestamps inherited from Base
 
     ruleset: Mapped["RuleSet"] = relationship(
         back_populates="rules",
-        lazy="joined" # Usually want the ruleset when querying a rule
+        lazy="joined"
     )
+
+    # --- UPDATED: Relationship uses the locally defined association table ---
+    # Type hint uses string forward reference because StorageBackendConfig is defined later
+    destinations: Mapped[List["StorageBackendConfig"]] = relationship(
+        "StorageBackendConfig", # Use string name
+        secondary=rule_destination_association,
+        back_populates="rules",
+        lazy="selectin"
+    )
+    # --- END UPDATED ---
 
     def __repr__(self):
         return f"<Rule(id={self.id}, name='{self.name}', ruleset_id={self.ruleset_id})>"

@@ -4,7 +4,9 @@ from typing import Dict, Any
 from .base_backend import BaseStorageBackend, StorageBackendError
 from .filesystem import FilesystemStorage
 from .dicom_cstore import CStoreStorage
-# from .gcs import GcsStorage # Import when implemented
+from .gcs import GcsStorage
+from .google_healthcare import GoogleHealthcareDicomStoreStorage
+from .stow_rs import StowRsStorage
 
 def get_storage_backend(config: Dict[str, Any]) -> BaseStorageBackend:
     """
@@ -14,6 +16,9 @@ def get_storage_backend(config: Dict[str, Any]) -> BaseStorageBackend:
         config: A dictionary defining the backend type and its settings.
                 Example: {'type': 'filesystem', 'path': '/path/to/store'}
                          {'type': 'cstore', 'ae_title': 'PACS', 'host': '...', 'port': ...}
+                         {'type': 'gcs', 'bucket_name': 'my-bucket', 'path_prefix': 'optional/path'}
+                         {'type': 'google_healthcare', 'project_id': '...', 'location': '...', ...}
+                         {'type': 'stow_rs', 'stow_url': 'http://.../studies', 'auth_type': 'basic', ...}
 
     Returns:
         An instance of a BaseStorageBackend subclass.
@@ -26,17 +31,31 @@ def get_storage_backend(config: Dict[str, Any]) -> BaseStorageBackend:
     if not backend_type:
         raise ValueError("Storage backend configuration must include a 'type'.")
 
-    backend_type = backend_type.lower()
+    # Normalize type for case-insensitive matching
+    backend_type = str(backend_type).lower()
 
     try:
         if backend_type == "filesystem":
             return FilesystemStorage(config)
         elif backend_type == "cstore":
             return CStoreStorage(config)
-        # elif backend_type == "gcs":
-        #     return GcsStorage(config)
+        # --- ADDED Backend Types ---
+        elif backend_type == "gcs":
+            return GcsStorage(config)
+        elif backend_type == "google_healthcare":
+            return GoogleHealthcareDicomStoreStorage(config)
+        elif backend_type == "stow_rs":
+            return StowRsStorage(config)
         else:
-            raise ValueError(f"Unknown storage backend type: {backend_type}")
+            raise ValueError(f"Unknown storage backend type: '{backend_type}'")
     except Exception as e:
         # Catch potential initialization errors (missing keys, connection issues, etc.)
-        raise StorageBackendError(f"Error initializing storage backend '{backend_type}': {e}") from e
+        # Wrap specific ValueErrors from validation in StorageBackendError for consistency
+        if isinstance(e, ValueError):
+             raise StorageBackendError(f"Invalid configuration for backend type '{backend_type}': {e}") from e
+        # Re-raise StorageBackendErrors directly
+        elif isinstance(e, StorageBackendError):
+             raise
+        # Wrap other unexpected errors
+        else:
+             raise StorageBackendError(f"Unexpected error initializing storage backend '{backend_type}': {e}") from e

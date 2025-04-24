@@ -12,7 +12,7 @@ from .rule import (
     RuleSetSummary, # Add if defined and needed
     MatchCriterion,
     TagModification, # Basic version, will change later
-    StorageDestination,
+#    StorageDestination,
     MatchOperation, # Export enums too
     ModifyAction,
     RuleSetExecutionMode,
@@ -55,10 +55,12 @@ from .processing import (
 )
 
 from .system import (
-    DicomWebSourceStatus, 
+    DicomWebSourceStatus,
     DicomWebPollersStatusResponse,
     DimseListenerStatus,
     DimseListenersStatusResponse,
+    DimseQrSourceStatus,          # Added
+    DimseQrSourcesStatusResponse, # Added
 )
 
 from .dicomweb import (
@@ -87,4 +89,12 @@ from .dimse_qr_source import (
     DimseQueryRetrieveSourceRead,
     DimseQueryRetrieveSourceCreatePayload, # Export Payloads too
     DimseQueryRetrieveSourceUpdatePayload,
+)
+
+from .storage_backend_config import (
+    StorageBackendConfigBase,
+    StorageBackendConfigCreate,
+    StorageBackendConfigUpdate,
+    StorageBackendConfigRead,
+    AllowedBackendType, # Export the Literal type too
 )

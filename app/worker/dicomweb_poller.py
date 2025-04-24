@@ -14,6 +14,8 @@ from app import crud
 from app.services import dicomweb_client
 from app.worker.tasks import process_dicomweb_metadata_task
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 @shared_task(name="poll_all_dicomweb_sources")
