@@ -6,7 +6,9 @@ import shutil
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+# --- ADDED: Union for type hint ---
+from typing import Optional, List, Dict, Any, Union
+# --- END ADDED ---
 from copy import deepcopy
 
 from celery import shared_task
@@ -17,9 +19,11 @@ from pydicom.uid import generate_uid
 
 # Database access
 from app.db.session import SessionLocal
-from app.crud.crud_rule import ruleset as crud_ruleset
+# --- Use top-level crud ---
+from app import crud
+# --- End Use top-level ---
 from app.db import models
-from app.crud.crud_dicomweb_source import dicomweb_source as crud_config # Config CRUD
+from app.db.models import ProcessedStudySourceType # Import Enum
 
 # Storage backend & Client
 from app.services.storage_backends import get_storage_backend, StorageBackendError
@@ -79,20 +83,31 @@ RETRYABLE_EXCEPTIONS = (
              default_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
              autoretry_for=RETRYABLE_EXCEPTIONS,
              retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
-def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Optional[str] = None):
+# --- SIGNATURE MODIFIED ---
+def process_dicom_file_task(
+    self,
+    dicom_filepath_str: str,
+    source_type: str, # e.g., 'DIMSE_LISTENER' or ProcessedStudySourceType.DIMSE_LISTENER.value
+    source_db_id_or_instance_id: Union[int, str] # Listener uses string instance_id
+):
+# --- END SIGNATURE MODIFIED ---
     """
     Celery task to process a DICOM file originally from filesystem/listener:
     reads file, fetches rules, calls processing logic, handles storage destinations, and cleans up.
     """
     task_id = self.request.id
     original_filepath = Path(dicom_filepath_str)
-    effective_source = source_identifier or settings.DEFAULT_SCP_SOURCE_ID
+    # --- Construct effective_source based on input ---
+    effective_source = f"{source_type}_{source_db_id_or_instance_id}"
+    # --- END Construct effective_source ---
 
-    logger.info(f"Task {task_id}: Received filesystem/listener request for file: {original_filepath} from source: {effective_source}")
+    logger.info(f"Task {task_id}: Received request for file: {original_filepath} from source: {effective_source} (Type: {source_type}, ID: {source_db_id_or_instance_id})")
 
     if not original_filepath.is_file():
         logger.error(f"Task {task_id}: File not found or is not a file: {original_filepath}. Cannot process.")
-        return {"status": "error", "message": "File not found", "filepath": dicom_filepath_str, "source": effective_source}
+        # --- Pass source info in return dict ---
+        return {"status": "error", "message": "File not found", "filepath": dicom_filepath_str, "source": effective_source, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+        # --- END Pass source info ---
 
     db: Optional[Session] = None
     original_ds: Optional[pydicom.Dataset] = None
@@ -111,7 +126,9 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
         except InvalidDicomError as e:
             logger.error(f"Task {task_id}: Invalid DICOM file {original_filepath} (UID: {instance_uid_str}): {e}", exc_info=False)
             move_to_error_dir(original_filepath, task_id)
-            return {"status": "error", "message": f"Invalid DICOM file format: {e}", "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+            # --- Pass source info in return dict ---
+            return {"status": "error", "message": f"Invalid DICOM file format: {e}", "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+            # --- END Pass source info ---
         except Exception as read_exc:
             logger.error(f"Task {task_id}: Error reading DICOM file {original_filepath} (UID: {instance_uid_str}): {read_exc}", exc_info=True)
             raise read_exc # Let Celery handle retry
@@ -120,7 +137,9 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
         logger.debug(f"Task {task_id}: Opening database session...")
         db = SessionLocal()
         logger.debug(f"Task {task_id}: Querying active rulesets...")
-        active_rulesets: List[models.RuleSet] = crud_ruleset.get_active_ordered(db)
+        # --- Use correct crud object ---
+        active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
+        # --- END Use correct crud object ---
         if not active_rulesets:
              logger.info(f"Task {task_id}: No active rulesets found for instance {instance_uid_str} from {effective_source}. No action needed.")
              final_status = "success"
@@ -134,7 +153,9 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
              else:
                  logger.info(f"Task {task_id}: Leaving file {original_filepath} as no rulesets were active (DELETE_UNMATCHED_FILES=false).")
              db.close()
-             return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+             # --- Pass source info in return dict ---
+             return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+             # --- END Pass source info ---
 
         # 3. Call Processing Logic
         logger.debug(f"Task {task_id}: Calling core processing logic for source '{effective_source}'...")
@@ -142,13 +163,15 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
             modified_ds, applied_rules_info, unique_destination_configs = core_process_dicom_instance(
                 original_ds=original_ds,
                 active_rulesets=active_rulesets,
-                source_identifier=effective_source
+                source_identifier=effective_source # Use effective_source here
             )
         except Exception as proc_exc:
              logger.error(f"Task {task_id}: Error during core processing logic for {original_filepath.name} (UID: {instance_uid_str}): {proc_exc}", exc_info=True)
              move_to_error_dir(original_filepath, task_id)
              db.close()
-             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+             # --- Pass source info in return dict ---
+             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+             # --- END Pass source info ---
 
         # 4. Destination Processing
         if not applied_rules_info:
@@ -164,7 +187,9 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
              else:
                  logger.info(f"Task {task_id}: Leaving file {original_filepath} as no rules matched this source (DELETE_UNMATCHED_FILES=false).")
              db.close()
-             return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+             # --- Pass source info in return dict ---
+             return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+             # --- END Pass source info ---
 
         if not unique_destination_configs:
             logger.info(f"Task {task_id}: Rules matched, but no destinations configured in matched rules for {original_filepath.name}.")
@@ -180,7 +205,9 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
             else:
                 logger.info(f"Task {task_id}: Leaving original file {original_filepath} as rules matched but had no destinations (DELETE_ON_NO_DESTINATION=false or no modification).")
             db.close()
-            return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+            # --- Pass source info in return dict ---
+            return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+            # --- END Pass source info ---
 
         dataset_to_send = modified_ds if modified_ds is not None else original_ds
         logger.info(f"Task {task_id}: Processing {len(unique_destination_configs)} unique destinations for {original_filepath.name}...")
@@ -196,7 +223,14 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
             try:
                 storage_backend = get_storage_backend(dest_config)
                 filename_context = f"{instance_uid_str}.dcm"
-                store_result = storage_backend.store(dataset_to_send, original_filepath=original_filepath, filename_context=filename_context)
+                # --- Pass effective_source to store method ---
+                store_result = storage_backend.store(
+                    dataset_to_send,
+                    original_filepath=original_filepath,
+                    filename_context=filename_context,
+                    source_identifier=effective_source
+                 )
+                # --- END Pass effective_source ---
                 logger.info(f"Task {task_id}: Destination {dest_id} completed. Result: {store_result}")
                 success_status[dest_id] = {"status": "success", "result": store_result}
             except StorageBackendError as e:
@@ -210,7 +244,7 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
                  success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
                  # Optionally: raise e # Re-raise to trigger retry if desired
 
-        # 5. Cleanup
+        # 5. Cleanup & Increment Processed Count
         if all_destinations_succeeded:
             logger.info(f"Task {task_id}: All {len(unique_destination_configs)} destinations succeeded.")
             if settings.DELETE_ON_SUCCESS:
@@ -221,6 +255,33 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
                  logger.info(f"Task {task_id}: Leaving original file {original_filepath} as DELETE_ON_SUCCESS is false.")
             final_status = "success"
             final_message = f"Processed and stored successfully to {len(unique_destination_configs)} destination(s)."
+
+            # --- INCREMENT PROCESSED COUNT ON SUCCESS ---
+            processed_incremented = False
+            try:
+                # Use a new session as the main one might be closed soon
+                local_db = SessionLocal()
+                if source_type == ProcessedStudySourceType.DIMSE_LISTENER.value and isinstance(source_db_id_or_instance_id, str):
+                    logger.debug(f"Task {task_id}: Incrementing processed count for DIMSE Listener {source_db_id_or_instance_id}")
+                    processed_incremented = crud.crud_dimse_listener_state.increment_processed_count(db=local_db, listener_id=source_db_id_or_instance_id, count=1)
+                elif source_type == ProcessedStudySourceType.DIMSE_QR.value and isinstance(source_db_id_or_instance_id, int):
+                     logger.debug(f"Task {task_id}: Incrementing processed count for DIMSE QR source ID {source_db_id_or_instance_id}")
+                     processed_incremented = crud.crud_dimse_qr_source.increment_processed_count(db=local_db, source_id=source_db_id_or_instance_id, count=1)
+                     # CRUD commits internally here
+                # Add elif for STOW_RS or other types later if needed
+                else:
+                    logger.warning(f"Task {task_id}: Unknown source type '{source_type}' or mismatched ID type '{type(source_db_id_or_instance_id)}' for processed count increment.")
+
+                if processed_incremented:
+                    logger.info(f"Task {task_id}: Successfully incremented processed count for source {effective_source}.")
+                else:
+                    logger.warning(f"Task {task_id}: Failed to increment processed count for source {effective_source}.")
+                local_db.close() # Close the temporary session
+            except Exception as e:
+                logger.error(f"Task {task_id}: DB Error incrementing processed count for source {effective_source}: {e}")
+                if 'local_db' in locals() and local_db.is_active: local_db.rollback(); local_db.close()
+            # --- END INCREMENT ---
+
         else:
             failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
             logger.warning(f"Task {task_id}: {failed_count}/{len(unique_destination_configs)} destinations failed. Original file NOT deleted: {original_filepath}")
@@ -230,7 +291,9 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
             final_message = f"Processing complete, but {failed_count} destination(s) failed."
 
         db.close()
-        return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "destinations": success_status, "source": effective_source, "instance_uid": instance_uid_str}
+        # --- Pass source info in return dict ---
+        return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "destinations": success_status, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+        # --- END Pass source info ---
 
     except Exception as exc:
         logger.error(f"Task {task_id}: Unhandled exception processing {original_filepath.name}: {exc!r}", exc_info=True)
@@ -242,7 +305,10 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
              except: pass
              finally: db.close()
         if isinstance(exc, RETRYABLE_EXCEPTIONS): raise
-        else: return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+        else:
+            # --- Pass source info in return dict ---
+            return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": effective_source, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+            # --- END Pass source info ---
     finally:
         if db and db.is_active:
             logger.warning(f"Task {task_id}: Closing database session in finally block (may indicate early exit).")
@@ -257,11 +323,13 @@ def process_dicom_file_task(self, dicom_filepath_str: str, source_identifier: Op
              default_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
              autoretry_for=RETRYABLE_EXCEPTIONS, # Includes DicomWebClientError now
              retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
+# --- SIGNATURE UNCHANGED (already takes source_id) ---
 def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_uid: str, instance_uid: str):
     """
     Processes a DICOM instance identified by UIDs from a DICOMweb source.
     Fetches metadata via WADO-RS, converts to Dataset, applies rules, sends to destinations.
     """
+# --- END SIGNATURE UNCHANGED ---
     task_id = self.request.id
     logger.info(f"Task {task_id}: Received request to process DICOMweb instance UID {instance_uid} from source ID {source_id}.")
 
@@ -277,11 +345,15 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
         logger.debug(f"Task {task_id}: Opening database session...")
         db = SessionLocal()
         logger.debug(f"Task {task_id}: Fetching configuration for source ID {source_id}...")
-        source_config = crud_config.get(db, id=source_id)
+        # --- Use correct crud object ---
+        source_config = crud.dicomweb_source.get(db, id=source_id)
+        # --- END Use correct crud object ---
         if not source_config:
             logger.error(f"Task {task_id}: Could not find configuration for source ID {source_id}. Cannot fetch metadata.")
-            return {"status": "error", "message": f"Configuration for source ID {source_id} not found.", "instance_uid": instance_uid}
-        source_identifier = source_config.source_name
+            # --- Pass source info in return dict ---
+            return {"status": "error", "message": f"Configuration for source ID {source_id} not found.", "instance_uid": instance_uid, "source_id": source_id}
+            # --- END Pass source info ---
+        source_identifier = source_config.source_name # Use the actual name
 
         # 2. Fetch Instance Metadata via WADO-RS
         logger.info(f"Task {task_id}: Fetching metadata for instance {instance_uid} from source '{source_identifier}'...")
@@ -296,7 +368,9 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
             if dicom_metadata is None:
                  logger.warning(f"Task {task_id}: Metadata not found (or 404) for instance {instance_uid} at source '{source_identifier}'. Skipping.")
                  db.close()
-                 return {"status": "success", "message": "Instance metadata not found (likely deleted).", "source": source_identifier, "instance_uid": instance_uid}
+                 # --- Pass source info in return dict ---
+                 return {"status": "success", "message": "Instance metadata not found (likely deleted).", "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+                 # --- END Pass source info ---
             logger.debug(f"Task {task_id}: Successfully retrieved metadata for {instance_uid}.")
         except Exception as fetch_exc:
              logger.error(f"Task {task_id}: Error fetching metadata for instance {instance_uid} from '{source_identifier}': {fetch_exc}", exc_info=isinstance(fetch_exc, dicomweb_client.DicomWebClientError))
@@ -319,22 +393,30 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
             original_ds.file_meta = file_meta
         except Exception as e:
             logger.error(f"Task {task_id}: Failed to convert retrieved DICOMweb JSON metadata (UID: {instance_uid}) to Dataset: {e}", exc_info=True)
-            return {"status": "error", "message": f"Failed to parse retrieved metadata: {e}", "source": source_identifier, "instance_uid": instance_uid}
+            # --- Pass source info in return dict ---
+            return {"status": "error", "message": f"Failed to parse retrieved metadata: {e}", "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+            # --- END Pass source info ---
 
         if original_ds is None:
              logger.error(f"Task {task_id}: Dataset object is None after conversion block, cannot proceed.")
-             return {"status": "error", "message": "Dataset creation failed unexpectedly.", "source": source_identifier, "instance_uid": instance_uid}
+             # --- Pass source info in return dict ---
+             return {"status": "error", "message": "Dataset creation failed unexpectedly.", "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+             # --- END Pass source info ---
 
 
         # 4. Get Rules from Database
         logger.debug(f"Task {task_id}: Querying active rulesets...")
-        active_rulesets: List[models.RuleSet] = crud_ruleset.get_active_ordered(db)
+        # --- Use correct crud object ---
+        active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
+        # --- END Use correct crud object ---
         if not active_rulesets:
              logger.info(f"Task {task_id}: No active rulesets found. No action needed for instance {instance_uid} from {source_identifier}.")
              final_status = "success"
              final_message = "No active rulesets found"
              db.close()
-             return {"status": final_status, "message": final_message, "source": source_identifier, "instance_uid": instance_uid}
+             # --- Pass source info in return dict ---
+             return {"status": final_status, "message": final_message, "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+             # --- END Pass source info ---
 
         # 5. Call Core Processing Logic
         logger.debug(f"Task {task_id}: Calling core processing logic for source '{source_identifier}'...")
@@ -347,7 +429,9 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
         except Exception as proc_exc:
              logger.error(f"Task {task_id}: Error during core processing logic for instance {instance_uid}: {proc_exc}", exc_info=True)
              db.close()
-             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": source_identifier, "instance_uid": instance_uid}
+             # --- Pass source info in return dict ---
+             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+             # --- END Pass source info ---
 
         # 6. Destination Processing
         if not applied_rules_info:
@@ -355,14 +439,18 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
              final_status = "success"
              final_message = "No matching rules found for this source"
              db.close()
-             return {"status": final_status, "message": final_message, "source": source_identifier, "instance_uid": instance_uid}
+             # --- Pass source info in return dict ---
+             return {"status": final_status, "message": final_message, "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+             # --- END Pass source info ---
 
         if not unique_destination_configs:
             logger.info(f"Task {task_id}: Rules matched, but no destinations configured for instance {instance_uid}.")
             final_status = "success"
             final_message = "Rules matched, modifications applied (if any), but no destinations configured"
             db.close()
-            return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "source": source_identifier, "instance_uid": instance_uid}
+            # --- Pass source info in return dict ---
+            return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+            # --- END Pass source info ---
 
         dataset_to_send = modified_ds if modified_ds is not None else original_ds
         logger.info(f"Task {task_id}: Processing {len(unique_destination_configs)} unique destinations for instance {instance_uid}...")
@@ -378,12 +466,14 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
             try:
                 storage_backend = get_storage_backend(dest_config)
                 filename_context = f"{instance_uid}.dcm"
+                # --- Pass effective_source to store method ---
                 store_result = storage_backend.store(
                     dataset_to_send,
                     original_filepath=None,
                     filename_context=filename_context,
-                    source_identifier=source_identifier
+                    source_identifier=source_identifier # Use identifier from config
                 )
+                # --- END Pass effective_source ---
                 logger.info(f"Task {task_id}: Destination {dest_id} completed for instance {instance_uid}. Result: {store_result}")
                 success_status[dest_id] = {"status": "success", "result": store_result}
             except StorageBackendError as e:
@@ -397,10 +487,30 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
                  success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
                  # Optionally: raise e
 
-        # 7. Final Status Determination
+        # 7. Final Status Determination & Increment Processed Count
         if all_destinations_succeeded:
             final_status = "success"
             final_message = f"Processed instance {instance_uid} and dispatched successfully to {len(unique_destination_configs)} destination(s)."
+
+            # --- INCREMENT PROCESSED COUNT ON SUCCESS ---
+            processed_incremented = False
+            try:
+                logger.debug(f"Task {task_id}: Incrementing processed count for DICOMweb source '{source_identifier}' (ID: {source_id})")
+                local_db = SessionLocal()
+                # Use the CRUD object instance from the correct module
+                processed_incremented = crud.dicomweb_state.increment_processed_count(db=local_db, source_name=source_identifier, count=1)
+                local_db.commit() # Commit the processed count increment
+                local_db.close()
+            except Exception as e:
+                logger.error(f"Task {task_id}: DB Error incrementing processed count for DICOMweb source {source_identifier}: {e}")
+                if 'local_db' in locals() and local_db.is_active: local_db.rollback(); local_db.close()
+
+            if processed_incremented:
+                logger.info(f"Task {task_id}: Successfully incremented processed count for source {source_identifier}.")
+            else:
+                logger.warning(f"Task {task_id}: Failed to increment processed count for source {source_identifier}.")
+            # --- END INCREMENT ---
+
         else:
             failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
             logger.warning(f"Task {task_id}: {failed_count}/{len(unique_destination_configs)} destinations failed for instance {instance_uid}.")
@@ -408,7 +518,9 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
             final_message = f"Processing complete for instance {instance_uid}, but {failed_count} destination(s) failed dispatch."
 
         db.close()
-        return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "destinations": success_status, "source": source_identifier, "instance_uid": instance_uid}
+        # --- Pass source info in return dict ---
+        return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "destinations": success_status, "source": source_identifier, "instance_uid": instance_uid, "source_id": source_id}
+        # --- END Pass source info ---
 
     except Exception as exc:
         logger.error(f"Task {task_id}: Unhandled exception processing DICOMweb instance {instance_uid} from source ID {source_id}: {exc!r}", exc_info=True)
@@ -417,7 +529,10 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
             except: pass
             finally: db.close()
         if isinstance(exc, RETRYABLE_EXCEPTIONS): raise
-        else: return {"status": "error", "message": f"Fatal error during processing: {exc!r}", "source_id": source_id, "instance_uid": instance_uid}
+        else:
+            # --- Pass source info in return dict ---
+             return {"status": "error", "message": f"Fatal error during processing: {exc!r}", "source_id": source_id, "instance_uid": instance_uid}
+            # --- END Pass source info ---
     finally:
         if db and db.is_active:
             logger.warning(f"Task {task_id}: Closing database session in finally block (may indicate early exit).")
@@ -432,7 +547,9 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
              default_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
              autoretry_for=RETRYABLE_EXCEPTIONS,
              retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
+# --- SIGNATURE UNCHANGED ---
 def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional[str] = None):
+    # --- END SIGNATURE UNCHANGED ---
     """
     Celery task to process a single DICOM instance file received via STOW-RS.
     The file provided is temporary and MUST be cleaned up by this task.
@@ -445,7 +562,9 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
 
     if not temp_filepath.is_file():
         logger.error(f"Task {task_id}: Temporary file not found: {temp_filepath}. Cannot process.")
+        # --- Pass source info in return dict ---
         return {"status": "error", "message": "Temporary file not found", "filepath": temp_filepath_str, "source": effective_source}
+        # --- END Pass source info ---
 
     db: Optional[Session] = None
     original_ds: Optional[pydicom.Dataset] = None
@@ -463,7 +582,9 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
             logger.debug(f"Task {task_id}: Successfully read temp file. SOP Instance UID: {instance_uid_str}")
         except InvalidDicomError as e:
             logger.error(f"Task {task_id}: Invalid DICOM file received via STOW-RS: {temp_filepath} (UID: {instance_uid_str}): {e}", exc_info=False)
+            # --- Pass source info in return dict ---
             return {"status": "error", "message": f"Invalid DICOM format: {e}", "filepath": temp_filepath_str, "source": effective_source, "instance_uid": instance_uid_str}
+            # --- END Pass source info ---
         except Exception as read_exc:
             logger.error(f"Task {task_id}: Error reading DICOM temp file {temp_filepath} (UID: {instance_uid_str}): {read_exc}", exc_info=True)
             raise read_exc
@@ -472,13 +593,17 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
         logger.debug(f"Task {task_id}: Opening database session...")
         db = SessionLocal()
         logger.debug(f"Task {task_id}: Querying active rulesets...")
-        active_rulesets: List[models.RuleSet] = crud_ruleset.get_active_ordered(db)
+        # --- Use correct crud object ---
+        active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
+        # --- END Use correct crud object ---
         if not active_rulesets:
              logger.info(f"Task {task_id}: No active rulesets found for instance {instance_uid_str} from {effective_source}. No action needed.")
              final_status = "success"
              final_message = "No active rulesets found"
              db.close()
+             # --- Pass source info in return dict ---
              return {"status": final_status, "message": final_message, "source": effective_source, "instance_uid": instance_uid_str}
+             # --- END Pass source info ---
 
         # 3. Call Processing Logic
         logger.debug(f"Task {task_id}: Calling core processing logic for source '{effective_source}'...")
@@ -491,7 +616,9 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
         except Exception as proc_exc:
              logger.error(f"Task {task_id}: Error during core processing logic for STOW instance {instance_uid_str}: {proc_exc}", exc_info=True)
              db.close()
+             # --- Pass source info in return dict ---
              return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": effective_source, "instance_uid": instance_uid_str}
+             # --- END Pass source info ---
 
         # 4. Destination Processing
         if not applied_rules_info:
@@ -499,14 +626,18 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
              final_status = "success"
              final_message = "No matching rules found for this source"
              db.close()
+             # --- Pass source info in return dict ---
              return {"status": final_status, "message": final_message, "source": effective_source, "instance_uid": instance_uid_str}
+             # --- END Pass source info ---
 
         if not unique_destination_configs:
             logger.info(f"Task {task_id}: Rules matched, but no destinations configured for STOW instance {instance_uid_str}.")
             final_status = "success"
             final_message = "Rules matched, modifications applied (if any), but no destinations configured"
             db.close()
+            # --- Pass source info in return dict ---
             return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "source": effective_source, "instance_uid": instance_uid_str}
+            # --- END Pass source info ---
 
         dataset_to_send = modified_ds if modified_ds is not None else original_ds
         logger.info(f"Task {task_id}: Processing {len(unique_destination_configs)} unique destinations for STOW instance {instance_uid_str}...")
@@ -522,11 +653,14 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
             try:
                 storage_backend = get_storage_backend(dest_config)
                 filename_context = f"{instance_uid_str}.dcm"
+                # --- Pass effective_source to store method ---
                 store_result = storage_backend.store(
                     dataset_to_send,
                     original_filepath=temp_filepath, # Pass temp path for STOW
-                    filename_context=filename_context
+                    filename_context=filename_context,
+                    source_identifier=effective_source
                 )
+                # --- END Pass effective_source ---
                 logger.info(f"Task {task_id}: Destination {dest_id} completed for instance {instance_uid_str}. Result: {store_result}")
                 success_status[dest_id] = {"status": "success", "result": store_result}
             except StorageBackendError as e:
@@ -539,10 +673,19 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
                  all_destinations_succeeded = False
                  success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
 
-        # 5. Final Status Determination
+        # 5. Final Status Determination & Processed Count
         if all_destinations_succeeded:
             final_status = "success"
             final_message = f"Processed STOW instance {instance_uid_str} and stored successfully to {len(unique_destination_configs)} destination(s)."
+
+            # --- INCREMENT PROCESSED COUNT ON SUCCESS (STOW - Placeholder) ---
+            # Decide how to track STOW metrics. For now, just log.
+            logger.info(f"Task {task_id}: STOW instance {instance_uid_str} processed successfully. Metrics increment TBD.")
+            # processed_incremented = False # Placeholder
+            # if processed_incremented: logger.info(...)
+            # else: logger.warning(...)
+            # --- END INCREMENT ---
+
         else:
             failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
             logger.warning(f"Task {task_id}: {failed_count}/{len(unique_destination_configs)} destinations failed for STOW instance {instance_uid_str}.")
@@ -550,7 +693,9 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
             final_message = f"Processing complete for STOW instance {instance_uid_str}, but {failed_count} destination(s) failed."
 
         db.close()
+        # --- Pass source info in return dict ---
         return {"status": final_status, "message": final_message, "applied_rules": applied_rules_info, "destinations": success_status, "source": effective_source, "instance_uid": instance_uid_str}
+        # --- END Pass source info ---
 
     except Exception as exc:
         logger.error(f"Task {task_id}: Unhandled exception processing STOW instance from {effective_source} (UID: {instance_uid_str}, File: {temp_filepath}): {exc!r}", exc_info=True)
@@ -562,7 +707,9 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
         else:
             final_status = "error"
             final_message = f"Fatal error during processing: {exc!r}"
+            # --- Pass source info in return dict ---
             return {"status": final_status, "message": final_message, "source": effective_source, "instance_uid": instance_uid_str}
+            # --- END Pass source info ---
 
     finally:
         # CRITICAL: Clean up the temporary file for STOW-RS task

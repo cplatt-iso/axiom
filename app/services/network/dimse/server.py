@@ -21,15 +21,13 @@ from pynetdicom.presentation import PresentationContext
 from sqlalchemy import select, update as sql_update, func
 
 # Application imports
-from app.core.config import settings # Still needed for INCOMING_DIR, DEBUG, LISTENER_HOST
-# --- MODIFIED IMPORTS ---
-from app.services.network.dimse.handlers import handle_store, handle_echo, set_current_listener_name # Import new function
+from app.core.config import settings
+from app.services.network.dimse.handlers import handle_store, handle_echo, set_current_listener_context # Correct function name
 from app.db.session import SessionLocal, Session
-from app.crud import crud_dimse_listener_state, crud_dimse_listener_config # Import new CRUD
+from app.crud import crud_dimse_listener_state, crud_dimse_listener_config
 from app.db import models
-# --- END MODIFIED IMPORTS ---
 
-# --- Logging Setup (Keep as is) ---
+# --- Logging Setup ---
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("dicom_listener")
 logger.setLevel(logging.INFO if not settings.DEBUG else logging.DEBUG)
@@ -44,16 +42,12 @@ if not pynetdicom_logger.handlers:
     pynetdicom_stream_handler.setFormatter(log_formatter)
     pynetdicom_logger.addHandler(pynetdicom_stream_handler)
 
-# --- Configuration from Settings (REDUCED) ---
-# HOSTNAME = settings.LISTENER_HOST # Bind address is still global
+# --- Configuration ---
 INCOMING_DIR = Path(settings.DICOM_STORAGE_PATH)
 INCOMING_DIR.mkdir(parents=True, exist_ok=True)
-
-# --- Listener State Configuration ---
-# LISTENER_ID is retrieved from ENV within run_dimse_server now
 HEARTBEAT_INTERVAL_SECONDS = 30
 
-# --- Presentation Contexts (Keep as is) ---
+# --- Presentation Contexts ---
 SUPPORTED_TRANSFER_SYNTAXES = [
     '1.2.840.10008.1.2.1', '1.2.840.10008.1.2', '1.2.840.10008.1.2.2',
     '1.2.840.10008.1.2.5', '1.2.840.10008.1.2.4.50', '1.2.840.10008.1.2.4.70',
@@ -77,7 +71,6 @@ def log_assoc_event(event, msg_prefix):
     except Exception:
         logger.info(f"{msg_prefix}: {event.assoc}")
 
-# Map pynetdicom event types to corresponding handler functions or logging callbacks
 HANDLERS = [
     (evt.EVT_C_STORE, handle_store),
     (evt.EVT_C_ECHO, handle_echo),
@@ -89,257 +82,236 @@ HANDLERS = [
     (evt.EVT_CONN_CLOSE, lambda event: log_assoc_event(event, "Connection Closed by")),
 ]
 
-# --- Global State for Shutdown Coordination ---
+# --- Global State ---
 shutdown_event = threading.Event()
 server_thread_exception = None
 
-# --- Server Thread Target Function ---
+# --- Server Thread ---
 def _run_server_thread(ae: AE, address: tuple):
-    """Target function run in a separate thread to host the pynetdicom server."""
+    """Target function run in a separate thread."""
     global server_thread_exception
     try:
-        logger.info("Server thread started, starting pynetdicom AE server...")
+        logger.info("Server thread: starting pynetdicom AE server...")
+        # Changed evt_handlers= to handlers= as per pynetdicom 1.5+ start_server API
         ae.start_server(address, evt_handlers=HANDLERS, block=True)
-        logger.info("pynetdicom server stopped normally in thread.")
+        logger.info("Server thread: pynetdicom server stopped normally.")
     except Exception as e:
-        logger.error(f"Exception in pynetdicom server thread: {e}", exc_info=True)
+        logger.error(f"Server thread: Exception: {e}", exc_info=True)
         server_thread_exception = e
     finally:
-        logger.info("Server thread finished.")
+        logger.info("Server thread: finished.")
         shutdown_event.set()
 
-# --- Main Execution Function (Major Refactor) ---
+# --- Main Execution Function ---
 def run_dimse_server():
-    """Configures and runs the DICOM DIMSE SCP server based on DB config, including DB status updates."""
+    """Configures and runs the DICOM DIMSE SCP server based on DB config."""
     global shutdown_event, server_thread_exception
     db: Optional[Session] = None
+    listener_config: Optional[models.DimseListenerConfig] = None
+    ae_title = "DEFAULT_AE"
+    port = 11112 # Default fallback port
+    config_name = "UNKNOWN_CONFIG"
+    instance_id_for_handler = "UNKNOWN_INSTANCE"
 
-    # 1. Get Listener Instance ID from Environment
+    # 1. Get Listener Instance ID
     listener_id = os.environ.get("AXIOM_INSTANCE_ID")
     if not listener_id:
-        # Fallback using hostname/default port, but log critical error
-        fallback_id = f"dimse_{socket.getfqdn()}_unknownport"
-        logger.critical("CRITICAL: AXIOM_INSTANCE_ID environment variable is not set!")
-        logger.critical(f"Listener cannot reliably load its configuration. Using fallback ID: {fallback_id}")
-        logger.critical("Set AXIOM_INSTANCE_ID in the environment (e.g., docker-compose.yml) for this listener.")
-        # Decide whether to exit or try to continue with a potentially wrong config
-        # For safety, let's exit if the ID isn't set explicitly.
-        sys.exit("Listener startup failed: AXIOM_INSTANCE_ID not set.")
-        # listener_id = fallback_id # Use this line instead of sys.exit if you want to attempt to run
-
+        logger.critical("CRITICAL: AXIOM_INSTANCE_ID environment variable not set! Listener cannot start.")
+        sys.exit(1)
+    instance_id_for_handler = listener_id
     logger.info(f"Listener Instance ID: {listener_id}")
 
-    # 2. Load Configuration from Database
-    listener_config: Optional[models.DimseListenerConfig] = None
+    # 2. Load Configuration from DB
     try:
         db = SessionLocal()
         logger.info(f"Loading configuration for listener instance ID: {listener_id}")
         listener_config = crud_dimse_listener_config.get_by_instance_id(db, instance_id=listener_id)
-
         if not listener_config:
-            logger.error(f"No DIMSE listener configuration found in database for instance_id '{listener_id}'. Listener cannot start.")
-            sys.exit(f"Configuration Error: No config found for instance {listener_id}")
-
+            logger.error(f"Config Error: No config found for instance {listener_id}. Listener cannot start.")
+            sys.exit(1)
         if not listener_config.is_enabled:
-            logger.warning(f"Listener configuration '{listener_config.name}' (ID: {listener_config.id}) found for instance_id '{listener_id}', but it is disabled. Listener will not start.")
-            sys.exit(f"Configuration Disabled: Listener {listener_id} is disabled in config.")
+            logger.warning(f"Config Disabled: Listener {listener_id} is disabled in config. Listener will not start.")
+            sys.exit(1)
 
-        # Configuration loaded successfully
         ae_title = listener_config.ae_title
         port = listener_config.port
-        config_name = listener_config.name # Store the name for use as source_identifier
-        config_id = listener_config.id
+        config_name = listener_config.name
+        config_id = listener_config.id # For logging
 
-        # --- Pass the loaded name to the handlers module ---
-        set_current_listener_name(config_name)
-        # --- End Passing Name ---
+        # Set context for handlers
+        set_current_listener_context(config_name, instance_id_for_handler) # Use CORRECT function name
 
-        logger.info(f"Loaded configuration '{config_name}' (ID: {config_id}): AE='{ae_title}', Port={port}")
+        logger.info(f"Loaded config '{config_name}' (ID: {config_id}): AE='{ae_title}', Port={port}")
 
     except Exception as e:
-        logger.error(f"Failed to load listener configuration from database for instance_id '{listener_id}': {e}", exc_info=True)
-        sys.exit(f"Database Error: Could not load config for {listener_id}")
+        logger.error(f"DB Error: Failed to load config for {listener_id}: {e}", exc_info=True)
+        sys.exit(1)
     finally:
         if db: db.close()
 
-    # 3. Attempt Initial DB Status Update (using loaded config details)
+    # 3. Initial DB Status Update
     initial_status = "starting"
-    initial_message = f"Listener process initializing using config '{config_name}'."
+    initial_message = f"Listener initializing using config '{config_name}'."
     try:
         db = SessionLocal()
-        logger.info(f"Updating DIMSE listener state for '{listener_id}' to '{initial_status}'...")
-        # Use the separate STATE update function, passing loaded config details
+        logger.info(f"Setting initial status '{initial_status}' for '{listener_id}'...")
+        # Use update_listener_state which handles create/update and requires commit outside
         crud_dimse_listener_state.update_listener_state(
             db=db, listener_id=listener_id, status=initial_status,
-            status_message=initial_message,
-            host=settings.LISTENER_HOST, # Use bind host from settings
-            port=port, # Use port from loaded config
-            ae_title=ae_title # Use AE Title from loaded config
+            status_message=initial_message, host=settings.LISTENER_HOST,
+            port=port, ae_title=ae_title
         )
-        db.commit()
+        db.commit() # Commit the initial state
         logger.info(f"Initial status '{initial_status}' committed for '{listener_id}'.")
     except Exception as e:
-        logger.error(f"Failed to set initial '{initial_status}' status in DB for '{listener_id}': {e}", exc_info=True)
+        logger.error(f"Failed set initial status in DB for '{listener_id}': {e}", exc_info=True)
         if db: db.rollback()
     finally:
         if db: db.close()
 
-    # 4. Configure and Start AE (using loaded config)
-    ae = AE(ae_title=ae_title) # Use AE Title from config
-    logger.info(f"Setting {len(contexts)} supported Storage presentation contexts...")
+    # 4. Configure and Start AE
+    ae = AE(ae_title=ae_title)
+    logger.info(f"Setting {len(contexts)} Storage contexts...")
     ae.supported_contexts = contexts
-    logger.info("Adding Verification context (C-ECHO)...")
+    logger.info("Adding Verification context...")
     ae.add_supported_context(Verification)
-
-    logger.info(f"Starting DICOM DIMSE Listener Service:")
-    logger.info(f"  Config Name: {config_name} (ID: {config_id})")
-    logger.info(f"  Listener ID: {listener_id}")
-    logger.info(f"  AE Title: {ae_title}")
-    logger.info(f"  Bind Address: {settings.LISTENER_HOST}:{port}") # Use port from config
-    logger.info(f"  DB Heartbeat Interval: {HEARTBEAT_INTERVAL_SECONDS}s")
-
-    address = (settings.LISTENER_HOST, port) # Use loaded port
+    logger.info(f"Starting DICOM Listener: Config='{config_name}', Instance='{listener_id}', AE='{ae_title}', Addr={settings.LISTENER_HOST}:{port}, Heartbeat={HEARTBEAT_INTERVAL_SECONDS}s")
+    address = (settings.LISTENER_HOST, port)
     server_thread = threading.Thread(target=_run_server_thread, args=(ae, address), daemon=True)
     server_thread.start()
     logger.info("Server thread launched.")
-    time.sleep(1)
+    time.sleep(1) # Give thread a moment to start
 
-    # 5. Main Loop (Keep the logic from the previous working version)
+    # 5. Main Loop
     last_heartbeat_update_time = time.monotonic()
-    current_status = initial_status
+    current_status = initial_status # Tracks status last known to be committed
     status_message = initial_message
     first_successful_run_completed = False
 
     try:
         while not shutdown_event.is_set():
-            if not server_thread.is_alive() and current_status != "error":
-                logger.error("Pynetdicom server thread terminated unexpectedly!")
-                current_status = "error"
-                error_details = f"Error: {server_thread_exception or 'Unknown Reason'}"
-                status_message = f"Server thread stopped unexpectedly. {error_details}"
+            # Check thread status first
+            is_thread_alive = server_thread.is_alive()
+            target_status = current_status
+            target_message = status_message
 
+            if current_status not in ("error", "stopped"):
+                if is_thread_alive:
+                    target_status = "running"
+                    target_message = "Listener active."
+                elif current_status != "starting": # Only transition to error if not already starting
+                    logger.error("Pynetdicom server thread terminated unexpectedly!")
+                    target_status = "error"
+                    error_details = f"Error: {server_thread_exception or 'Unknown Reason'}"
+                    target_message = f"Server thread stopped unexpectedly. {error_details}"
+            # --- End thread status check ---
+
+            # Determine if DB update needed
             now_monotonic = time.monotonic()
-
-            should_update_db = False
-            if current_status == "error":
-                 should_update_db = True
-            elif not first_successful_run_completed:
-                 should_update_db = True
-            elif now_monotonic - last_heartbeat_update_time >= HEARTBEAT_INTERVAL_SECONDS:
-                 should_update_db = True
+            interval_elapsed = (now_monotonic - last_heartbeat_update_time >= HEARTBEAT_INTERVAL_SECONDS)
+            status_changed = (target_status != current_status)
+            should_update_db = status_changed or (target_status == "running" and interval_elapsed) or (target_status == "running" and not first_successful_run_completed)
 
             if should_update_db:
                 db = None
+                update_attempted = False # Track if we tried to update DB
                 try:
                     db = SessionLocal()
-                    update_committed = False
+                    is_already_running = (current_status == "running" and target_status == "running")
 
-                    target_status = current_status
-                    target_message = status_message
-                    if current_status != "error" and current_status != "stopped":
-                         if server_thread.is_alive():
-                              target_status = "running"
-                              target_message = "Listener active and accepting associations."
-                         else:
-                              target_status = "error"
-                              target_message = f"Server thread stopped unexpectedly. {server_thread_exception or 'Unknown Reason'}"
+                    if is_already_running and interval_elapsed:
+                        logger.debug(f"Updating heartbeat only for '{listener_id}'...")
+                        update_attempted = True
+                        # Call the heartbeat function (which executes UPDATE but doesn't commit)
+                        updated_obj = crud_dimse_listener_state.update_listener_heartbeat(db=db, listener_id=listener_id)
+                        if updated_obj is None:
+                            logger.warning(f"Heartbeat update statement failed to find listener '{listener_id}'.")
+                            update_attempted = False # Don't try to commit if update failed
+                        # <<< COMMIT NEEDED HERE for heartbeat path >>>
+                        if update_attempted:
+                             db.commit()
+                             logger.debug(f"Committed heartbeat update for '{listener_id}'.")
 
-                    logger.debug(f"DB Update Check: Current Internal Status='{current_status}', Target DB Status='{target_status}', Thread Alive={server_thread.is_alive()}, First Run Flag={first_successful_run_completed}")
+                    elif status_changed or (target_status == "running" and not first_successful_run_completed): # Status change or initial run confirmation
+                        logger.debug(f"Performing full state update for '{listener_id}' to target '{target_status}'...")
+                        update_attempted = True
+                        # update_listener_state prepares the change but does NOT commit
+                        crud_dimse_listener_state.update_listener_state(
+                            db=db, listener_id=listener_id, status=target_status,
+                            status_message=target_message if target_status != "running" else "Listener active.",
+                            host=settings.LISTENER_HOST, port=port, ae_title=ae_title
+                        )
+                        db.commit() # Commit the state change here
+                        logger.debug(f"Committed full state update for '{listener_id}'.")
+                    else:
+                         # This case should not be reached if should_update_db logic is correct
+                         logger.warning("Reached unexpected state in DB update logic.")
 
-                    # Always use the full update method to ensure status consistency
-                    logger.debug(f"Attempting full state update for '{listener_id}' to target status '{target_status}'...")
-                    updated_obj = crud_dimse_listener_state.update_listener_state(
-                         db=db,
-                         listener_id=listener_id, # Use the instance ID for the state record
-                         status=target_status,
-                         status_message=target_message if target_status != "running" else "Listener active.",
-                         host=settings.LISTENER_HOST, # Use bind host
-                         port=port, # Use port from loaded config
-                         ae_title=ae_title # Use AE Title from loaded config
-                    )
 
-                    db.commit()
-                    update_committed = True
-                    current_status = target_status
-                    status_message = target_message if target_status != "running" else "Listener active."
-
-                    if current_status == "running" and not first_successful_run_completed:
-                         first_successful_run_completed = True
-                         logger.info(f"Listener '{listener_id}' status successfully set to 'running' in DB.")
-
-                    last_heartbeat_update_time = now_monotonic
-                    logger.debug(f"DB transaction committed for '{listener_id}'. Status written: '{current_status}'.")
+                    # Update internal state ONLY if DB update was successful
+                    if update_attempted and db.is_active: # Check if transaction is still active (commit succeeded)
+                        current_status = target_status
+                        status_message = target_message if target_status != "running" else "Listener active."
+                        last_heartbeat_update_time = now_monotonic # Reset timer only on successful update/commit
+                        if current_status == "running" and not first_successful_run_completed:
+                            first_successful_run_completed = True
+                            logger.info(f"Listener '{listener_id}' confirmed running in DB.")
+                        logger.debug(f"DB update cycle complete for '{listener_id}'. Internal status: '{current_status}'")
 
                 except Exception as e:
                     logger.error(f"Failed DB transaction for listener status/heartbeat: {e}", exc_info=settings.DEBUG)
-                    if db:
-                         try: db.rollback()
-                         except Exception as rb_exc: logger.error(f"Error during rollback attempt: {rb_exc}")
+                    if db: db.rollback()
                 finally:
-                    if db:
-                        try: db.close()
-                        except Exception as close_exc: logger.error(f"Error closing DB session: {close_exc}")
+                    if db: db.close()
 
-                if current_status != "running" and current_status != "starting":
-                    logger.info(f"Listener status is terminal ('{current_status}'), exiting main loop.")
-                    break
+            # Check if status is now terminal after the potential update attempt
+            if current_status not in ("running", "starting"):
+                logger.info(f"Listener status '{current_status}', exiting main loop.")
+                break # Exit loop if stopped or error
 
-            shutdown_event.wait(timeout=1.0)
-
+            shutdown_event.wait(timeout=1.0) # Wait for signal or next loop interval
     except KeyboardInterrupt:
         logger.info("Shutdown signal (KeyboardInterrupt) received.")
-        current_status = "stopped"
-        status_message = "Listener stopped by user signal."
-        shutdown_event.set()
-
+        current_status = "stopped"; status_message = "Listener stopped by signal."; shutdown_event.set()
     except Exception as main_loop_exc:
-         logger.error(f"Unexpected error in main listener loop: {main_loop_exc}", exc_info=True)
-         current_status = "error"
-         status_message = f"Main loop failed unexpectedly: {main_loop_exc}"
-         shutdown_event.set()
-
+        logger.error(f"Unexpected error in main listener loop: {main_loop_exc}", exc_info=True)
+        current_status = "error"; status_message = f"Main loop failed: {main_loop_exc}"; shutdown_event.set()
     finally:
-        # --- Final actions (Keep existing logic, use loaded config details) ---
-        logger.info(f"Initiating final shutdown sequence (final status: '{current_status}')...")
+        # Final actions
+        logger.info(f"Initiating final shutdown (final status: '{current_status}')...")
         db = None
         try:
             db = SessionLocal()
-            # Use loaded config details for the final state update
+            # Use update_listener_state to handle create/update logic
             crud_dimse_listener_state.update_listener_state(
-                db=db, listener_id=listener_id, status=current_status,
-                status_message=status_message,
-                host=settings.LISTENER_HOST,
-                port=port if listener_config else None, # Use loaded port if available
-                ae_title=ae_title if listener_config else None # Use loaded AE if available
+                db=db, listener_id=listener_id, status=current_status, status_message=status_message,
+                host=settings.LISTENER_HOST, port=port, ae_title=ae_title
             )
-            db.commit()
-            logger.info(f"Final DIMSE listener status update committed for '{listener_id}'.")
+            db.commit() # Commit final status
+            logger.info(f"Final status committed for '{listener_id}'.")
         except Exception as e:
-            logger.error(f"Failed to set final status '{current_status}' in DB: {e}", exc_info=True)
+            logger.error(f"Failed final status update for '{listener_id}': {e}", exc_info=True)
             if db: db.rollback()
         finally:
             if db: db.close()
 
         if 'ae' in locals() and ae: ae.shutdown()
         if 'server_thread' in locals() and server_thread.is_alive():
-            logger.info("Waiting for server thread to finish...")
-            server_thread.join(timeout=10)
-            if server_thread.is_alive(): logger.warning("Server thread did not exit cleanly within timeout.")
-            else: logger.info("Server thread joined successfully.")
-        else: logger.info("Server thread was not running or already finished.")
+            logger.info("Waiting for server thread..."); server_thread.join(timeout=5)
+            if server_thread.is_alive(): logger.warning("Server thread did not exit cleanly.")
+            else: logger.info("Server thread joined.")
+        else: logger.info("Server thread not running or already finished.")
         logger.info("Listener service shut down complete.")
 
-
-# --- Signal Handler (Keep as is) ---
+# --- Signal Handler ---
 def handle_signal(signum, frame):
     signal_name = signal.Signals(signum).name
-    logger.warning(f"Received signal {signal_name} ({signum}). Triggering graceful shutdown...")
+    logger.warning(f"Received {signal_name} ({signum}). Triggering shutdown...")
     shutdown_event.set()
-
 signal.signal(signal.SIGINT, handle_signal)
 signal.signal(signal.SIGTERM, handle_signal)
 
-# --- Script Entry Point (Keep as is) ---
+# --- Script Entry Point ---
 if __name__ == "__main__":
     logger.info("Starting DICOM Listener Service directly...")
     run_dimse_server()

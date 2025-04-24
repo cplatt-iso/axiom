@@ -14,6 +14,7 @@ from app.api.api_v1.endpoints import (
     dicomweb,
     config_dicomweb,
     config_dimse_listeners, 
+    config_dimse_qr,
 )
 
 api_router = APIRouter()
@@ -39,4 +40,10 @@ api_router.include_router(
     config_dimse_listeners.router,
     prefix="/config/dimse-listeners", # Define the specific prefix
     tags=["Configuration - DIMSE Listeners"] # Use a descriptive tag
+)
+
+api_router.include_router(
+    config_dimse_qr.router, # Use the imported router
+    prefix="/config/dimse-qr-sources", # Define the prefix
+    tags=["Configuration - DIMSE Q/R Sources"] # Define a descriptive tag
 )

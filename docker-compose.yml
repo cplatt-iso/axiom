@@ -204,6 +204,30 @@ services:
       - dicom_incoming:/dicom_data/incoming
     restart: unless-stopped
 
+  listener_3: # Define the second listener service
+    build:
+      context: .
+      dockerfile: Dockerfile.listener # Can use the same image
+    container_name: dicom_processor_listener_3 # Unique container name
+    env_file:
+      - .env # Use the same common environment variables
+    environment:
+      - AXIOM_INSTANCE_ID=storescp_3 # Unique instance ID matching DB record 2
+    depends_on: # Same dependencies
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      # Map host port 11113 to container port 11113 (matching DB config for storescp_2)
+      - "11114:11114/tcp"
+    volumes: # Same volumes
+      - ./app:/app/app
+      - dicom_incoming:/dicom_data/incoming
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   rabbitmq_data:

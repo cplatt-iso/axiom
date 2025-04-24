@@ -2,6 +2,7 @@
 from typing import List, Optional, Dict, Any, Literal
 # Pydantic v2 specific imports if needed, assuming v2 features are used
 from pydantic import BaseModel, Field, HttpUrl, validator, root_validator, field_validator, model_validator # Added field_validator, model_validator
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -198,8 +199,6 @@ class DicomWebSourceConfigUpdate(BaseModel):
 
         return values
 
-# --- Reverted DicomWebSourceConfigRead back to explicit definition with validation_alias ---
-# This is needed because the simpler inheritance doesn't handle the name/source_name mapping correctly for the response model.
 class DicomWebSourceConfigRead(BaseModel):
     id: int = Field(..., description="Internal database ID.")
     name: str = Field(..., validation_alias='source_name', description="Unique human-readable name.")
@@ -212,8 +211,14 @@ class DicomWebSourceConfigRead(BaseModel):
     auth_type: AuthType = Field(..., description="Authentication method.") # Includes apikey now
     auth_config: Optional[Dict[str, Any]] = Field(None, description="Authentication credentials.")
     search_filters: Optional[Dict[str, Any]] = Field(None, description="QIDO-RS query parameters.")
+    last_processed_timestamp: Optional[datetime] = Field(None, description="Timestamp of the last instance processed based on its DICOM date/time.")
+    last_successful_run: Optional[datetime] = Field(None, description="Timestamp of the last successful polling cycle completion.")
+    last_error_run: Optional[datetime] = Field(None, description="Timestamp of the last polling cycle that encountered an error.")
+    last_error_message: Optional[str] = Field(None, description="Details of the last error encountered.")
+    found_instance_count: int = Field(0, description="Total instances found by QIDO.")
+    queued_instance_count: int = Field(0, description="Total instances queued for processing.")
+    processed_instance_count: int = Field(0, description="Total instances successfully processed.")
 
     class Config:
         from_attributes = True # Enable ORM mode for Pydantic V2
 
-# --- End DICOMweb Source Configuration Schemas ---

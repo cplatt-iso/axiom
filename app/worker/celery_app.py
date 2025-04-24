@@ -13,8 +13,10 @@ app = Celery(
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND, # Can be None if results aren't stored
     include=[
-        'app.worker.tasks', # List modules containing your tasks here
-        'app.worker.dicomweb_poller',
+        'app.worker.tasks', # Existing tasks
+        'app.worker.dicomweb_poller', # Existing DICOMweb poller
+        'app.worker.dimse_qr_poller', # DIMSE Q/R C-FIND poller
+        'app.worker.dimse_qr_retriever', # DIMSE Q/R C-MOVE retriever
         ]
 )
 
@@ -40,20 +42,25 @@ app.conf.update(
     # task_default_routing_key = 'task.default',
 )
 
+# --- Updated Beat Schedule ---
 app.conf.beat_schedule = {
-    'poll-all-dicomweb-sources-every-minute': { # Descriptive name
+    'poll-all-dicomweb-sources-every-minute': { # Existing DICOMweb poller schedule
         'task': 'poll_all_dicomweb_sources', # Name of the task in dicomweb_poller.py
         'schedule': 60.0,  # Run every 60 seconds
-        # Alternatively, use crontab: 'schedule': crontab(minute='*/1'), # Every minute
         # 'args': (), # Add arguments if the task takes any
     },
-# Optional: Setup periodic tasks (Celery Beat) if needed later
-# app.conf.beat_schedule = {
-#     'cleanup-old-files-every-day': {
-#         'task': 'app.worker.tasks.cleanup_task',
-#         'schedule': crontab(hour=0, minute=0), # Runs daily at midnight
-#     },
+    'poll-all-dimse-qr-sources-every-five-minutes': { # DIMSE Q/R Poller schedule
+        'task': 'poll_all_dimse_qr_sources', # Name of the task in dimse_qr_poller.py
+        'schedule': 300.0, # Run every 300 seconds (5 minutes)
+        # 'args': (), # Add arguments if the task takes any
+    },
+    # Optional: Keep commented out cleanup task example if needed
+    # 'cleanup-old-files-every-day': {
+    #     'task': 'app.worker.tasks.cleanup_task',
+    #     'schedule': crontab(hour=0, minute=0), # Runs daily at midnight
+    # },
 }
+# --- End Updated Beat Schedule ---
 
 
 if __name__ == '__main__':

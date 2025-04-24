@@ -5,7 +5,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from celery import Celery # For worker inspection
@@ -23,7 +23,9 @@ from app.schemas.system import (
     DicomWebPollersStatusResponse,
     DicomWebSourceStatus,
     DimseListenerStatus,
-    DimseListenersStatusResponse
+    DimseListenersStatusResponse,
+    DimseQrSourceStatus,          
+    DimseQrSourcesStatusResponse, 
 )
 
 logger = logging.getLogger(__name__)
@@ -149,8 +151,36 @@ def get_dimse_listeners_status(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Server configuration error (listeners).")
     except Exception as e:
         logger.error(f"Error retrieving DIMSE Listeners status from DB: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error retrieving listener status.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERqVER_ERROR, detail="Database error retrieving listener status.")
 
+# --- DIMSE Q/R Source Status Endpoint ---
+@router.get(
+    "/dimse-qr-sources/status",
+    response_model=schemas.system.DimseQrSourcesStatusResponse, # Use new response schema
+    summary="Get Status of Configured DIMSE Q/R Sources",
+    dependencies=[Depends(deps.get_current_active_user)], # Requires authentication
+    tags=["System Status"],
+)
+def get_dimse_qr_sources_status(
+    *,
+    db: Session = Depends(deps.get_db),
+    skip: int = Query(0, ge=0, description="Number of records to skip."),
+    limit: int = Query(100, ge=1, le=500, description="Maximum number of records."),
+) -> schemas.system.DimseQrSourcesStatusResponse: # Use new schema in type hint
+    """
+    Retrieves the current configuration and state for all DIMSE Q/R sources
+    from the database.
+    """
+    logger.debug("Request received for DIMSE Q/R source status.")
+    try:
+        # Use the correct CRUD object
+        qr_sources_db: List[models.DimseQueryRetrieveSource] = crud.crud_dimse_qr_source.get_multi(db=db, skip=skip, limit=limit)
+
+        # Pydantic handles conversion via ORM mode in the response model
+        return schemas.system.DimseQrSourcesStatusResponse(sources=qr_sources_db)
+    except Exception as e:
+        logger.error(f"Error retrieving DIMSE Q/R source status from DB: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error retrieving DIMSE Q/R source status.")
 
 # --- Dashboard Status Endpoint (More comprehensive) ---
 # This endpoint combines checks for a quick overview, distinct from individual status endpoints.
