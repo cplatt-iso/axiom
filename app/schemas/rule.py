@@ -30,6 +30,11 @@ class MatchOperation(str, enum.Enum):
     REGEX = "regex"
     IN = "in" # Value should be a list
     NOT_IN = "not_in" # Value should be a list
+    # --- ADDED: For Association Matching ---
+    IP_ADDRESS_EQUALS = "ip_eq"
+    IP_ADDRESS_STARTS_WITH = "ip_startswith"
+    IP_ADDRESS_IN_SUBNET = "ip_in_subnet" # Requires network library
+    # --- END ADDED ---
 
 class ModifyAction(str, enum.Enum):
     SET = "set"
@@ -37,36 +42,70 @@ class ModifyAction(str, enum.Enum):
     PREPEND = "prepend"
     SUFFIX = "suffix"
     REGEX_REPLACE = "regex_replace"
+    # --- ADDED ---
+    COPY = "copy"
+    MOVE = "move"
+    # --- END ADDED ---
 
 
 # --- Helper Validator Functions ---
 def _validate_tag_format_or_keyword(v: str) -> str:
     """Shared validator for DICOM tag format or keyword."""
+    if not isinstance(v, str): raise ValueError("Tag must be a string") # Basic type check
     v = v.strip()
-    if re.match(r"^\(?\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)?$", v):
-        return v
-    if re.match(r"^[a-zA-Z0-9]+$", v):
-        return v
-    raise ValueError("Tag must be in 'GGGG,EEEE' format (or 'GGGG, EEEE') or a valid DICOM keyword")
+    # Allow explicit keyword 'SOURCE_IP', 'CALLING_AE', 'CALLED_AE' for association matching
+    if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']: return v.upper()
+    # Original tag validation
+    if re.match(r"^\(?\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)?$", v): return v
+    if re.match(r"^[a-zA-Z0-9]+$", v): return v
+    raise ValueError("Tag must be in 'GGGG,EEEE' format, a valid DICOM keyword, or one of 'SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'")
 
 def _validate_vr_format(v: Optional[str]) -> Optional[str]:
     """Shared validator for VR format (checks format only)."""
     if v is not None:
+        if not isinstance(v, str): raise ValueError("VR must be a string") # Type check
         v = v.strip().upper()
         if not re.match(r"^[A-Z]{2}$", v):
             raise ValueError("VR must be two uppercase letters")
         return v
     return None
 
+# --- NEW: Association Match Criterion ---
+class AssociationMatchCriterion(BaseModel):
+    """Defines criteria for matching against DICOM Association info."""
+    # Use Literal for specific association parameters
+    parameter: Literal['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'] = Field(..., description="Association parameter to match.")
+    op: MatchOperation = Field(..., description="Matching operation.")
+    value: Any = Field(..., description="Value to compare against.") # Type depends on op and parameter
+
+    @model_validator(mode='after')
+    def check_value_for_op(self) -> 'AssociationMatchCriterion':
+        # Example validation: Ensure value format makes sense for IP operations
+        if self.parameter == 'SOURCE_IP' and self.op == MatchOperation.IP_ADDRESS_IN_SUBNET:
+            if not isinstance(self.value, str) or '/' not in self.value:
+                raise ValueError("Value for 'ip_in_subnet' must be a CIDR string (e.g., '192.168.1.0/24').")
+        # Add more validation as needed for other op/parameter combinations
+        return self
 
 # --- Structures for Rules ---
 
 class MatchCriterion(BaseModel):
-    tag: str = Field(..., description="DICOM tag string, e.g., '0010,0010' or 'PatientName'")
-    op: MatchOperation = Field(..., description="Matching operation to perform")
-    value: Any = Field(None, description="Value to compare against (type depends on 'op', required for most ops)")
+    tag: str = Field(..., description="DICOM tag string (e.g., '0010,0010' or 'PatientName').")
+    op: MatchOperation = Field(..., description="Matching operation.")
+    value: Any = Field(None, description="Value to compare against (type depends on 'op', required for most ops).")
 
-    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
+    # Keep existing tag validator but ensure it allows standard tags
+    @field_validator('tag')
+    @classmethod
+    def validate_dicom_tag(cls, v: str) -> str:
+        """Ensures tag is DICOM tag or keyword, not association parameter."""
+        v_strip = v.strip()
+        v_upper = v_strip.upper()
+        if v_upper in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
+            raise ValueError(f"'{v_upper}' cannot be used in standard MatchCriterion, use AssociationMatchCriterion instead.")
+        # Use the original helper for actual tag validation
+        return _validate_tag_format_or_keyword(v_strip)
+
 
     @model_validator(mode='after')
     def check_value_requirements(self) -> 'MatchCriterion':
@@ -81,6 +120,11 @@ class MatchCriterion(BaseModel):
             MatchOperation.CONTAINS, MatchOperation.STARTS_WITH, MatchOperation.ENDS_WITH,
             MatchOperation.REGEX, MatchOperation.IN, MatchOperation.NOT_IN
         }
+
+        # Prevent using IP operators on standard tags
+        ip_ops = {MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET}
+        if op in ip_ops:
+             raise ValueError(f"Operation '{op.value}' is only valid for Association parameter 'SOURCE_IP'.")
 
         if op in value_required_ops and value is None:
              raise ValueError(f"Value is required for operation '{op.value}' on tag '{tag}'")
@@ -102,41 +146,50 @@ class MatchCriterion(BaseModel):
 # --- Tag Modification Schemas (Discriminated Union) ---
 
 class TagModificationBase(BaseModel):
-    tag: str = Field(..., description="DICOM tag string, e.g., '0010,0010' or 'PatientName'")
-    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
+    # No change needed here yet, specific actions define tags
+    pass
 
 class TagSetModification(TagModificationBase):
     action: Literal[ModifyAction.SET] = ModifyAction.SET
-    value: Any = Field(..., description="New value for the tag")
-    vr: Optional[str] = Field(None, max_length=2, description="Explicit VR (e.g., 'PN', 'DA') - strongly recommended if tag might not exist or to ensure correct type")
+    tag: str = Field(..., description="DICOM tag to set.")
+    value: Any = Field(..., description="New value for the tag.")
+    vr: Optional[str] = Field(None, max_length=2, description="Explicit VR (e.g., 'PN', 'DA') - strongly recommended.")
+    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
     _validate_vr = field_validator('vr')(_validate_vr_format)
 
 class TagDeleteModification(TagModificationBase):
     action: Literal[ModifyAction.DELETE] = ModifyAction.DELETE
+    tag: str = Field(..., description="DICOM tag to delete.")
+    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
 
 class TagPrependModification(TagModificationBase):
     action: Literal[ModifyAction.PREPEND] = ModifyAction.PREPEND
-    value: str = Field(..., description="String value to prepend")
+    tag: str = Field(..., description="DICOM tag to prepend to.")
+    value: str = Field(..., description="String value to prepend.")
+    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
     @field_validator('value')
     @classmethod
-    def check_value_is_string(cls, v):
+    def check_value_is_string_prepend(cls, v):
         if not isinstance(v, str): raise ValueError("Value for 'prepend' action must be a string")
         return v
 
 class TagSuffixModification(TagModificationBase):
     action: Literal[ModifyAction.SUFFIX] = ModifyAction.SUFFIX
-    value: str = Field(..., description="String value to append (suffix)")
+    tag: str = Field(..., description="DICOM tag to append to.")
+    value: str = Field(..., description="String value to append (suffix).")
+    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
     @field_validator('value')
     @classmethod
-    def check_value_is_string(cls, v):
+    def check_value_is_string_suffix(cls, v):
         if not isinstance(v, str): raise ValueError("Value for 'suffix' action must be a string")
         return v
 
 class TagRegexReplaceModification(TagModificationBase):
     action: Literal[ModifyAction.REGEX_REPLACE] = ModifyAction.REGEX_REPLACE
-    pattern: str = Field(..., description="Python-compatible regex pattern to find")
-    replacement: str = Field(..., description="Replacement string (can use capture groups like \\1)")
-
+    tag: str = Field(..., description="DICOM tag to perform regex replace on.")
+    pattern: str = Field(..., description="Python-compatible regex pattern to find.")
+    replacement: str = Field(..., description="Replacement string (can use capture groups like \\1).")
+    _validate_tag = field_validator('tag')(_validate_tag_format_or_keyword)
     @field_validator('pattern')
     @classmethod
     def check_pattern_is_valid_regex(cls, v):
@@ -144,27 +197,43 @@ class TagRegexReplaceModification(TagModificationBase):
         try: re.compile(v)
         except re.error as e: raise ValueError(f"Invalid regex pattern: {e}")
         return v
-
     @field_validator('replacement')
     @classmethod
     def check_replacement_is_string(cls, v):
         if not isinstance(v, str): raise ValueError("Replacement for 'regex_replace' action must be a string")
         return v
 
+# --- NEW Modification Types ---
+class TagCopyModification(TagModificationBase):
+    action: Literal[ModifyAction.COPY] = ModifyAction.COPY
+    source_tag: str = Field(..., description="DICOM tag to copy value FROM.")
+    destination_tag: str = Field(..., description="DICOM tag to copy value TO (will be created/overwritten).")
+    destination_vr: Optional[str] = Field(None, max_length=2, description="Optional: Explicit VR for the destination tag. If omitted, source VR is used.")
+    _validate_source_tag = field_validator('source_tag')(_validate_tag_format_or_keyword)
+    _validate_destination_tag = field_validator('destination_tag')(_validate_tag_format_or_keyword)
+    _validate_vr = field_validator('destination_vr')(_validate_vr_format)
+
+class TagMoveModification(TagModificationBase):
+    action: Literal[ModifyAction.MOVE] = ModifyAction.MOVE
+    source_tag: str = Field(..., description="DICOM tag to move value FROM (will be deleted).")
+    destination_tag: str = Field(..., description="DICOM tag to move value TO (will be created/overwritten).")
+    destination_vr: Optional[str] = Field(None, max_length=2, description="Optional: Explicit VR for the destination tag. If omitted, source VR is used.")
+    _validate_source_tag = field_validator('source_tag')(_validate_tag_format_or_keyword)
+    _validate_destination_tag = field_validator('destination_tag')(_validate_tag_format_or_keyword)
+    _validate_vr = field_validator('destination_vr')(_validate_vr_format)
+
+# --- END NEW Modification Types ---
+
+# --- Update the Union ---
 TagModification = Annotated[
     Union[
         TagSetModification, TagDeleteModification, TagPrependModification,
-        TagSuffixModification, TagRegexReplaceModification
+        TagSuffixModification, TagRegexReplaceModification,
+        TagCopyModification, TagMoveModification # Added new types
     ],
     Field(discriminator="action")
 ]
-
-# --- REMOVED old StorageDestination schema ---
-# class StorageDestination(BaseModel):
-#     type: str = Field(..., description="Storage type (e.g., 'filesystem', 'cstore', 'gcs', 'google_healthcare', 'stow_rs')")
-#     config: Dict[str, Any] = Field(default_factory=dict, description="Backend-specific configuration (e.g., path, ae_title, bucket, project_id, stow_url)")
-#     # ... (validator removed as well) ...
-# --- END REMOVED ---
+# --- End Update the Union ---
 
 
 # --- Rule Schemas ---
@@ -174,11 +243,11 @@ class RuleBase(BaseModel):
     description: Optional[str] = None
     is_active: bool = True
     priority: int = 0
-    match_criteria: List[MatchCriterion] = Field(default_factory=list)
+    match_criteria: List[MatchCriterion] = Field(default_factory=list, description="List of criteria based on DICOM tag values.")
+    # --- ADDED: Association Criteria ---
+    association_criteria: Optional[List[AssociationMatchCriterion]] = Field(None, description="Optional list of criteria based on DICOM association info (Calling AE, Source IP etc.). Applies only to C-STORE/STOW inputs.")
+    # --- END ADDED ---
     tag_modifications: List[TagModification] = Field(default_factory=list)
-    # --- REMOVED old destinations field ---
-    # destinations: List[StorageDestination] = Field(default_factory=list)
-    # --- END REMOVED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Applies to all if null/empty.")
 
     @field_validator('applicable_sources')
@@ -189,11 +258,22 @@ class RuleBase(BaseModel):
             if any(not isinstance(s, str) or not s.strip() for s in v): raise ValueError("Each item in applicable_sources must be a non-empty string")
         return v
 
+    # --- ADDED: Validator to ensure association criteria op/parameter compatibility ---
+    @model_validator(mode='after')
+    def check_association_ops(self) -> 'RuleBase':
+        if self.association_criteria:
+            for criterion in self.association_criteria:
+                if criterion.parameter != 'SOURCE_IP' and criterion.op in [MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET]:
+                     raise ValueError(f"Operation '{criterion.op.value}' is only valid for parameter 'SOURCE_IP'.")
+                # Add other checks if needed, e.g., regex only for AE titles
+        return self
+    # --- END ADDED ---
+
+
 class RuleCreate(RuleBase):
     ruleset_id: int
-    # --- ADDED: List of destination config IDs ---
     destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations.")
-    # --- END ADDED ---
+
 
 class RuleUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
@@ -201,31 +281,30 @@ class RuleUpdate(BaseModel):
     is_active: Optional[bool] = None
     priority: Optional[int] = None
     match_criteria: Optional[List[MatchCriterion]] = None
+    # --- ADDED: Association Criteria ---
+    association_criteria: Optional[List[AssociationMatchCriterion]] = None
+    # --- END ADDED ---
     tag_modifications: Optional[List[TagModification]] = None
-    # --- REMOVED old destinations field ---
-    # destinations: Optional[List[StorageDestination]] = None
-    # --- END REMOVED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Set to null to apply to all.")
     _validate_sources = field_validator('applicable_sources')(RuleBase.validate_sources_not_empty_strings.__func__)
-    # --- ADDED: List of destination config IDs ---
     destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations. Replaces existing list.")
+    # --- ADDED: Validator for Association Criteria on Update ---
+    _validate_assoc_ops = model_validator(mode='after')(RuleBase.check_association_ops)
     # --- END ADDED ---
+
 
 class RuleInDBBase(RuleBase):
     id: int
     ruleset_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    # --- ADDED: Eager loaded destinations ---
-    destinations: List[StorageBackendConfigRead] = [] # Use the Read schema for related objects
-    # --- END ADDED ---
-    # --- Use ConfigDict for Pydantic v2 ---
+    destinations: List[StorageBackendConfigRead] = []
     model_config = ConfigDict(from_attributes=True)
-    # --- END Use ConfigDict ---
+
 
 class Rule(RuleInDBBase): pass
 
-# --- RuleSet Schemas ---
+# --- RuleSet Schemas (No changes needed here) ---
 
 class RuleSetBase(BaseModel):
     name: str = Field(..., max_length=100)
@@ -247,10 +326,9 @@ class RuleSetInDBBase(RuleSetBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    rules: List[Rule] = [] # Rules will now contain the populated destinations
-    # --- Use ConfigDict for Pydantic v2 ---
+    rules: List[Rule] = []
     model_config = ConfigDict(from_attributes=True)
-    # --- END Use ConfigDict ---
+
 
 class RuleSet(RuleSetInDBBase): pass
 
@@ -262,6 +340,4 @@ class RuleSetSummary(BaseModel):
     priority: int
     execution_mode: RuleSetExecutionMode
     rule_count: int = Field(..., description="Number of rules in this ruleset")
-    # --- Use ConfigDict for Pydantic v2 ---
     model_config = ConfigDict(from_attributes=True)
-    # --- END Use ConfigDict ---

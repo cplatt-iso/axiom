@@ -98,13 +98,8 @@ class Settings(BaseSettings):
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_DELAY: int = 60
 
-    # --- REMOVED Static DICOM Listener Settings ---
-    # DICOM_LISTENER_AET: str = "AXIOM_FLOW"
-    # DICOM_LISTENER_PORT: int = 11112
-    # DEFAULT_SCP_SOURCE_ID: str = "dicom_scp_main"
-    # --- END REMOVED ---
-    # Keep LISTENER_HOST as it determines the bind address (usually 0.0.0.0)
-    LISTENER_HOST: str = "0.0.0.0"
+    # --- DICOM Listener Settings ---
+    LISTENER_HOST: str = "0.0.0.0" # Bind address for listeners
 
 
     # --- Storage & File Handling Settings ---
@@ -116,15 +111,17 @@ class Settings(BaseSettings):
     DELETE_ON_NO_DESTINATION: bool = False
     MOVE_TO_ERROR_ON_PARTIAL_FAILURE: bool = True
 
+    # --- Processing Logic Settings ---
+    LOG_ORIGINAL_ATTRIBUTES: bool = True # Add this line (default to True or False)
+
     # --- DICOMweb Poller Settings ---
     DICOMWEB_POLLER_DEFAULT_FALLBACK_DAYS: int = 7
     DICOMWEB_POLLER_OVERLAP_MINUTES: int = 5
     DICOMWEB_POLLER_QIDO_LIMIT: int = 5000
     DICOMWEB_POLLER_MAX_SOURCES: int = 100
 
-    # --- Static Known Input Sources (Base List - REMOVED SCP ID) ---
+    # --- Static Known Input Sources ---
     KNOWN_INPUT_SOURCES: List[str] = [
-        # DEFAULT_SCP_SOURCE_ID removed here
         "api_json",
         "stow_rs",
     ]
@@ -132,9 +129,8 @@ class Settings(BaseSettings):
     @field_validator("KNOWN_INPUT_SOURCES", mode='before')
     @classmethod
     def assemble_known_sources(cls, v: Union[str, List[str]], info: ValidationInfo) -> List[str]:
-        # Keep default list empty now, rely on env var or static values above
-        default_sources: List[str] = [] # Start empty or use only static ones above
-        static_sources_in_code = ["api_json", "stow_rs"] # Define static ones here
+        default_sources: List[str] = []
+        static_sources_in_code = ["api_json", "stow_rs"]
 
         parsed_sources = []
         if isinstance(v, str):
@@ -144,14 +140,10 @@ class Settings(BaseSettings):
             else: parsed_sources = [i.strip() for i in v.split(",") if i.strip()]
         elif isinstance(v, list): parsed_sources = v
 
-        # Combine static code defaults with parsed env var values
         combined = set(static_sources_in_code); combined.update(parsed_sources)
         return sorted(list(combined))
 
-    # --- Dynamic URL Builders & Directory Creation ---
     def model_post_init(self, __context: Any) -> None:
-        """Build derived settings like URLs after initial loading."""
-        # Build Celery Broker URL
         if self.CELERY_BROKER_URL is None:
             try:
                 user = self.RABBITMQ_USER
@@ -160,18 +152,15 @@ class Settings(BaseSettings):
                 self.CELERY_BROKER_URL = f"amqp://{user}:{pw}@{host}:{port}{vhost}"
             except Exception as e: logger.error(f"Error building Celery Broker URL: {e}")
 
-        # Build REDIS_URL if not set
         if self.REDIS_URL is None:
              try: self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
              except Exception as e: logger.error(f"Error building Redis URL: {e}")
 
-        # Build Celery Result Backend URL (using Redis URL)
         if self.CELERY_RESULT_BACKEND is None and self.REDIS_URL:
             self.CELERY_RESULT_BACKEND = self.REDIS_URL
         elif self.CELERY_RESULT_BACKEND is None:
              logger.error("Could not build Celery Result Backend URL (Redis URL missing/invalid)")
 
-        # Ensure directories exist
         paths_to_create = [self.DICOM_STORAGE_PATH, self.DICOM_ERROR_PATH]
         if self.TEMP_DIR: paths_to_create.append(self.TEMP_DIR)
         for path in paths_to_create:
@@ -179,20 +168,16 @@ class Settings(BaseSettings):
                 try: path.mkdir(parents=True, exist_ok=True); logger.debug(f"Ensured directory exists: {path}")
                 except Exception as e: logger.error(f"Error creating directory {path}: {e}")
 
-# Instantiate the settings
 settings = Settings()
 
-# Log essential settings on startup
 logger.info("--- Axiom Flow Configuration Loaded ---")
 logger.info(f"DEBUG mode: {settings.DEBUG}")
 db_uri_display = str(settings.SQLALCHEMY_DATABASE_URI).split('@')[-1] if settings.SQLALCHEMY_DATABASE_URI else 'Not Set'
 logger.info(f"Database URI (host/db): {db_uri_display}")
 logger.info(f"Celery Result Backend: {settings.CELERY_RESULT_BACKEND or 'Not Set'}")
 logger.info(f"Redis URL: {settings.REDIS_URL or 'Not Set'}")
-# --- REMOVED Static Listener Log ---
-# logger.info(f"DICOM SCP AE Title: {settings.DICOM_LISTENER_AET} Port: {settings.DICOM_LISTENER_PORT}")
-# --- END REMOVED ---
 logger.info(f"Incoming DICOM Path: {settings.DICOM_STORAGE_PATH}")
 logger.info(f"Error DICOM Path: {settings.DICOM_ERROR_PATH}")
+logger.info(f"Log Original Attributes: {settings.LOG_ORIGINAL_ATTRIBUTES}") # Log the new setting
 logger.info(f"Known Input Sources (Static + Env): {settings.KNOWN_INPUT_SOURCES}")
 logger.info("---------------------------------------")

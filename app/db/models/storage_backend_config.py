@@ -5,20 +5,12 @@ from datetime import datetime
 from sqlalchemy import String, Boolean, Text, JSON, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
-# --- Import association table from rule.py ---
-from .rule import rule_destination_association
-# --- END Import ---
-
+# Import Base and the centrally defined association table
+from app.db.base import Base, rule_destination_association
+# --- REMOVED import of rule_destination_association from rule.py ---
 
 class StorageBackendConfig(Base):
-    """
-    Database model to store configurations for various storage backends
-    (e.g., filesystem, cstore, gcs, google_healthcare, stow_rs).
-    """
     __tablename__ = "storage_backend_configs"
-
-    # Inherits id, created_at, updated_at from Base
 
     name: Mapped[str] = mapped_column(
         String(100),
@@ -52,11 +44,10 @@ class StorageBackendConfig(Base):
         comment="Whether this storage backend configuration is active and usable in rules."
     )
 
-    # --- UPDATED: Relationship uses imported association table ---
-    # Type hint uses string forward reference because Rule is defined elsewhere
+    # --- Use string forward reference for "Rule" and imported table object ---
     rules: Mapped[List["Rule"]] = relationship(
-        "Rule", # Use string name
-        secondary=rule_destination_association,
+        "Rule",
+        secondary=rule_destination_association, # Use imported object
         back_populates="destinations"
     )
     # --- END UPDATED ---
