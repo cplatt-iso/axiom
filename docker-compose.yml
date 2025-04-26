@@ -29,10 +29,12 @@ services:
       - "${RABBITMQ_PORT:-5672}:5672"   # AMQP port
       - "15672:15672" # Management UI port (access via http://localhost:15672)
     healthcheck:
-        test: ["CMD", "rabbitmqctl", "status"]
+#        test: ["CMD", "rabbitmqctl", "status"]
+        test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
         interval: 10s
         timeout: 5s
-        retries: 5
+        retries: 10
+        start_period: 10s
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq/
     restart: unless-stopped
@@ -231,6 +233,27 @@ services:
       - dicom_incoming:/dicom_data/incoming
     restart: unless-stopped
 
+  crosswalk_db:
+    image: mysql:8.0
+    container_name: axiom_crosswalk_mysql
+    command: --default-authentication-plugin=mysql_native_password 
+    environment:
+      MYSQL_ROOT_PASSWORD: password_root
+      MYSQL_DATABASE: crosswalk_data
+      MYSQL_USER: crosswalk_user
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./crosswalk_init:/docker-entrypoint-initdb.d
+      - crosswalk_mysql_data:/ssd/volumes/mysql
+    healthcheck:
+        test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost", "-uroot", "-ppassword_root"] # Use root password
+        interval: 10s
+        timeout: 5s
+        retries: 5
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   rabbitmq_data:
@@ -239,3 +262,4 @@ volumes:
   dicom_errors:
   redis_data:
   orthanc_db:
+  crosswalk_mysql_data:

@@ -17,6 +17,7 @@ app = Celery(
         'app.worker.dicomweb_poller', # Existing DICOMweb poller
         'app.worker.dimse_qr_poller', # DIMSE Q/R C-FIND poller
         'app.worker.dimse_qr_retriever', # DIMSE Q/R C-MOVE retriever
+        'app.crosswalk.tasks',
         ]
 )
 
@@ -54,6 +55,10 @@ app.conf.beat_schedule = {
         'schedule': 300.0, # Run every 300 seconds (5 minutes)
         # 'args': (), # Add arguments if the task takes any
     },
+    'sync-all-crosswalk-sources-every-hour': {
+    'task': 'sync_all_enabled_crosswalk_sources', # Name of the beat task in crosswalk.tasks.py
+    'schedule': 3600.0,  # Run every hour by default. Can be overridden by source config later.
+    }, 
     # Optional: Keep commented out cleanup task example if needed
     # 'cleanup-old-files-every-day': {
     #     'task': 'app.worker.tasks.cleanup_task',

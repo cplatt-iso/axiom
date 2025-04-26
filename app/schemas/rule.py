@@ -42,9 +42,10 @@ class ModifyAction(str, enum.Enum):
     PREPEND = "prepend"
     SUFFIX = "suffix"
     REGEX_REPLACE = "regex_replace"
-    # --- ADDED ---
     COPY = "copy"
     MOVE = "move"
+    # --- ADDED ---
+    CROSSWALK = "crosswalk"
     # --- END ADDED ---
 
 
@@ -222,14 +223,21 @@ class TagMoveModification(TagModificationBase):
     _validate_destination_tag = field_validator('destination_tag')(_validate_tag_format_or_keyword)
     _validate_vr = field_validator('destination_vr')(_validate_vr_format)
 
-# --- END NEW Modification Types ---
+# --- NEW Crosswalk Modification Schema ---
+class TagCrosswalkModification(TagModificationBase):
+    action: Literal[ModifyAction.CROSSWALK] = ModifyAction.CROSSWALK
+    crosswalk_map_id: int = Field(..., description="ID of the CrosswalkMap configuration to use.")
+# --- END NEW Crosswalk Modification ---
 
 # --- Update the Union ---
 TagModification = Annotated[
     Union[
         TagSetModification, TagDeleteModification, TagPrependModification,
         TagSuffixModification, TagRegexReplaceModification,
-        TagCopyModification, TagMoveModification # Added new types
+        TagCopyModification, TagMoveModification,
+        # --- ADDED ---
+        TagCrosswalkModification
+        # --- END ADDED ---
     ],
     Field(discriminator="action")
 ]
@@ -247,7 +255,9 @@ class RuleBase(BaseModel):
     # --- ADDED: Association Criteria ---
     association_criteria: Optional[List[AssociationMatchCriterion]] = Field(None, description="Optional list of criteria based on DICOM association info (Calling AE, Source IP etc.). Applies only to C-STORE/STOW inputs.")
     # --- END ADDED ---
+    # --- UPDATED: TagModification type hint ---
     tag_modifications: List[TagModification] = Field(default_factory=list)
+    # --- END UPDATED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Applies to all if null/empty.")
 
     @field_validator('applicable_sources')
@@ -284,7 +294,9 @@ class RuleUpdate(BaseModel):
     # --- ADDED: Association Criteria ---
     association_criteria: Optional[List[AssociationMatchCriterion]] = None
     # --- END ADDED ---
+    # --- UPDATED: TagModification type hint ---
     tag_modifications: Optional[List[TagModification]] = None
+    # --- END UPDATED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Set to null to apply to all.")
     _validate_sources = field_validator('applicable_sources')(RuleBase.validate_sources_not_empty_strings.__func__)
     destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations. Replaces existing list.")
@@ -341,3 +353,19 @@ class RuleSetSummary(BaseModel):
     execution_mode: RuleSetExecutionMode
     rule_count: int = Field(..., description="Number of rules in this ruleset")
     model_config = ConfigDict(from_attributes=True)
+
+# --- Added for JSON Processing Endpoint ---
+class JsonProcessRequest(BaseModel):
+    dicom_json: Dict[str, Any] = Field(..., description="DICOM header represented as JSON.")
+    ruleset_id: Optional[int] = Field(None, description="Optional specific RuleSet ID to apply.")
+    source_identifier: str = Field(default="api_json", description="Source identifier for matching.")
+
+class JsonProcessResponse(BaseModel):
+    original_json: Dict[str, Any]
+    morphed_json: Dict[str, Any]
+    applied_ruleset_id: Optional[int] = None
+    applied_rule_ids: List[int] = []
+    source_identifier: str
+    errors: List[str] = []
+    warnings: List[str] = [] # Added warnings
+# --- End Added ---

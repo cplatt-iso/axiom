@@ -98,3 +98,9 @@ from .storage_backend_config import (
     StorageBackendConfigRead,
     AllowedBackendType, # Export the Literal type too
 )
+
+from .crosswalk import (
+    CrosswalkDataSourceBase, CrosswalkDataSourceCreate, CrosswalkDataSourceUpdate, CrosswalkDataSourceRead,
+    CrosswalkMapBase, CrosswalkMapCreate, CrosswalkMapUpdate, CrosswalkMapRead,
+    CrosswalkDbType, CrosswalkSyncStatus
+)

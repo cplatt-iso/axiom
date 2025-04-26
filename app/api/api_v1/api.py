@@ -15,9 +15,8 @@ from app.api.api_v1.endpoints import (
     config_dicomweb,
     config_dimse_listeners,
     config_dimse_qr,
-    # --- ADDED ---
     config_storage_backends,
-    # --- END ADDED ---
+    config_crosswalk,
 )
 
 api_router = APIRouter()
@@ -52,4 +51,9 @@ api_router.include_router(
     config_storage_backends.router,
     prefix="/config/storage-backends",
     tags=["Configuration - Storage Backends"]
+)
+api_router.include_router(
+    config_crosswalk.router,
+    prefix="/config/crosswalk",
+    tags=["Configuration - Crosswalk"]
 )
