@@ -17,11 +17,12 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
     *   Apply complex matching criteria based on DICOM tags (equality, comparison, existence, contains, regex, list membership) and DICOM association details (Calling AE, Called AE, Source IP - *IP matching logic pending*).
     *   Match rules against specific input sources or apply globally.
     *   Support `FIRST_MATCH` or `ALL_MATCHES` execution modes per ruleset.
+    *   **Scheduling:** Rules can be optionally linked to reusable Schedule definitions, activating them only during specified time windows (days of week, start/end times, handles overnight). Rules without a schedule are considered always active (if enabled).
 *   **Tag Morphing & Crosswalking:**
     *   Modify, add, or delete DICOM tags based on matched rules.
-    *   Supported actions: `set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`.
-    *   **Crosswalk Action:** Perform tag value lookups and replacements based on data from external databases (MySQL, PostgreSQL, SQL Server supported via config). Uses Redis caching for lookups and optional background sync (Celery Beat) for cache pre-warming/health checks. Configured via `CrosswalkDataSource` and `CrosswalkMap` entities.
-    *   Log original tag values to Original Attributes Sequence (0x0400,0x0550) when modifications occur (controlled by `LOG_ORIGINAL_ATTRIBUTES` setting - *requires full verification for all modification types*).
+    *   Supported actions: `set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`.
+    *   **Crosswalk Action:** Perform tag value lookups and replacements based on data from external databases (MySQL, PostgreSQL, SQL Server supported). Uses Redis caching and optional background sync. Configured via `CrosswalkDataSource` and `CrosswalkMap` entities.
+    *   Log original tag values to Original Attributes Sequence (0x0400,0x0550) when modifications occur (controlled by `LOG_ORIGINAL_ATTRIBUTES` setting - *requires full verification*).
 *   **Flexible Routing:** Send processed objects to various destinations configured as Storage Backends:
     *   Local Filesystem (within container volume mounts)
     *   Remote DICOM peers via C-STORE SCU
@@ -30,7 +31,7 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
     *   Generic DICOMweb STOW-RS endpoints
     *   Rules link to Storage Backends via a Many-to-Many relationship.
 *   **Scalability:** Designed for high throughput using asynchronous task processing (Celery/RabbitMQ) and containerization (Docker).
-*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Rulesets, Rules, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
+*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Schedules, Rulesets, Rules, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
 *   **Security:**
     *   User authentication via Google OAuth 2.0 (backend validates Google token, issues JWT).
     *   API Key authentication (prefix + secret, hashed storage, scoped to user).
@@ -66,8 +67,8 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
 
 1.  **Clone the repository:**
     ```bash
-    # git clone ...
-    cd axiom
+    git clone <your-repo-url> axiom-flow
+    cd axiom-flow/backend # Assuming backend is in a 'backend' subfolder
     ```
 
 2.  **Configure Environment:**
@@ -78,52 +79,50 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
         *   Set your `GOOGLE_OAUTH_CLIENT_ID` if using Google Login.
         *   Configure `BACKEND_CORS_ORIGINS` to include your frontend URL (e.g., `http://localhost:3000`).
         *   Set `LOG_ORIGINAL_ATTRIBUTES` to `True` or `False`.
-        *   Review other DB, RabbitMQ, Redis, storage paths.
-    *   *(Optional)* Place Google Cloud service account key file (e.g., `axiom-flow-gcs-key.json`) in the project root if using GCS/Healthcare backends and not relying solely on Application Default Credentials (ADC) within the container environment. Update `GOOGLE_APPLICATION_CREDENTIALS` in `docker-compose.yml` if needed.
+        *   Review other DB, RabbitMQ, Redis, storage paths. Ensure paths like `DICOM_STORAGE_PATH`, `DICOM_ERROR_PATH`, `FILESYSTEM_STORAGE_PATH` exist within the container or map correctly to host volumes in `docker-compose.yml`.
+    *   *(Optional)* Place Google Cloud service account key file (e.g., `axiom-flow-gcs-key.json`) in the project root if using GCS/Healthcare backends and update `GOOGLE_APPLICATION_CREDENTIALS` in `docker-compose.yml` if needed.
     *   **DO NOT** commit your actual `.env` file.
 
 3.  **Create Crosswalk Init Script (Optional for Demo):**
-    *   If using the example MySQL crosswalk DB in `docker-compose.yml`, create the `crosswalk_init` directory and `crosswalk_init/init_crosswalk.sql` file as described in the setup steps. Modify the sample data as needed.
+    *   If using the example MySQL crosswalk DB in `docker-compose.yml`, create the `crosswalk_init` directory and `crosswalk_init/init_crosswalk.sql` file as described previously.
 
-4.  **Build and Run Docker Containers:**
+4.  **Build and Run Docker Containers:** (Run from the directory containing `docker-compose.yml`)
     ```bash
     docker compose build
     docker compose up -d
     ```
-    This starts the API, Celery worker(s), Celery Beat scheduler, DIMSE listener(s), Orthanc (example peer), PostgreSQL DB, Crosswalk MySQL DB (example), message broker, and Redis.
 
 5.  **Database Migrations:** Apply any pending database schema changes:
     ```bash
     docker compose exec api alembic upgrade head
     ```
-    *(Run this initially and after pulling changes that include new migrations)*
+    *(Run this initially and after pulling changes that include new migrations, especially after adding the Schedule model)*
 
 6.  **Create Initial Superuser/Admin (Recommended):**
     *   Use the provided script (ensure DB is up):
         ```bash
         docker compose exec api python inject_admin.py
         ```
-    *   *(Alternatively, first Google login with email matching `FIRST_SUPERUSER_EMAIL` might work depending on exact `crud_user.py` logic)*
 
 7.  **Verify Services:**
     *   Check container status: `docker compose ps`
-    *   View logs: `docker compose logs -f api worker beat listener crosswalk_db` (add other listeners/orthanc as needed)
-    *   Access API docs: `http://localhost:8001/api/v1/docs` (default host port)
+    *   View logs: `docker compose logs -f api worker beat listener listener_2 listener_3 crosswalk_db` (adjust listener names as needed)
+    *   Access API docs: `http://localhost:8001/api/v1/docs` (assuming default host port mapping)
     *   Access RabbitMQ UI: `http://localhost:15672` (default user: guest, pass: guest)
     *   Access Orthanc UI: `http://localhost:8042` (default user: orthancuser, pass: orthancpassword)
-    *   Connect to MySQL DB (if port exposed): Use a tool like DBeaver or `mysql` cli on host port 3306 with user `crosswalk_user` / pass `crosswalk_password_CHANGE_ME` to database `crosswalk_data`.
 
 ## Usage
 
 1.  **Login:** Use the frontend UI (connected to this backend) with Google Login or generate an API Key via the UI/API (`/apikeys`).
 2.  **Configure:** Use the frontend UI or the API endpoints (`/api/v1/docs`) to manage:
     *   Storage Backends (`/config/storage-backends`).
-    *   Crosswalk Data Sources and Mappings (`/config/crosswalk/...`). Test connections and trigger syncs via API.
-    *   RuleSets and Rules (`/rules-engine/*`), linking rules to destinations and adding `crosswalk` modifications referencing a configured `CrosswalkMap` ID.
+    *   **Schedules** (`/config/schedules`).
+    *   Crosswalk Data Sources and Mappings (`/config/crosswalk/...`).
+    *   RuleSets and Rules (`/rules-engine/*`), linking rules to destinations and **optional schedules**, and adding modifications including `crosswalk`.
     *   Input sources: DICOMweb Sources (`/config/dicomweb-sources`), DIMSE Listeners (`/config/dimse-listeners`), DIMSE Q/R Sources (`/config/dimse-qr-sources`).
     *   Users, Roles, and API keys (`/users`, `/roles`, `/apikeys`).
 3.  **Send DICOM Data:**
-    *   **C-STORE:** Send to the AE Title/Port defined in your active `DimseListenerConfig` records.
+    *   **C-STORE:** Send to the AE Title/Port defined in active `DimseListenerConfig` records.
     *   **STOW-RS:** POST multipart/related DICOM data to `/api/v1/dicomweb/studies`.
 4.  **Monitor:**
     *   Check the frontend dashboard for component status and metrics.
@@ -136,28 +135,26 @@ Interactive API documentation (Swagger UI) is available at `/api/v1/docs` when t
 
 ## Current Status
 
-*   Core architecture (API, worker, DB, message queue, cache) is functional.
-*   Authentication (Google, API Key) and RBAC are implemented.
-*   All planned DIMSE/DICOMweb input sources and polling/retrieval methods are implemented.
-*   All planned output destinations (Filesystem, C-STORE, GCS, Google Healthcare, Generic STOW-RS) are implemented.
-*   Rule engine supports tag/association matching and tag modifications (`set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`).
-*   **Crosswalk feature implemented:** Backend configuration (Data Source, Map), API, lookup service (Redis cache + live DB query), optional sync task, and `crosswalk` rule action integrated.
+*   Core architecture functional.
+*   Authentication (Google, API Key) and RBAC implemented.
+*   All planned DIMSE/DICOMweb input sources and polling/retrieval methods implemented.
+*   All planned output destinations implemented.
+*   Rule engine supports tag/association matching (IP Ops pending), **scheduling**, and tag modifications (`set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`).
+*   Crosswalk feature fully implemented.
+*   **Scheduling feature fully implemented (backend models, schemas, CRUD, API, processing logic).**
 *   Original Attributes Sequence logging framework implemented (needs full verification).
-*   Configuration via API is available for all major components.
-*   Monitoring endpoints provide basic status and metrics for most components.
+*   Configuration via API available for all major components including Schedules.
+*   Monitoring endpoints functional.
 
 ## Next Steps / Future Goals
 
-*   Implement GCS Polling.
-*   Implement IP Matching logic for Association Criteria.
-*   Fully verify Original Attributes Sequence logging across all modification types.
-*   Develop comprehensive test suite (pytest).
-*   Enhance monitoring and add detailed metrics/visualizations (e.g., Grafana).
-*   Implement C-GET support for DIMSE Q/R.
-*   Refine error handling and user feedback.
-*   UI Refinements (Crosswalk table discovery, etc.).
-*   AI Integration for normalization/enrichment.
-*   Deployment documentation (Kubernetes).
+*   **Implement IP Matching (Backend):** Logic for association criteria.
+*   **Verify Original Attributes Logging (Backend):** Test across all modification types.
+*   **Implement GCS Polling (Backend & Frontend):** Config, task, UI page/widget.
+*   **Testing:** Develop comprehensive backend (pytest) and frontend test suites.
+*   **UI Refinements:** Enhance Crosswalk form (schema discovery?), dashboard visuals, rule testing feature.
+*   **Documentation:** Add API examples, deployment guides.
+*   **Longer-Term:** C-GET support, AI integration, Kubernetes.
 
 ## Contributing
 

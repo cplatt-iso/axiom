@@ -1,17 +1,17 @@
 # app/schemas/rule.py
 
 from typing import List, Optional, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict, ValidationInfo
 from typing_extensions import Annotated
 import enum
 from datetime import datetime
 import re
-# --- Import StorageBackendConfigRead ---
 from .storage_backend_config import StorageBackendConfigRead
-# --- Import ScheduleRead ---
 from .schedule import ScheduleRead
+import logging
 
-# --- Enums ---
+logger = logging.getLogger(__name__)
+
 class RuleSetExecutionMode(str, enum.Enum):
     FIRST_MATCH = "FIRST_MATCH"
     ALL_MATCHES = "ALL_MATCHES"
@@ -29,8 +29,8 @@ class MatchOperation(str, enum.Enum):
     EXISTS = "exists"
     NOT_EXISTS = "not_exists"
     REGEX = "regex"
-    IN = "in" # Value should be a list
-    NOT_IN = "not_in" # Value should be a list
+    IN = "in"
+    NOT_IN = "not_in"
     IP_ADDRESS_EQUALS = "ip_eq"
     IP_ADDRESS_STARTS_WITH = "ip_startswith"
     IP_ADDRESS_IN_SUBNET = "ip_in_subnet"
@@ -45,32 +45,29 @@ class ModifyAction(str, enum.Enum):
     MOVE = "move"
     CROSSWALK = "crosswalk"
 
-
-# --- Helper Validator Functions ---
 def _validate_tag_format_or_keyword(v: str) -> str:
-    """Shared validator for DICOM tag format or keyword."""
-    if not isinstance(v, str): raise ValueError("Tag must be a string")
+    if not isinstance(v, str):
+        raise ValueError("Tag must be a string")
     v = v.strip()
-    # Allow explicit keyword 'SOURCE_IP', 'CALLING_AE', 'CALLED_AE' for association matching
-    if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']: return v.upper()
-    # Original tag validation
-    if re.match(r"^\(?\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)?$", v): return v
-    if re.match(r"^[a-zA-Z0-9]+$", v): return v
+    if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
+        return v.upper()
+    if re.match(r"^\(?\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)?$", v):
+        return v
+    if re.match(r"^[a-zA-Z0-9]+$", v):
+        return v
     raise ValueError("Tag must be in 'GGGG,EEEE' format, a valid DICOM keyword, or one of 'SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'")
 
 def _validate_vr_format(v: Optional[str]) -> Optional[str]:
-    """Shared validator for VR format (checks format only)."""
     if v is not None:
-        if not isinstance(v, str): raise ValueError("VR must be a string")
+        if not isinstance(v, str):
+            raise ValueError("VR must be a string")
         v = v.strip().upper()
         if not re.match(r"^[A-Z]{2}$", v):
             raise ValueError("VR must be two uppercase letters")
         return v
     return None
 
-# --- Association Match Criterion ---
 class AssociationMatchCriterion(BaseModel):
-    """Defines criteria for matching against DICOM Association info."""
     parameter: Literal['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'] = Field(..., description="Association parameter to match.")
     op: MatchOperation = Field(..., description="Matching operation.")
     value: Any = Field(..., description="Value to compare against.")
@@ -82,7 +79,6 @@ class AssociationMatchCriterion(BaseModel):
                 raise ValueError("Value for 'ip_in_subnet' must be a CIDR string (e.g., '192.168.1.0/24').")
         return self
 
-# --- Match Criterion ---
 class MatchCriterion(BaseModel):
     tag: str = Field(..., description="DICOM tag string (e.g., '0010,0010' or 'PatientName').")
     op: MatchOperation = Field(..., description="Matching operation.")
@@ -132,9 +128,6 @@ class MatchCriterion(BaseModel):
 
         return self
 
-
-# --- Tag Modification Schemas (Discriminated Union) ---
-
 class TagModificationBase(BaseModel):
     pass
 
@@ -159,7 +152,8 @@ class TagPrependModification(TagModificationBase):
     @field_validator('value')
     @classmethod
     def check_value_is_string_prepend(cls, v):
-        if not isinstance(v, str): raise ValueError("Value for 'prepend' action must be a string")
+        if not isinstance(v, str):
+            raise ValueError("Value for 'prepend' action must be a string")
         return v
 
 class TagSuffixModification(TagModificationBase):
@@ -170,7 +164,8 @@ class TagSuffixModification(TagModificationBase):
     @field_validator('value')
     @classmethod
     def check_value_is_string_suffix(cls, v):
-        if not isinstance(v, str): raise ValueError("Value for 'suffix' action must be a string")
+        if not isinstance(v, str):
+            raise ValueError("Value for 'suffix' action must be a string")
         return v
 
 class TagRegexReplaceModification(TagModificationBase):
@@ -182,14 +177,18 @@ class TagRegexReplaceModification(TagModificationBase):
     @field_validator('pattern')
     @classmethod
     def check_pattern_is_valid_regex(cls, v):
-        if not isinstance(v, str): raise ValueError("Pattern for 'regex_replace' action must be a string")
-        try: re.compile(v)
-        except re.error as e: raise ValueError(f"Invalid regex pattern: {e}")
+        if not isinstance(v, str):
+            raise ValueError("Pattern for 'regex_replace' action must be a string")
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern: {e}")
         return v
     @field_validator('replacement')
     @classmethod
     def check_replacement_is_string(cls, v):
-        if not isinstance(v, str): raise ValueError("Replacement for 'regex_replace' action must be a string")
+        if not isinstance(v, str):
+            raise ValueError("Replacement for 'regex_replace' action must be a string")
         return v
 
 class TagCopyModification(TagModificationBase):
@@ -224,26 +223,25 @@ TagModification = Annotated[
     Field(discriminator="action")
 ]
 
-
-# --- Rule Schemas ---
-
 class RuleBase(BaseModel):
     name: str = Field(..., max_length=100)
     description: Optional[str] = None
     is_active: bool = True
     priority: int = 0
-    match_criteria: List[MatchCriterion] = Field(default_factory=list, description="List of criteria based on DICOM tag values.")
-    association_criteria: Optional[List[AssociationMatchCriterion]] = Field(None, description="Optional list of criteria based on DICOM association info (Calling AE, Source IP etc.). Applies only to C-STORE/STOW inputs.")
+    match_criteria: List[MatchCriterion] = Field(default_factory=list)
+    association_criteria: Optional[List[AssociationMatchCriterion]] = Field(None)
     tag_modifications: List[TagModification] = Field(default_factory=list)
-    applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Applies to all if null/empty.")
-    schedule_id: Optional[int] = Field(None, description="Optional ID of the Schedule to control when this rule is active.")
+    applicable_sources: Optional[List[str]] = Field(None)
+    schedule_id: Optional[int] = Field(None)
 
     @field_validator('applicable_sources')
     @classmethod
-    def validate_sources_not_empty_strings(cls, v):
+    def validate_sources_not_empty_strings(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         if v is not None:
-            if not isinstance(v, list): raise ValueError("applicable_sources must be a list of strings or null")
-            if any(not isinstance(s, str) or not s.strip() for s in v): raise ValueError("Each item in applicable_sources must be a non-empty string")
+            if not isinstance(v, list):
+                raise ValueError("applicable_sources must be a list of strings or null")
+            if any(not isinstance(s, str) or not s.strip() for s in v):
+                raise ValueError("Each item in applicable_sources must be a non-empty string")
         return v
 
     @model_validator(mode='after')
@@ -255,11 +253,9 @@ class RuleBase(BaseModel):
                        raise ValueError(f"Operation '{criterion.op.value}' is only valid for parameter 'SOURCE_IP'.")
          return self
 
-
 class RuleCreate(RuleBase):
     ruleset_id: int
-    destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations.")
-
+    destination_ids: Optional[List[int]] = Field(None)
 
 class RuleUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
@@ -269,13 +265,12 @@ class RuleUpdate(BaseModel):
     match_criteria: Optional[List[MatchCriterion]] = None
     association_criteria: Optional[List[AssociationMatchCriterion]] = None
     tag_modifications: Optional[List[TagModification]] = None
-    applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Set to null to apply to all.")
-    schedule_id: Optional[int] = Field(None, description="Update the Schedule ID for this rule (null means always active).")
-    destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations. Replaces existing list.")
+    applicable_sources: Optional[List[str]] = Field(None)
+    schedule_id: Optional[int] = Field(None)
+    destination_ids: Optional[List[int]] = Field(None)
 
-    _validate_sources = field_validator('applicable_sources', mode='before')(RuleBase.validate_sources_not_empty_strings)
-    _validate_assoc_ops = model_validator(mode='after')(RuleBase.check_association_ops)
-
+    _validate_sources_update = field_validator('applicable_sources')(lambda v: RuleBase.validate_sources_not_empty_strings(v) if v is not None else None)
+    _validate_assoc_ops_update = model_validator(mode='after')(RuleBase.check_association_ops)
 
 class RuleInDBBase(RuleBase):
     id: int
@@ -283,13 +278,11 @@ class RuleInDBBase(RuleBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     destinations: List[StorageBackendConfigRead] = []
-    schedule: Optional[ScheduleRead] = None # Nested schedule object
+    schedule: Optional[ScheduleRead] = None
     model_config = ConfigDict(from_attributes=True)
 
-
-class Rule(RuleInDBBase): pass
-
-# --- RuleSet Schemas ---
+class Rule(RuleInDBBase):
+    pass
 
 class RuleSetBase(BaseModel):
     name: str = Field(..., max_length=100)
@@ -298,7 +291,8 @@ class RuleSetBase(BaseModel):
     priority: int = 0
     execution_mode: RuleSetExecutionMode = RuleSetExecutionMode.FIRST_MATCH
 
-class RuleSetCreate(RuleSetBase): pass
+class RuleSetCreate(RuleSetBase):
+    pass
 
 class RuleSetUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
@@ -314,8 +308,8 @@ class RuleSetInDBBase(RuleSetBase):
     rules: List[Rule] = []
     model_config = ConfigDict(from_attributes=True)
 
-
-class RuleSet(RuleSetInDBBase): pass
+class RuleSet(RuleSetInDBBase):
+    pass
 
 class RuleSetSummary(BaseModel):
     id: int
@@ -324,14 +318,13 @@ class RuleSetSummary(BaseModel):
     is_active: bool
     priority: int
     execution_mode: RuleSetExecutionMode
-    rule_count: int = Field(..., description="Number of rules in this ruleset")
+    rule_count: int = Field(...)
     model_config = ConfigDict(from_attributes=True)
 
-# --- JSON Processing Schemas ---
 class JsonProcessRequest(BaseModel):
-    dicom_json: Dict[str, Any] = Field(..., description="DICOM header represented as JSON.")
-    ruleset_id: Optional[int] = Field(None, description="Optional specific RuleSet ID to apply.")
-    source_identifier: str = Field(default="api_json", description="Source identifier for matching.")
+    dicom_json: Dict[str, Any] = Field(...)
+    ruleset_id: Optional[int] = Field(None)
+    source_identifier: str = Field(default="api_json")
 
 class JsonProcessResponse(BaseModel):
     original_json: Dict[str, Any]
