@@ -104,3 +104,11 @@ from .crosswalk import (
     CrosswalkMapBase, CrosswalkMapCreate, CrosswalkMapUpdate, CrosswalkMapRead,
     CrosswalkDbType, CrosswalkSyncStatus
 )
+
+from .schedule import (
+    TimeRange, # Export if needed individually
+    ScheduleBase,
+    ScheduleCreate,
+    ScheduleUpdate,
+    ScheduleRead
+)

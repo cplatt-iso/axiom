@@ -1,14 +1,15 @@
 # app/schemas/rule.py
 
 from typing import List, Optional, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict # Import ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict
 from typing_extensions import Annotated
 import enum
 from datetime import datetime
 import re
-# --- ADDED: Import StorageBackendConfigRead ---
-from .storage_backend_config import StorageBackendConfigRead # Import the Read schema
-# --- END ADDED ---
+# --- Import StorageBackendConfigRead ---
+from .storage_backend_config import StorageBackendConfigRead
+# --- Import ScheduleRead ---
+from .schedule import ScheduleRead
 
 # --- Enums ---
 class RuleSetExecutionMode(str, enum.Enum):
@@ -30,11 +31,9 @@ class MatchOperation(str, enum.Enum):
     REGEX = "regex"
     IN = "in" # Value should be a list
     NOT_IN = "not_in" # Value should be a list
-    # --- ADDED: For Association Matching ---
     IP_ADDRESS_EQUALS = "ip_eq"
     IP_ADDRESS_STARTS_WITH = "ip_startswith"
-    IP_ADDRESS_IN_SUBNET = "ip_in_subnet" # Requires network library
-    # --- END ADDED ---
+    IP_ADDRESS_IN_SUBNET = "ip_in_subnet"
 
 class ModifyAction(str, enum.Enum):
     SET = "set"
@@ -44,15 +43,13 @@ class ModifyAction(str, enum.Enum):
     REGEX_REPLACE = "regex_replace"
     COPY = "copy"
     MOVE = "move"
-    # --- ADDED ---
     CROSSWALK = "crosswalk"
-    # --- END ADDED ---
 
 
 # --- Helper Validator Functions ---
 def _validate_tag_format_or_keyword(v: str) -> str:
     """Shared validator for DICOM tag format or keyword."""
-    if not isinstance(v, str): raise ValueError("Tag must be a string") # Basic type check
+    if not isinstance(v, str): raise ValueError("Tag must be a string")
     v = v.strip()
     # Allow explicit keyword 'SOURCE_IP', 'CALLING_AE', 'CALLED_AE' for association matching
     if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']: return v.upper()
@@ -64,47 +61,40 @@ def _validate_tag_format_or_keyword(v: str) -> str:
 def _validate_vr_format(v: Optional[str]) -> Optional[str]:
     """Shared validator for VR format (checks format only)."""
     if v is not None:
-        if not isinstance(v, str): raise ValueError("VR must be a string") # Type check
+        if not isinstance(v, str): raise ValueError("VR must be a string")
         v = v.strip().upper()
         if not re.match(r"^[A-Z]{2}$", v):
             raise ValueError("VR must be two uppercase letters")
         return v
     return None
 
-# --- NEW: Association Match Criterion ---
+# --- Association Match Criterion ---
 class AssociationMatchCriterion(BaseModel):
     """Defines criteria for matching against DICOM Association info."""
-    # Use Literal for specific association parameters
     parameter: Literal['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'] = Field(..., description="Association parameter to match.")
     op: MatchOperation = Field(..., description="Matching operation.")
-    value: Any = Field(..., description="Value to compare against.") # Type depends on op and parameter
+    value: Any = Field(..., description="Value to compare against.")
 
     @model_validator(mode='after')
     def check_value_for_op(self) -> 'AssociationMatchCriterion':
-        # Example validation: Ensure value format makes sense for IP operations
         if self.parameter == 'SOURCE_IP' and self.op == MatchOperation.IP_ADDRESS_IN_SUBNET:
             if not isinstance(self.value, str) or '/' not in self.value:
                 raise ValueError("Value for 'ip_in_subnet' must be a CIDR string (e.g., '192.168.1.0/24').")
-        # Add more validation as needed for other op/parameter combinations
         return self
 
-# --- Structures for Rules ---
-
+# --- Match Criterion ---
 class MatchCriterion(BaseModel):
     tag: str = Field(..., description="DICOM tag string (e.g., '0010,0010' or 'PatientName').")
     op: MatchOperation = Field(..., description="Matching operation.")
     value: Any = Field(None, description="Value to compare against (type depends on 'op', required for most ops).")
 
-    # Keep existing tag validator but ensure it allows standard tags
     @field_validator('tag')
     @classmethod
     def validate_dicom_tag(cls, v: str) -> str:
-        """Ensures tag is DICOM tag or keyword, not association parameter."""
         v_strip = v.strip()
         v_upper = v_strip.upper()
         if v_upper in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
             raise ValueError(f"'{v_upper}' cannot be used in standard MatchCriterion, use AssociationMatchCriterion instead.")
-        # Use the original helper for actual tag validation
         return _validate_tag_format_or_keyword(v_strip)
 
 
@@ -122,7 +112,6 @@ class MatchCriterion(BaseModel):
             MatchOperation.REGEX, MatchOperation.IN, MatchOperation.NOT_IN
         }
 
-        # Prevent using IP operators on standard tags
         ip_ops = {MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET}
         if op in ip_ops:
              raise ValueError(f"Operation '{op.value}' is only valid for Association parameter 'SOURCE_IP'.")
@@ -147,7 +136,6 @@ class MatchCriterion(BaseModel):
 # --- Tag Modification Schemas (Discriminated Union) ---
 
 class TagModificationBase(BaseModel):
-    # No change needed here yet, specific actions define tags
     pass
 
 class TagSetModification(TagModificationBase):
@@ -204,7 +192,6 @@ class TagRegexReplaceModification(TagModificationBase):
         if not isinstance(v, str): raise ValueError("Replacement for 'regex_replace' action must be a string")
         return v
 
-# --- NEW Modification Types ---
 class TagCopyModification(TagModificationBase):
     action: Literal[ModifyAction.COPY] = ModifyAction.COPY
     source_tag: str = Field(..., description="DICOM tag to copy value FROM.")
@@ -223,25 +210,19 @@ class TagMoveModification(TagModificationBase):
     _validate_destination_tag = field_validator('destination_tag')(_validate_tag_format_or_keyword)
     _validate_vr = field_validator('destination_vr')(_validate_vr_format)
 
-# --- NEW Crosswalk Modification Schema ---
 class TagCrosswalkModification(TagModificationBase):
     action: Literal[ModifyAction.CROSSWALK] = ModifyAction.CROSSWALK
     crosswalk_map_id: int = Field(..., description="ID of the CrosswalkMap configuration to use.")
-# --- END NEW Crosswalk Modification ---
 
-# --- Update the Union ---
 TagModification = Annotated[
     Union[
         TagSetModification, TagDeleteModification, TagPrependModification,
         TagSuffixModification, TagRegexReplaceModification,
         TagCopyModification, TagMoveModification,
-        # --- ADDED ---
         TagCrosswalkModification
-        # --- END ADDED ---
     ],
     Field(discriminator="action")
 ]
-# --- End Update the Union ---
 
 
 # --- Rule Schemas ---
@@ -252,13 +233,10 @@ class RuleBase(BaseModel):
     is_active: bool = True
     priority: int = 0
     match_criteria: List[MatchCriterion] = Field(default_factory=list, description="List of criteria based on DICOM tag values.")
-    # --- ADDED: Association Criteria ---
     association_criteria: Optional[List[AssociationMatchCriterion]] = Field(None, description="Optional list of criteria based on DICOM association info (Calling AE, Source IP etc.). Applies only to C-STORE/STOW inputs.")
-    # --- END ADDED ---
-    # --- UPDATED: TagModification type hint ---
     tag_modifications: List[TagModification] = Field(default_factory=list)
-    # --- END UPDATED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Applies to all if null/empty.")
+    schedule_id: Optional[int] = Field(None, description="Optional ID of the Schedule to control when this rule is active.")
 
     @field_validator('applicable_sources')
     @classmethod
@@ -268,16 +246,14 @@ class RuleBase(BaseModel):
             if any(not isinstance(s, str) or not s.strip() for s in v): raise ValueError("Each item in applicable_sources must be a non-empty string")
         return v
 
-    # --- ADDED: Validator to ensure association criteria op/parameter compatibility ---
     @model_validator(mode='after')
     def check_association_ops(self) -> 'RuleBase':
-        if self.association_criteria:
-            for criterion in self.association_criteria:
-                if criterion.parameter != 'SOURCE_IP' and criterion.op in [MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET]:
-                     raise ValueError(f"Operation '{criterion.op.value}' is only valid for parameter 'SOURCE_IP'.")
-                # Add other checks if needed, e.g., regex only for AE titles
-        return self
-    # --- END ADDED ---
+         if self.association_criteria:
+             for criterion in self.association_criteria:
+                  ip_ops = {MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET}
+                  if criterion.parameter != 'SOURCE_IP' and criterion.op in ip_ops:
+                       raise ValueError(f"Operation '{criterion.op.value}' is only valid for parameter 'SOURCE_IP'.")
+         return self
 
 
 class RuleCreate(RuleBase):
@@ -291,18 +267,14 @@ class RuleUpdate(BaseModel):
     is_active: Optional[bool] = None
     priority: Optional[int] = None
     match_criteria: Optional[List[MatchCriterion]] = None
-    # --- ADDED: Association Criteria ---
     association_criteria: Optional[List[AssociationMatchCriterion]] = None
-    # --- END ADDED ---
-    # --- UPDATED: TagModification type hint ---
     tag_modifications: Optional[List[TagModification]] = None
-    # --- END UPDATED ---
     applicable_sources: Optional[List[str]] = Field(None, description="List of source identifiers this rule applies to. Set to null to apply to all.")
-    _validate_sources = field_validator('applicable_sources')(RuleBase.validate_sources_not_empty_strings.__func__)
+    schedule_id: Optional[int] = Field(None, description="Update the Schedule ID for this rule (null means always active).")
     destination_ids: Optional[List[int]] = Field(None, description="List of StorageBackendConfig IDs to use as destinations. Replaces existing list.")
-    # --- ADDED: Validator for Association Criteria on Update ---
+
+    _validate_sources = field_validator('applicable_sources', mode='before')(RuleBase.validate_sources_not_empty_strings)
     _validate_assoc_ops = model_validator(mode='after')(RuleBase.check_association_ops)
-    # --- END ADDED ---
 
 
 class RuleInDBBase(RuleBase):
@@ -311,12 +283,13 @@ class RuleInDBBase(RuleBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     destinations: List[StorageBackendConfigRead] = []
+    schedule: Optional[ScheduleRead] = None # Nested schedule object
     model_config = ConfigDict(from_attributes=True)
 
 
 class Rule(RuleInDBBase): pass
 
-# --- RuleSet Schemas (No changes needed here) ---
+# --- RuleSet Schemas ---
 
 class RuleSetBase(BaseModel):
     name: str = Field(..., max_length=100)
@@ -354,7 +327,7 @@ class RuleSetSummary(BaseModel):
     rule_count: int = Field(..., description="Number of rules in this ruleset")
     model_config = ConfigDict(from_attributes=True)
 
-# --- Added for JSON Processing Endpoint ---
+# --- JSON Processing Schemas ---
 class JsonProcessRequest(BaseModel):
     dicom_json: Dict[str, Any] = Field(..., description="DICOM header represented as JSON.")
     ruleset_id: Optional[int] = Field(None, description="Optional specific RuleSet ID to apply.")
@@ -367,5 +340,4 @@ class JsonProcessResponse(BaseModel):
     applied_rule_ids: List[int] = []
     source_identifier: str
     errors: List[str] = []
-    warnings: List[str] = [] # Added warnings
-# --- End Added ---
+    warnings: List[str] = []

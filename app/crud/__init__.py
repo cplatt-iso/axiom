@@ -10,3 +10,4 @@ from .crud_dimse_qr_source import crud_dimse_qr_source
 from .crud_processed_study_log import crud_processed_study_log
 from .crud_storage_backend_config import crud_storage_backend_config
 from .crud_crosswalk import crud_crosswalk_data_source, crud_crosswalk_map
+from .crud_schedule import crud_schedule

@@ -5,21 +5,20 @@ from datetime import datetime
 
 from sqlalchemy import (
     String, Boolean, Text, ForeignKey, JSON, Enum as DBEnum, Integer,
-    # Remove Table, Column imports if only used for association table
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import JSONB
 
-# Import Base and the centrally defined association table
+# --- ADDED: Import Schedule for type hinting ---
+from .schedule import Schedule
+# --- END ADDED ---
+
 from app.db.base import Base, rule_destination_association
-# --- REMOVED StorageBackendConfig import ---
 
 class RuleSetExecutionMode(str, enum.Enum):
     FIRST_MATCH = "FIRST_MATCH"
     ALL_MATCHES = "ALL_MATCHES"
-
-# --- REMOVED: Association Table Definition moved to base.py ---
 
 class RuleSet(Base):
     __tablename__ = 'rule_sets'
@@ -35,7 +34,7 @@ class RuleSet(Base):
     )
 
     rules: Mapped[List["Rule"]] = relationship(
-        "Rule", # Use string forward reference
+        "Rule",
         back_populates="ruleset",
         cascade="all, delete-orphan",
         order_by="Rule.priority",
@@ -85,17 +84,35 @@ class Rule(Base):
     )
 
     ruleset: Mapped["RuleSet"] = relationship(
-        "RuleSet", # Use string forward reference
+        "RuleSet",
         back_populates="rules",
         lazy="joined"
     )
 
     destinations: Mapped[List["StorageBackendConfig"]] = relationship(
-        "StorageBackendConfig", # Use string forward reference
-        secondary=rule_destination_association, # Use the imported table object
+        "StorageBackendConfig",
+        secondary=rule_destination_association,
         back_populates="rules",
         lazy="selectin"
     )
 
+    # --- ADDED: Schedule Foreign Key and Relationship ---
+    schedule_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL"), # Set null if schedule deleted
+        nullable=True,
+        index=True,
+        comment="Optional ID of the Schedule controlling when this rule is active."
+    )
+    schedule: Mapped[Optional["Schedule"]] = relationship(
+        "Schedule",
+        back_populates="rules",
+        lazy="selectin" # Eagerly load schedule details if needed when rule is fetched
+    )
+    # --- END ADDED ---
+
+
     def __repr__(self):
-        return f"<Rule(id={self.id}, name='{self.name}', ruleset_id={self.ruleset_id})>"
+        # --- UPDATED repr ---
+        return (f"<Rule(id={self.id}, name='{self.name}', ruleset_id={self.ruleset_id}, "
+                f"schedule_id={self.schedule_id})>")
+        # --- END UPDATED ---

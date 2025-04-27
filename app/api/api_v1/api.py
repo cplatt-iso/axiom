@@ -17,6 +17,7 @@ from app.api.api_v1.endpoints import (
     config_dimse_qr,
     config_storage_backends,
     config_crosswalk,
+    config_schedules,
 )
 
 api_router = APIRouter()
@@ -56,4 +57,9 @@ api_router.include_router(
     config_crosswalk.router,
     prefix="/config/crosswalk",
     tags=["Configuration - Crosswalk"]
+)
+api_router.include_router(
+    config_schedules.router,
+    prefix="/config/schedules",
+    tags=["Configuration - Schedules"]
 )
