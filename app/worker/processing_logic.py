@@ -45,8 +45,82 @@ CALLED_AE_TITLE_TAG = Tag(0x0000, 0x0000) # Placeholder
 CALLING_AE_TITLE_TAG = Tag(0x0000, 0x0000) # Placeholder
 SOURCE_IP = Tag(0x0000, 0x0000) # Placeholder
 
+# === ADDED START: is_schedule_active function ===
+def is_schedule_active(schedule: Optional[Schedule], current_time: datetime) -> bool:
+    """
+    Checks if a rule should be active based on its linked Schedule and the current time.
+
+    Args:
+        schedule: The Schedule database model object (can be None).
+        current_time: The current datetime (timezone-aware, UTC recommended).
+
+    Returns:
+        True if the schedule allows activation, False otherwise.
+    """
+    if schedule is None or not schedule.is_enabled:
+        # No schedule linked or schedule disabled = rule is always active (if rule itself is enabled)
+        return True
+
+    if not isinstance(schedule.time_ranges, list):
+        logger.warning(f"Schedule ID {schedule.id} ('{schedule.name}') has invalid time_ranges (not a list). Assuming inactive.")
+        return False
+
+    if not schedule.time_ranges:
+        logger.warning(f"Schedule ID {schedule.id} ('{schedule.name}') has no time ranges defined. Assuming inactive.")
+        return False # If schedule exists but has no ranges, consider it inactive
+
+    current_day_str = current_time.strftime("%a") # e.g., "Mon", "Tue"
+    current_time_obj = current_time.time() # Extract time part
+
+    logger.debug(f"Checking schedule '{schedule.name}' (ID: {schedule.id}). Current time: {current_time.isoformat()}, Day: {current_day_str}, Time: {current_time_obj}")
+
+    for time_range in schedule.time_ranges:
+        try:
+            days = time_range.get("days")
+            start_time_str = time_range.get("start_time")
+            end_time_str = time_range.get("end_time")
+
+            # Basic validation of the range structure fetched from DB
+            if not isinstance(days, list) or not start_time_str or not end_time_str:
+                logger.warning(f"Schedule {schedule.id}: Skipping invalid time range definition: {time_range}")
+                continue
+
+            # Check if current day matches
+            if current_day_str not in days:
+                # logger.debug(f"Schedule {schedule.id}: Current day '{current_day_str}' not in range days {days}. Skipping range.")
+                continue
+
+            # Parse start and end times
+            start_time = time.fromisoformat(start_time_str)
+            end_time = time.fromisoformat(end_time_str)
+
+            # Check time match
+            if start_time < end_time:
+                # Simple case: Start time is before end time (same day)
+                if start_time <= current_time_obj < end_time:
+                    logger.info(f"Schedule '{schedule.name}' ACTIVE: Current time {current_time_obj} is within range {start_time_str}-{end_time_str} for day {current_day_str}.")
+                    return True
+            else:
+                # Overnight case: Start time is after end time (wraps past midnight)
+                # Active if current time is >= start_time OR < end_time
+                if current_time_obj >= start_time or current_time_obj < end_time:
+                    logger.info(f"Schedule '{schedule.name}' ACTIVE (overnight): Current time {current_time_obj} is within range {start_time_str}-{end_time_str} for day {current_day_str}.")
+                    return True
+
+            # logger.debug(f"Schedule {schedule.id}: Current time {current_time_obj} NOT in range {start_time_str}-{end_time_str} for day {current_day_str}.")
+
+        except (ValueError, TypeError) as e:
+            logger.error(f"Schedule {schedule.id}: Error parsing time range {time_range}: {e}", exc_info=True)
+            continue # Skip malformed ranges
+
+    # If no matching range was found
+    logger.debug(f"Schedule '{schedule.name}' INACTIVE: No matching time range found for current time.")
+    return False
+# === ADDED END: is_schedule_active function ===
+
 # --- Helper functions ---
 def parse_dicom_tag(tag_str: str) -> Optional[BaseTag]:
+    # ... (rest of the function remains the same) ...
     if not isinstance(tag_str, str):
         logger.warning(f"Invalid type for tag string: {type(tag_str)}. Expected str.")
         return None
@@ -73,6 +147,7 @@ def parse_dicom_tag(tag_str: str) -> Optional[BaseTag]:
     return None
 
 def _values_equal(actual_val: Any, expected_val: Any) -> bool:
+    # ... (function remains the same) ...
     # Attempt numeric/decimal comparison first
     try:
         if isinstance(actual_val, (int, float, Decimal, DSfloat, IS, DSdecimal)) and isinstance(expected_val, (int, float, str, Decimal)):
@@ -100,6 +175,7 @@ def _values_equal(actual_val: Any, expected_val: Any) -> bool:
     return str(actual_val) == str(expected_val)
 
 def _compare_numeric(actual_val: Any, expected_val: Any, op: MatchOperation) -> bool:
+    # ... (function remains the same) ...
      try:
          actual_decimal = Decimal(str(actual_val))
          expected_decimal = Decimal(str(expected_val))
@@ -119,6 +195,7 @@ def _compare_numeric(actual_val: Any, expected_val: Any, op: MatchOperation) -> 
 
 # --- Match checking functions ---
 def check_match(dataset: pydicom.Dataset, criteria: List[MatchCriterion]) -> bool:
+    # ... (function remains the same) ...
     if not criteria:
         return True # No criteria means match
 
@@ -232,6 +309,7 @@ def check_match(dataset: pydicom.Dataset, criteria: List[MatchCriterion]) -> boo
     return True
 
 def check_association_match(assoc_info: Optional[Dict[str, str]], criteria: Optional[List[AssociationMatchCriterion]]) -> bool:
+    # ... (function remains the same) ...
     if not criteria:
         return True # No criteria means match
     if not assoc_info:
@@ -312,6 +390,7 @@ def check_association_match(assoc_info: Optional[Dict[str, str]], criteria: Opti
 
 # --- Original Attributes Sequence function ---
 def _add_original_attribute(dataset: Dataset, original_element: Optional[DataElement], modification_description: str, source_identifier: str):
+    # ... (function remains the same) ...
     """Adds or appends to the Original Attributes Sequence, truncating reason."""
     log_enabled = getattr(settings, 'LOG_ORIGINAL_ATTRIBUTES', False)
     if not log_enabled or original_element is None:
@@ -363,6 +442,7 @@ def _add_original_attribute(dataset: Dataset, original_element: Optional[DataEle
 
 # --- Apply Modifications Function ---
 def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModification], source_identifier: str):
+    # ... (function remains the same) ...
     """
     Applies tag modifications to the dataset IN-PLACE based on a list of actions
     defined by TagModification schema objects (discriminated union).
@@ -602,17 +682,25 @@ def process_dicom_instance(
 
     for ruleset in active_rulesets:
         logger.debug(f"Evaluating RuleSet '{ruleset.name}' (ID: {ruleset.id}, Priority: {ruleset.priority})")
-        rules_to_evaluate = ruleset.rules or []
-        if not rules_to_evaluate: logger.debug(f"RuleSet '{ruleset.name}' has no rules."); continue
+        # --- Load rules eagerly if not already loaded (depends on query) ---
+        # Ensure rules are loaded. Use getattr to be safe if relationship might not exist.
+        rules_to_evaluate = getattr(ruleset, 'rules', []) # Access related rules
+        if not rules_to_evaluate:
+            logger.debug(f"RuleSet '{ruleset.name}' has no rules loaded or defined.")
+            continue
+        # --- End Load Rules ---
 
         matched_rule_in_this_set = False
         for rule in rules_to_evaluate:
             # --- Combined Activity Check ---
             is_rule_statically_active = rule.is_active
-            is_schedule_currently_active = True
-            if rule.schedule_id and rule.schedule:
-                 is_schedule_currently_active = is_schedule_active(rule.schedule, current_time_utc)
-            elif rule.schedule_id and not rule.schedule:
+            is_schedule_currently_active = True # Default to active if no schedule
+            rule_schedule = getattr(rule, 'schedule', None) # Safely access schedule
+
+            if rule.schedule_id and rule_schedule:
+                 # Call the is_schedule_active function defined above
+                 is_schedule_currently_active = is_schedule_active(rule_schedule, current_time_utc)
+            elif rule.schedule_id and not rule_schedule:
                  logger.error(f"Rule '{rule.name}' (ID: {rule.id}) has schedule_id {rule.schedule_id} but schedule data was not loaded. Assuming inactive.")
                  is_schedule_currently_active = False
 
@@ -633,17 +721,48 @@ def process_dicom_instance(
             try:
                 # Schema Validation
                 match_criteria_validated: List[MatchCriterion] = []
-                if rule.match_criteria:
-                    try: match_criteria_validated = TypeAdapter(List[MatchCriterion]).validate_python(rule.match_criteria)
-                    except Exception as val_err: logger.error(f"Rule '{rule.name}' (ID: {rule.id}): Invalid 'match_criteria': {val_err}. Skipping rule."); continue
+                if rule.match_criteria and isinstance(rule.match_criteria, (list, dict)): # Ensure it's list/dict before parsing
+                    try:
+                        # Handle case where it might be stored as a string in older DB rows? Unlikely with JSONB
+                        criteria_data = rule.match_criteria
+                        if isinstance(criteria_data, str): criteria_data = json.loads(criteria_data)
+                        # Pydantic V2 adapter validation
+                        match_criteria_validated = TypeAdapter(List[MatchCriterion]).validate_python(criteria_data)
+                    except (json.JSONDecodeError, Exception) as val_err:
+                        logger.error(f"Rule '{rule.name}' (ID: {rule.id}): Invalid 'match_criteria' format or content: {val_err}. Skipping rule.")
+                        continue
+                elif rule.match_criteria:
+                     logger.warning(f"Rule '{rule.name}' (ID: {rule.id}): 'match_criteria' has unexpected type ({type(rule.match_criteria)}), expected list/dict. Skipping.")
+                     continue
+
                 assoc_criteria_validated: List[AssociationMatchCriterion] = []
-                if rule.association_criteria:
-                    try: assoc_criteria_validated = TypeAdapter(List[AssociationMatchCriterion]).validate_python(rule.association_criteria)
-                    except Exception as val_err: logger.error(f"Rule '{rule.name}' (ID: {rule.id}): Invalid 'association_criteria': {val_err}. Skipping rule."); continue
+                if rule.association_criteria and isinstance(rule.association_criteria, (list, dict)):
+                    try:
+                        assoc_data = rule.association_criteria
+                        if isinstance(assoc_data, str): assoc_data = json.loads(assoc_data)
+                        assoc_criteria_validated = TypeAdapter(List[AssociationMatchCriterion]).validate_python(assoc_data)
+                    except (json.JSONDecodeError, Exception) as val_err:
+                        logger.error(f"Rule '{rule.name}' (ID: {rule.id}): Invalid 'association_criteria': {val_err}. Skipping rule.")
+                        continue
+                elif rule.association_criteria:
+                     logger.warning(f"Rule '{rule.name}' (ID: {rule.id}): 'association_criteria' has unexpected type ({type(rule.association_criteria)}). Skipping.")
+                     continue
+
+
                 modifications_validated: List[TagModification] = []
-                if rule.tag_modifications:
-                     try: modifications_validated = TypeAdapter(List[TagModification]).validate_python(rule.tag_modifications)
-                     except Exception as val_err: logger.error(f"Rule '{rule.name}' (ID: {rule.id}): Invalid 'tag_modifications': {val_err}. Skipping mods."); modifications_validated = []
+                if rule.tag_modifications and isinstance(rule.tag_modifications, (list, dict)):
+                    try:
+                        mods_data = rule.tag_modifications
+                        if isinstance(mods_data, str): mods_data = json.loads(mods_data)
+                        # Use TypeAdapter for discriminated union validation
+                        tag_mod_adapter = TypeAdapter(List[TagModification])
+                        modifications_validated = tag_mod_adapter.validate_python(mods_data)
+                    except (json.JSONDecodeError, Exception) as val_err:
+                        logger.error(f"Rule '{rule.name}' (ID: {rule.id}): Invalid 'tag_modifications': {val_err}. Skipping modifications for this rule.")
+                        modifications_validated = [] # Clear mods if validation fails
+                elif rule.tag_modifications:
+                     logger.warning(f"Rule '{rule.name}' (ID: {rule.id}): 'tag_modifications' has unexpected type ({type(rule.tag_modifications)}). Skipping.")
+
 
                 # Perform matching
                 tag_match = check_match(original_ds, match_criteria_validated)
@@ -665,11 +784,21 @@ def process_dicom_instance(
                     else: logger.debug(f"Rule '{rule.name}' matched but had no valid modifications.")
 
                     # Add destinations
-                    rule_destinations: List[StorageBackendConfig] = rule.destinations or []
+                    # Ensure destinations are loaded (depends on query options)
+                    rule_destinations: List[StorageBackendConfig] = getattr(rule, 'destinations', []) # Safely access destinations
                     for dest_config_obj in rule_destinations:
                          if dest_config_obj.is_enabled:
-                              backend_config_dict = dest_config_obj.config or {}
+                              # --- Extract config safely ---
+                              backend_config_dict = {}
+                              if isinstance(dest_config_obj.config, dict):
+                                   backend_config_dict = dest_config_obj.config.copy() # Work with a copy
+                              elif isinstance(dest_config_obj.config, str): # Handle if stored as JSON string
+                                   try: backend_config_dict = json.loads(dest_config_obj.config)
+                                   except json.JSONDecodeError: logger.error(f"Invalid JSON in config for destination {dest_config_obj.name}"); continue
+                              else: logger.error(f"Invalid config format for destination {dest_config_obj.name}"); continue
+                              # --- Add type ---
                               backend_config_dict['type'] = dest_config_obj.backend_type
+                              # --- End Extract ---
                               destinations_to_process.append(backend_config_dict)
                               logger.debug(f"Added destination '{dest_config_obj.name}' from rule '{rule.name}'.")
                          else: logger.debug(f"Skipping disabled destination '{dest_config_obj.name}' from rule '{rule.name}'.")
@@ -702,14 +831,22 @@ def process_dicom_instance(
     unique_destination_configs = []
     for dest_config_dict in destinations_to_process:
         try:
-            json_string = json.dumps(dest_config_dict, sort_keys=True, separators=(',', ':'))
-            if json_string not in unique_dest_strings:
-                unique_dest_strings.add(json_string); unique_destination_configs.append(dest_config_dict)
+            # Use frozenset for dict items for hashability, sort keys for consistency
+            frozen_config = frozenset(sorted(dest_config_dict.items()))
+            if frozen_config not in unique_dest_strings:
+                 unique_dest_strings.add(frozen_config)
+                 unique_destination_configs.append(dest_config_dict)
         except TypeError as e:
-             logger.warning(f"Could not serialize destination config for de-duplication: {dest_config_dict}. Error: {e}. Using string repr.")
-             str_repr = str(dest_config_dict)
-             if str_repr not in unique_dest_strings: unique_dest_strings.add(str_repr); unique_destination_configs.append(dest_config_dict)
+             # Fallback if items are unhashable (e.g., nested lists) - use string repr
+             logger.warning(f"Could not create frozenset for destination config (unhashable type?): {dest_config_dict}. Error: {e}. Using string repr for deduplication.")
+             str_repr = json.dumps(dest_config_dict, sort_keys=True) # Use JSON dump for consistent string
+             if str_repr not in unique_dest_strings:
+                 unique_dest_strings.add(str_repr)
+                 unique_destination_configs.append(dest_config_dict)
     logger.debug(f"Found {len(unique_destination_configs)} unique destinations after processing rules.")
 
+
     # Return dataset, applied rules, unique destinations
-    return modified_ds if modifications_applied else original_ds, applied_rules_info, unique_destination_configs
+    # Return the modified dataset if changes were made, otherwise the original
+    final_ds_to_return = modified_ds if modifications_applied else original_ds
+    return final_ds_to_return, applied_rules_info, unique_destination_configs

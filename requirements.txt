@@ -75,3 +75,4 @@ websockets==15.0.1
 alembic
 mysql-connector-python
 pyodbc          # sql server
+openai

@@ -13,10 +13,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
-    """
-    Application Settings using Pydantic BaseSettings.
-    Loads from environment variables and .env files.
-    """
     model_config = SettingsConfigDict(
         env_file=('.env.prod', '.env'),
         env_file_encoding='utf-8',
@@ -24,20 +20,16 @@ class Settings(BaseSettings):
         extra='ignore'
     )
 
-    # --- Core Application Settings ---
     PROJECT_NAME: str = "Axiom Flow"
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
 
-    # --- Security Settings ---
     SECRET_KEY: SecretStr = SecretStr("09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7 # 1 week
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
     ALGORITHM: str = "HS256"
 
-    # --- Google OAuth Client ID (Optional) ---
     GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
 
-    # --- Database Settings ---
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "dicom_processor_user"
@@ -60,7 +52,6 @@ class Settings(BaseSettings):
             path=f"{values.get('POSTGRES_DB') or ''}",
         )
 
-    # --- CORS Settings ---
     BACKEND_CORS_ORIGINS: List[Union[str, AnyHttpUrl]] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     @field_validator("BACKEND_CORS_ORIGINS", mode='before')
@@ -74,11 +65,9 @@ class Settings(BaseSettings):
         elif isinstance(v, list): return v
         raise ValueError("Invalid format for BACKEND_CORS_ORIGINS")
 
-    # --- Superuser Settings (for initial setup) ---
     FIRST_SUPERUSER_EMAIL: EmailStr = "admin@axiomflow.com"
     FIRST_SUPERUSER_PASSWORD: SecretStr = SecretStr("changeme")
 
-    # --- Celery / Message Broker Settings ---
     RABBITMQ_HOST: str = "rabbitmq"
     RABBITMQ_PORT: int = 5672
     RABBITMQ_USER: str = "guest"
@@ -86,23 +75,18 @@ class Settings(BaseSettings):
     RABBITMQ_VHOST: str = "/"
     CELERY_BROKER_URL: Optional[str] = None
 
-    # --- Redis Settings ---
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_URL: Optional[str] = None
     CELERY_RESULT_BACKEND: Optional[str] = None
 
-    # --- Celery Task Settings ---
     CELERY_TASK_DEFAULT_QUEUE: str = "default"
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_DELAY: int = 60
 
-    # --- DICOM Listener Settings ---
-    LISTENER_HOST: str = "0.0.0.0" # Bind address for listeners
+    LISTENER_HOST: str = "0.0.0.0"
 
-
-    # --- Storage & File Handling Settings ---
     DICOM_STORAGE_PATH: Path = Path("/dicom_data/incoming")
     DICOM_ERROR_PATH: Path = Path("/dicom_data/errors")
     TEMP_DIR: Optional[Path] = None
@@ -111,16 +95,13 @@ class Settings(BaseSettings):
     DELETE_ON_NO_DESTINATION: bool = False
     MOVE_TO_ERROR_ON_PARTIAL_FAILURE: bool = True
 
-    # --- Processing Logic Settings ---
-    LOG_ORIGINAL_ATTRIBUTES: bool = True # Add this line (default to True or False)
+    LOG_ORIGINAL_ATTRIBUTES: bool = True
 
-    # --- DICOMweb Poller Settings ---
     DICOMWEB_POLLER_DEFAULT_FALLBACK_DAYS: int = 7
     DICOMWEB_POLLER_OVERLAP_MINUTES: int = 5
     DICOMWEB_POLLER_QIDO_LIMIT: int = 5000
     DICOMWEB_POLLER_MAX_SOURCES: int = 100
 
-    # --- Static Known Input Sources ---
     KNOWN_INPUT_SOURCES: List[str] = [
         "api_json",
         "stow_rs",
@@ -131,7 +112,6 @@ class Settings(BaseSettings):
     def assemble_known_sources(cls, v: Union[str, List[str]], info: ValidationInfo) -> List[str]:
         default_sources: List[str] = []
         static_sources_in_code = ["api_json", "stow_rs"]
-
         parsed_sources = []
         if isinstance(v, str):
             if v.startswith("["):
@@ -139,9 +119,10 @@ class Settings(BaseSettings):
                  except json.JSONDecodeError: raise ValueError("Invalid JSON string for KNOWN_INPUT_SOURCES")
             else: parsed_sources = [i.strip() for i in v.split(",") if i.strip()]
         elif isinstance(v, list): parsed_sources = v
-
         combined = set(static_sources_in_code); combined.update(parsed_sources)
         return sorted(list(combined))
+
+    OPENAI_API_KEY: Optional[SecretStr] = None
 
     def model_post_init(self, __context: Any) -> None:
         if self.CELERY_BROKER_URL is None:
@@ -178,6 +159,7 @@ logger.info(f"Celery Result Backend: {settings.CELERY_RESULT_BACKEND or 'Not Set
 logger.info(f"Redis URL: {settings.REDIS_URL or 'Not Set'}")
 logger.info(f"Incoming DICOM Path: {settings.DICOM_STORAGE_PATH}")
 logger.info(f"Error DICOM Path: {settings.DICOM_ERROR_PATH}")
-logger.info(f"Log Original Attributes: {settings.LOG_ORIGINAL_ATTRIBUTES}") # Log the new setting
+logger.info(f"Log Original Attributes: {settings.LOG_ORIGINAL_ATTRIBUTES}")
 logger.info(f"Known Input Sources (Static + Env): {settings.KNOWN_INPUT_SOURCES}")
+logger.info(f"OpenAI API Key Loaded: {'Yes' if settings.OPENAI_API_KEY else 'No'}")
 logger.info("---------------------------------------")

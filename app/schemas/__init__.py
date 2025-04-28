@@ -112,3 +112,8 @@ from .schedule import (
     ScheduleUpdate,
     ScheduleRead
 )
+from .ai_assist import (
+    RuleGenRequest,
+    RuleGenSuggestion,
+    RuleGenResponse,
+)

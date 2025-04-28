@@ -18,6 +18,7 @@ from app.api.api_v1.endpoints import (
     config_storage_backends,
     config_crosswalk,
     config_schedules,
+    ai_assist, # <-- ADDED IMPORT
 )
 
 api_router = APIRouter()
@@ -31,6 +32,7 @@ api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(roles.router, prefix="/roles", tags=["Roles"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["DICOMweb"])
+api_router.include_router(ai_assist.router, prefix="/ai-assist", tags=["AI Assist"]) 
 
 # Configuration Routers
 api_router.include_router(
