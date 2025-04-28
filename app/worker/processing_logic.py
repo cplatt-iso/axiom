@@ -580,7 +580,7 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
             elif action == ModifyActionEnum.SET:
                  if not isinstance(mod, TagSetModification): continue
                  new_value = mod.value; vr = mod.vr; final_vr = vr
-                 modification_description = f"Set tag {tag_str} to '{new_value}' (VR:{vr or 'auto'})"
+                 modification_description = f"Set tag {mod.tag} to '{new_value}' (VR:{vr or 'auto'})"
                  if not final_vr:
                       if original_element_for_log: final_vr = original_element_for_log.VR
                       else:
@@ -595,7 +595,7 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
                      except (ValueError, TypeError) as conv_err: logger.warning(f"Value '{new_value}' for tag {tag_str} could not be coerced for VR '{final_vr}': {conv_err}. Setting as is."); processed_value = new_value
                  else: processed_value = None
                  dataset[tag] = DataElement(tag, final_vr, processed_value)
-                 logger.debug(f"Set tag {tag_str} ({tag}) (VR: {final_vr})")
+                 logger.debug(f"Set tag {mod.tag} ({tag}) (VR: {final_vr})")
                  _add_original_attribute(dataset, original_element_for_log, modification_description, source_identifier)
 
             elif action in [ModifyActionEnum.PREPEND, ModifyActionEnum.SUFFIX]:
