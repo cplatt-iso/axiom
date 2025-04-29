@@ -238,7 +238,8 @@ async def _execute_cfind_query(
 # --- QIDO Implementation (Keep as is) ---
 async def _execute_qido_query(
     source_config: models.DicomWebSourceState,
-    query_params: Dict[str, str]
+    query_params: Dict[str, str],
+    prioritize_custom_params: bool = False
 ) -> List[Dict[str, Any]]:
     """Executes a QIDO-RS query against the configured DICOMweb source."""
     logger.info(f"Attempting QIDO query to {source_config.source_name} ({source_config.base_url})")
@@ -246,7 +247,8 @@ async def _execute_qido_query(
         qido_results = dicomweb_client.query_qido(
             config=source_config,
             level="STUDY",
-            custom_params=query_params
+            custom_params=query_params,
+            prioritize_custom_params=prioritize_custom_params
         )
         logger.info(f"QIDO query successful for source '{source_config.source_name}'. Found {len(qido_results)} results.")
         return qido_results
@@ -342,7 +344,11 @@ async def execute_query(
         elif source_type == "dicomweb":
             qido_params = _build_qido_params(query_params)
             if isinstance(source_config, models.DicomWebSourceState):
-                results_list = await _execute_qido_query(source_config, qido_params)
+                results_list = await _execute_qido_query(
+                    source_config,
+                    qido_params,
+                    prioritize_custom_params=True # Ensures Data Browser query params override config filters
+                )
             else:
                  raise TypeError("Internal error: source_config type mismatch for QIDO.")
         else:

@@ -5,11 +5,12 @@ import json
 from typing import List, Dict, Optional, Any, Tuple
 from urllib.parse import urljoin, urlencode
 from datetime import datetime, timedelta, date, timezone
-import re 
+import re
 
 import requests
 from requests.auth import HTTPBasicAuth
 
+# Need access to the DB model for type hinting
 from app.db.models import DicomWebSourceState
 from app.core.config import settings
 
@@ -22,7 +23,7 @@ class DicomWebClientError(Exception):
         self.url = url
         super().__init__(f"{message} (URL: {url or 'N/A'}, Status: {status_code or 'N/A'})")
 
-# --- Auth Helper (_get_auth) - remains the same ---
+# --- Auth Helper (_get_auth) ---
 def _get_auth(config: DicomWebSourceState) -> Optional[requests.auth.AuthBase]:
     """Helper to get requests Auth object based on DicomWebSourceState."""
     if config.auth_type == 'basic':
@@ -32,21 +33,23 @@ def _get_auth(config: DicomWebSourceState) -> Optional[requests.auth.AuthBase]:
             if isinstance(username, str) and isinstance(password, str):
                  return HTTPBasicAuth(username, password)
             else:
+                 # Keep warnings
                  logger.warning(f"Basic auth configured for '{config.source_name}' but username/password in auth_config are not strings.")
                  return None
         else:
             logger.warning(f"Basic auth configured for '{config.source_name}' but auth_config is missing, not a dict, or lacks keys.")
             return None
     elif config.auth_type in ['bearer', 'apikey', 'none']:
+        # Bearer/APIKey handled in headers
         return None
     else:
         logger.warning(f"Unsupported auth type configured for '{config.source_name}': {config.auth_type}")
         return None
 
-# --- Headers Helper (_get_headers) - remains the same (with apikey) ---
+# --- Headers Helper (_get_headers) ---
 def _get_headers(config: DicomWebSourceState) -> Dict[str, str]:
     """Builds request headers including auth and custom headers based on DicomWebSourceState."""
-    headers = {"Accept": "application/dicom+json"}
+    headers = {"Accept": "application/dicom+json"} # Default accept header
 
     if config.auth_type == 'bearer':
         if isinstance(config.auth_config, dict) and 'token' in config.auth_config:
@@ -63,7 +66,8 @@ def _get_headers(config: DicomWebSourceState) -> Dict[str, str]:
             key_value = config.auth_config.get('key')
             if isinstance(header_name, str) and header_name.strip() and isinstance(key_value, str) and key_value:
                  headers[header_name.strip()] = key_value
-                 logger.debug(f"Using API Key Header '{header_name.strip()}' for source '{config.source_name}'")
+                 # Optional: Keep debug log if useful
+                 # logger.debug(f"Using API Key Header '{header_name.strip()}' for source '{config.source_name}'")
             else:
                  logger.warning(f"API Key auth configured for '{config.source_name}' but header_name or key in auth_config are invalid/empty.")
         else:
@@ -71,7 +75,7 @@ def _get_headers(config: DicomWebSourceState) -> Dict[str, str]:
 
     return headers
 
-# --- Dynamic Query Param Resolver (_resolve_dynamic_query_params) - UPDATED ---
+# --- Dynamic Query Param Resolver (_resolve_dynamic_query_params) ---
 def _resolve_dynamic_query_params(params: Optional[Dict[str, Any]]) -> Dict[str, str]:
     """
     Resolves special values like '-N'd, 'TODAY', 'YESTERDAY' for dates.
@@ -81,13 +85,12 @@ def _resolve_dynamic_query_params(params: Optional[Dict[str, Any]]) -> Dict[str,
         return {}
 
     resolved_params: Dict[str, str] = {}
-    today = date.today() # Use current date (no timezone needed for YYYYMMDD)
+    today = date.today()
 
     for key, value in params.items():
          str_key = str(key)
          str_value = str(value).strip() if value is not None else ""
 
-         # --- ADDED: Handle dynamic date strings for StudyDate ---
          if str_key.lower() == "studydate" and str_value:
              val_upper = str_value.upper()
              resolved_date_value: Optional[str] = None
@@ -98,7 +101,6 @@ def _resolve_dynamic_query_params(params: Optional[Dict[str, Any]]) -> Dict[str,
                  yesterday = today - timedelta(days=1)
                  resolved_date_value = yesterday.strftime('%Y%m%d')
              else:
-                 # Check for -<N>d format (N days ago until now) -> YYYYMMDD-
                  match_days_ago = re.match(r"^-(\d+)D$", val_upper)
                  if match_days_ago:
                      try:
@@ -110,7 +112,6 @@ def _resolve_dynamic_query_params(params: Optional[Dict[str, Any]]) -> Dict[str,
                              logger.warning(f"Invalid negative number of days in date filter: {str_value}")
                      except (ValueError, OverflowError):
                          logger.warning(f"Invalid number of days in date filter: {str_value}")
-                 # Check for existing DICOM formats (YYYYMMDD, YYYYMMDD-, YYYYMMDD-YYYYMMDD)
                  elif re.match(r"^\d{8}$", val_upper): resolved_date_value = val_upper
                  elif re.match(r"^\d{8}-$", val_upper): resolved_date_value = val_upper
                  elif re.match(r"^\d{8}-\d{8}$", val_upper): resolved_date_value = val_upper
@@ -119,26 +120,38 @@ def _resolve_dynamic_query_params(params: Optional[Dict[str, Any]]) -> Dict[str,
 
              if resolved_date_value:
                  resolved_params[str_key] = resolved_date_value
-                 logger.debug(f"Resolved dynamic date '{str_value}' to '{resolved_date_value}' for key '{str_key}'")
-             # If resolved_date_value is still None after checks, it means it was invalid/unsupported, so we skip adding it.
+                 # Optional: Keep debug log if useful
+                 # logger.debug(f"Resolved dynamic date '{str_value}' to '{resolved_date_value}' for key '{str_key}'")
+             # If unresolved, skip adding it
 
-         # --- END ADDED ---
-         elif str_value: # Add other non-empty, non-StudyDate params
+         elif str_value: # Add other non-empty params
              resolved_params[str_key] = str_value
 
     return resolved_params
 
 
-def query_qido(config: DicomWebSourceState, level: str = "STUDY", custom_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+# --- MODIFIED query_qido ---
+def query_qido(
+    config: DicomWebSourceState,
+    level: str = "STUDY",
+    custom_params: Optional[Dict[str, Any]] = None,
+    prioritize_custom_params: bool = False # <-- ADDED FLAG
+) -> List[Dict[str, Any]]:
     """
     Performs a QIDO-RS query using DicomWebSourceState config.
-    Prioritizes config.search_filters over custom_params for StudyDate.
-    Resolves dynamic date values in parameters.
+
+    Args:
+        config: The source configuration.
+        level: The query level ('STUDY', 'SERIES', 'INSTANCE').
+        custom_params: Additional parameters from the caller (e.g., Data Browser).
+        prioritize_custom_params: If True, parameters in custom_params will
+                                 overwrite those from config.search_filters.
+                                 Set to True for Data Browser calls.
     """
     if not config.base_url:
         raise ValueError(f"Base URL is not configured for source '{config.source_name}'")
 
-    # URL Construction
+    # URL Construction (No changes needed here)
     base_url_with_slash = config.base_url if config.base_url.endswith('/') else config.base_url + '/'
     service_base_url = urljoin(base_url_with_slash, config.qido_prefix or '')
     service_base_url_with_slash = service_base_url if service_base_url.endswith('/') else service_base_url + '/'
@@ -148,7 +161,7 @@ def query_qido(config: DicomWebSourceState, level: str = "STUDY", custom_params:
         raise ValueError(f"Unsupported QIDO query level: {level}")
     url = urljoin(service_base_url_with_slash, path_segment)
 
-    # Parameter Merging Logic (remains the same)
+    # --- CORRECTED Parameter Merging Logic ---
     query_params: Dict[str, Any] = {}
     if isinstance(config.search_filters, dict):
         query_params = config.search_filters.copy()
@@ -157,29 +170,31 @@ def query_qido(config: DicomWebSourceState, level: str = "STUDY", custom_params:
         logger.debug(f"QIDO {level}: No base search_filters found in config.")
 
     if custom_params:
-        logger.debug(f"QIDO {level}: Merging with custom_params: {custom_params}")
-        study_date_from_custom = custom_params.get("StudyDate")
-
-        if study_date_from_custom and "StudyDate" not in query_params:
-            query_params["StudyDate"] = study_date_from_custom
-            logger.info(f"QIDO {level}: Using StudyDate '{study_date_from_custom}' from custom_params (not found in config filters).")
-        elif study_date_from_custom and "StudyDate" in query_params:
-             logger.info(f"QIDO {level}: Ignoring StudyDate '{study_date_from_custom}' from custom_params; using value from config filters: '{query_params['StudyDate']}'")
-
+        logger.debug(f"QIDO {level}: Merging with custom_params: {custom_params}, Priority: {'Custom' if prioritize_custom_params else 'Config'}")
         for key, value in custom_params.items():
-            if key != "StudyDate":
+            if key in query_params and prioritize_custom_params:
+                # Overwrite config value if prioritizing custom params
+                logger.info(f"QIDO {level}: Overwriting config filter '{key}={query_params[key]}' with custom param '{key}={value}'")
                 query_params[key] = value
+            elif key not in query_params:
+                # Add custom param if not present in config
+                query_params[key] = value
+            # else: implicit - key exists in config, but not prioritizing custom -> keep config value
+            # Optional: Add log for ignored custom param if needed
+            # elif key in query_params and not prioritize_custom_params:
+            #      logger.debug(f"QIDO {level}: Ignoring custom param '{key}={value}', using config value.")
 
     # Resolve dynamic values AFTER merging
     resolved_params = _resolve_dynamic_query_params(query_params)
 
-    # Set default limit if not provided in resolved params
-    resolved_params.setdefault('limit', str(settings.DICOMWEB_POLLER_QIDO_LIMIT)) # Use setting
+    # Set default limit if not provided
+    resolved_params.setdefault('limit', str(settings.DICOMWEB_POLLER_QIDO_LIMIT))
 
+    # Auth and Headers (No changes needed here)
     auth = _get_auth(config)
     headers = _get_headers(config)
 
-    # Prepare request for logging URL
+    # Prepare request for logging URL (No changes needed here)
     try:
         prepared_request = requests.Request('GET', url, params=resolved_params).prepare()
         final_url_for_request = prepared_request.url
@@ -187,16 +202,16 @@ def query_qido(config: DicomWebSourceState, level: str = "STUDY", custom_params:
         logger.debug(f"QIDO Query - Final Params: {resolved_params}, Auth: {auth is not None}, Headers: {list(headers.keys())}")
     except Exception as prep_e:
          logger.error(f"Error preparing QIDO request URL for {config.source_name}: {prep_e}")
-         final_url_for_request = url # Fallback
+         final_url_for_request = url
 
-    # Request execution and error handling
+    # Request execution and error handling (No changes needed here)
     try:
         response = requests.get(
             url,
             params=resolved_params,
             headers=headers,
             auth=auth,
-            timeout=60 # Consider making timeout configurable
+            timeout=60
         )
         response.raise_for_status()
 
@@ -226,8 +241,10 @@ def query_qido(config: DicomWebSourceState, level: str = "STUDY", custom_params:
         logger.error(f"Unexpected error during QIDO query for {config.source_name}: {e}", exc_info=True)
         raise DicomWebClientError(f"Unexpected QIDO error: {e}", url=final_url_for_request) from e
 
-# retrieve_instance_metadata function remains the same
+
+# --- retrieve_instance_metadata (Keep as is) ---
 def retrieve_instance_metadata(config: DicomWebSourceState, study_uid: str, series_uid: str, instance_uid: str) -> Optional[Dict[str, Any]]:
+    """Retrieves instance metadata via WADO-RS."""
     if not config.base_url:
         raise ValueError(f"Base URL is not configured for source '{config.source_name}'")
 
@@ -241,14 +258,15 @@ def retrieve_instance_metadata(config: DicomWebSourceState, study_uid: str, seri
     auth = _get_auth(config)
     headers = _get_headers(config)
 
-    try:
-        prepared_request = requests.Request('GET', url).prepare()
-        final_url_for_request = prepared_request.url
-        logger.info(f"Constructed WADO Metadata URL: {final_url_for_request}")
-        logger.debug(f"WADO Metadata Request - URL Base: {url}, Auth: {auth is not None}, Headers: {list(headers.keys())}")
-    except Exception as prep_e:
-        logger.error(f"Error preparing WADO request URL for {instance_uid} at {config.source_name}: {prep_e}")
-        final_url_for_request = url
+    # Optional: Keep prep request logging if useful
+    # try:
+    #     prepared_request = requests.Request('GET', url).prepare()
+    #     final_url_for_request = prepared_request.url
+    #     logger.info(f"Constructed WADO Metadata URL: {final_url_for_request}")
+    #     logger.debug(f"WADO Metadata Request - URL Base: {url}, Auth: {auth is not None}, Headers: {list(headers.keys())}")
+    # except Exception as prep_e:
+    #     logger.error(f"Error preparing WADO request URL for {instance_uid} at {config.source_name}: {prep_e}")
+    final_url_for_request = url # Simplified for now
 
     try:
         response = requests.get(url, headers=headers, auth=auth, timeout=30)
@@ -262,7 +280,7 @@ def retrieve_instance_metadata(config: DicomWebSourceState, study_uid: str, seri
         metadata_list = response.json()
         if isinstance(metadata_list, list) and len(metadata_list) > 0:
             if len(metadata_list) > 1:
-                logger.warning(f"WADO metadata response for {instance_uid} at {config.source_name} contained {len(metadata_list)} items, expected 1. Using the first.")
+                logger.warning(f"WADO metadata response for {instance_uid} at {config.source_name} contained {len(metadata_list)} items, using first.")
             instance_data = metadata_list[0]
             if not isinstance(instance_data, dict):
                  logger.error(f"WADO metadata response item from {config.source_name} was not a JSON object: {instance_data}")
@@ -270,6 +288,7 @@ def retrieve_instance_metadata(config: DicomWebSourceState, study_uid: str, seri
             logger.debug(f"WADO metadata successfully retrieved for {instance_uid} from {config.source_name}")
             return instance_data
         elif isinstance(metadata_list, dict):
+             # Handle cases where server might return single object directly
              logger.warning(f"WADO metadata response for {instance_uid} from {config.source_name} was a single object, not a list. Using it directly.")
              return metadata_list
         else:
@@ -280,7 +299,7 @@ def retrieve_instance_metadata(config: DicomWebSourceState, study_uid: str, seri
         raise DicomWebClientError(f"Timeout connecting to WADO endpoint: {e}", url=final_url_for_request) from e
     except requests.exceptions.RequestException as e:
         if e.response is not None and e.response.status_code == 404:
-            return None
+            return None # Treat 404 as not found, not an error here
         status_code = e.response.status_code if e.response is not None else None
         response_text = e.response.text[:500] if e.response is not None else "N/A"
         logger.error(f"WADO Metadata Request failed for {instance_uid} at {config.source_name}: {e}, Status: {status_code}, Response: {response_text}")
