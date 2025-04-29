@@ -1,7 +1,7 @@
 # app/db/models/dicomweb_source_state.py
 
 # --- Imports ---
-from sqlalchemy import Column, String, DateTime, Text, Boolean, Integer
+from sqlalchemy import Column, String, DateTime, Text, Boolean, Integer, text
 from sqlalchemy.dialects.postgresql import JSONB # Use JSONB for Postgres for better performance/indexing
 # If not using Postgres or want standard JSON, use: from sqlalchemy.types import JSON
 from sqlalchemy.sql import func # For server-side default timestamps if needed
@@ -16,6 +16,8 @@ class DicomWebSourceState(Base):
     """
     Database model to store the configuration and polling state
     for configured DICOMweb sources.
+    NOTE: This model currently mixes configuration and state, which is not ideal.
+          Refactoring to separate these is recommended for future maintainability.
     """
     __tablename__ = "dicomweb_source_state"
 
@@ -26,9 +28,23 @@ class DicomWebSourceState(Base):
     qido_prefix = Column(String, nullable=False, default="qido-rs")
     wado_prefix = Column(String, nullable=False, default="wado-rs")
     polling_interval_seconds = Column(Integer, nullable=False, default=300)
-    is_enabled = Column(Boolean, nullable=False, default=True)
+    is_enabled = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+        index=True, # Added index for potential filtering
+        comment="Whether this source configuration is generally enabled and available (e.g., for data browser)."
+        )
+    is_active = Column( # <-- OUR HACKY ADDITION
+        Boolean,
+        nullable=False,
+        default=True, # Default to active if enabled
+        server_default=text('true'),
+        index=True,
+        comment="Whether AUTOMATIC polling for this source is active based on its schedule."
+        )
     auth_type = Column(String(50), nullable=False, default="none")
-    auth_config = Column(JSONB, nullable=True)
+    auth_config = Column(JSONB, nullable=True) # Consider encrypting secrets here
     search_filters = Column(JSONB, nullable=True)
 
     # --- State Fields (Original Column syntax) ---
@@ -56,6 +72,7 @@ class DicomWebSourceState(Base):
     # id, created_at, updated_at inherited from Base
 
     def __repr__(self):
-        # Update repr to include a metric count
+        # Update repr to include the new active flag
         return (f"<DicomWebSourceState(id={self.id}, source_name='{self.source_name}', "
-                f"enabled={self.is_enabled}, queued={self.queued_instance_count})>") # Example using queued count
+                f"enabled={self.is_enabled}, active={self.is_active}, " # <-- ADDED ACTIVE FLAG HERE
+                f"queued={self.queued_instance_count})>")

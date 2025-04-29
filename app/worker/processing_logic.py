@@ -442,7 +442,6 @@ def _add_original_attribute(dataset: Dataset, original_element: Optional[DataEle
 
 # --- Apply Modifications Function ---
 def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModification], source_identifier: str):
-    # ... (function remains the same) ...
     """
     Applies tag modifications to the dataset IN-PLACE based on a list of actions
     defined by TagModification schema objects (discriminated union).
@@ -478,11 +477,15 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
 
             # Parse the primary tag if it exists (needed for most actions)
             tag: Optional[BaseTag] = None
+            tag_str: str = "N/A" # Initialize tag_str with a default value
             if primary_tag_str:
                 tag = parse_dicom_tag(primary_tag_str)
                 if not tag:
                     logger.warning(f"Skipping modification: Invalid primary/source tag key '{primary_tag_str}' in action {action.value}: {mod.model_dump()}")
                     continue # Skip this modification entirely
+                else:
+                    # Define tag_str here, ensuring it's always set if tag is valid
+                    tag_str = f"({tag.group:04X},{tag.element:04X})"
 
             # --- Original Element Logging ---
             # Get the original element *before* any modification happens
@@ -491,8 +494,12 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
             if tag: # If primary tag (target/source) exists
                 original_element_for_log = deepcopy(dataset.get(tag, None))
 
+            # Initialize modification_description (moved lower to be action-specific)
+            modification_description = f"Action {action.value}" # Default
+
             # Handle CROSSWALK action
             if action == ModifyActionEnum.CROSSWALK:
+                # ... (Crosswalk logic remains the same) ...
                 logger.debug(f"Processing CROSSWALK modification using Map ID: {mod.crosswalk_map_id}")
                 if not db_session:
                     logger.error("Database session required but not available for crosswalk lookup.")
@@ -558,6 +565,7 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
                                 if final_vr in ('IS', 'SL', 'SS', 'UL', 'US'): processed_value = [int(v) for v in new_value] if isinstance(new_value, list) else int(new_value)
                                 elif final_vr in ('FL', 'FD', 'OD', 'OF'): processed_value = [float(v) for v in new_value] if isinstance(new_value, list) else float(new_value)
                                 elif final_vr == 'DS': processed_value = [str(v) for v in new_value] if isinstance(new_value, list) else str(new_value)
+                                # Else just use the value as is for other VRs (LO, SH, PN, etc.)
                             except (ValueError, TypeError) as conv_err: logger.warning(f"Crosswalk: Value '{new_value}' for tag {target_tag_str} could not be coerced for VR '{final_vr}': {conv_err}. Setting value as received."); processed_value = new_value
                         else: processed_value = None; logger.debug(f"Crosswalk: Setting tag {target_tag_str} ({target_tag}) to empty value (VR: {final_vr}) as crosswalk returned None.")
                         dataset[target_tag] = DataElement(target_tag, final_vr, processed_value)
@@ -567,11 +575,14 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
                 continue # Continue to the next modification
 
             # --- Handle Other Actions ---
-            if tag is None and action not in [ModifyActionEnum.COPY, ModifyActionEnum.MOVE]: logger.warning(f"Skipping modification action {action.value}: Missing or invalid target tag."); continue
+            if tag is None and action not in [ModifyActionEnum.COPY, ModifyActionEnum.MOVE]:
+                logger.warning(f"Skipping modification action {action.value}: Missing or invalid target tag.")
+                continue # Skip if tag parsing failed for non-copy/move actions
 
+            # Define modification_description based on the specific action
             if action == ModifyActionEnum.DELETE:
+                modification_description = f"Deleted tag {tag_str}"
                 if tag in dataset:
-                    modification_description = f"Deleted tag {tag_str}"
                     del dataset[tag]
                     logger.debug(f"Deleted tag {tag_str} ({tag})")
                     _add_original_attribute(dataset, original_element_for_log, modification_description, source_identifier)
@@ -580,7 +591,7 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
             elif action == ModifyActionEnum.SET:
                  if not isinstance(mod, TagSetModification): continue
                  new_value = mod.value; vr = mod.vr; final_vr = vr
-                 modification_description = f"Set tag {mod.tag} to '{new_value}' (VR:{vr or 'auto'})"
+                 modification_description = f"Set tag {tag_str} to '{new_value}' (VR:{vr or 'auto'})"
                  if not final_vr:
                       if original_element_for_log: final_vr = original_element_for_log.VR
                       else:
@@ -592,10 +603,11 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
                           if final_vr in ('IS', 'SL', 'SS', 'UL', 'US'): processed_value = [int(v) for v in new_value] if isinstance(new_value, list) else int(new_value)
                           elif final_vr in ('FL', 'FD', 'OD', 'OF'): processed_value = [float(v) for v in new_value] if isinstance(new_value, list) else float(new_value)
                           elif final_vr == 'DS': processed_value = [str(v) for v in new_value] if isinstance(new_value, list) else str(new_value)
+                          # Else just use the value as is for other VRs (LO, SH, PN, etc.)
                      except (ValueError, TypeError) as conv_err: logger.warning(f"Value '{new_value}' for tag {tag_str} could not be coerced for VR '{final_vr}': {conv_err}. Setting as is."); processed_value = new_value
                  else: processed_value = None
                  dataset[tag] = DataElement(tag, final_vr, processed_value)
-                 logger.debug(f"Set tag {mod.tag} ({tag}) (VR: {final_vr})")
+                 logger.debug(f"Set tag {tag_str} ({tag}) (VR: {final_vr})")
                  _add_original_attribute(dataset, original_element_for_log, modification_description, source_identifier)
 
             elif action in [ModifyActionEnum.PREPEND, ModifyActionEnum.SUFFIX]:
@@ -642,22 +654,24 @@ def apply_modifications(dataset: pydicom.Dataset, modifications: List[TagModific
                 dest_tag_str = getattr(mod, 'destination_tag', None)
                 dest_tag = parse_dicom_tag(dest_tag_str) if dest_tag_str else None
                 if not dest_tag: logger.warning(f"Skipping {action.value}: Invalid destination tag '{dest_tag_str}'."); continue
-                if original_element_for_log is None: logger.warning(f"Cannot {action.value}: Source tag {source_tag_str} ({source_tag}) not found in dataset originally."); continue
+                if original_element_for_log is None: logger.warning(f"Cannot {action.value}: Source tag {tag_str} ({source_tag}) not found in dataset originally."); continue
                 original_dest_element_before_mod: Optional[DataElement] = deepcopy(dataset.get(dest_tag, None))
-                modification_description = f"{action.value} tag {source_tag_str} to {dest_tag_str}"
+                modification_description = f"{action.value} tag {tag_str} to {dest_tag_str}"
                 dest_vr = mod.destination_vr or original_element_for_log.VR
                 new_element = DataElement(dest_tag, dest_vr, deepcopy(original_element_for_log.value))
                 dataset[dest_tag] = new_element
-                logger.debug(f"Tag {source_tag_str} ({source_tag}) {action.value}d to {dest_tag_str} ({dest_tag}) with VR '{dest_vr}'")
+                logger.debug(f"Tag {tag_str} ({source_tag}) {action.value}d to {dest_tag_str} ({dest_tag}) with VR '{dest_vr}'")
                 _add_original_attribute(dataset, original_dest_element_before_mod, modification_description, source_identifier)
                 if action == ModifyActionEnum.MOVE:
                     if source_tag in dataset:
-                        _add_original_attribute(dataset, original_element_for_log, f"Deleted tag {source_tag_str} as part of move", source_identifier)
+                        # Use tag_str which was correctly derived from source_tag
+                        _add_original_attribute(dataset, original_element_for_log, f"Deleted tag {tag_str} as part of move", source_identifier)
                         del dataset[source_tag]
-                        logger.debug(f"Deleted original source tag {source_tag_str} ({source_tag}) after move.")
+                        logger.debug(f"Deleted original source tag {tag_str} ({source_tag}) after move.")
 
         except Exception as e:
-            tag_id_str = str(tag) if tag else getattr(mod, 'crosswalk_map_id', 'N/A')
+            tag_id_str = tag_str # Use the defined tag_str
+            if action == ModifyActionEnum.CROSSWALK: tag_id_str = f"Crosswalk Map ID {getattr(mod, 'crosswalk_map_id', 'N/A')}"
             logger.error(f"Failed to apply modification ({action.value}) for target {tag_id_str}: {e}", exc_info=True)
         finally:
             if db_session:

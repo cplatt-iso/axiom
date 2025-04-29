@@ -30,7 +30,14 @@ class DimseQueryRetrieveSourceBase(BaseModel):
     remote_port: int = Field(..., gt=0, lt=65536, description="Network port of the remote peer's DIMSE service (1-65535).")
     local_ae_title: str = Field("AXIOM_QR_SCU", min_length=1, max_length=16, description="AE Title our SCU will use when associating.")
     polling_interval_seconds: int = Field(300, gt=0, description="Frequency in seconds to poll the source using C-FIND.")
-    is_enabled: bool = Field(True, description="Whether polling this source is active.")
+    is_enabled: bool = Field(
+        True,
+        description="Whether this source is generally enabled (e.g., shows in Data Browser, usable by system)." # <-- Clarified
+    )
+    is_active: bool = Field( # <-- ADDED THIS SHIT
+        True,
+        description="Whether AUTOMATIC polling for this source is active based on its schedule."
+    )
     query_level: str = Field("STUDY", pattern=r"^(STUDY|SERIES|PATIENT)$", description="Query Retrieve Level for C-FIND (STUDY, SERIES, PATIENT).") # Example pattern
     # Accept dict or valid JSON string for filters on input, store as dict
     query_filters: Optional[Dict[str, Any]] = Field(
@@ -39,7 +46,7 @@ class DimseQueryRetrieveSourceBase(BaseModel):
             "JSON object containing key-value pairs for C-FIND query identifiers. "
             "Example: {'ModalitiesInStudy': 'CT', 'PatientName': 'DOE^JOHN*'}. "
             "For StudyDate, use 'YYYYMMDD', 'YYYYMMDD-', 'YYYYMMDD-YYYYMMDD', "
-            "'TODAY', 'YESTERDAY', or '-<N>d' (N days ago to present, e.g., '-7d')." # <-- Updated description
+            "'TODAY', 'YESTERDAY', or '-<N>d' (N days ago to present, e.g., '-7d')."
         )
     )
     move_destination_ae_title: Optional[str] = Field(None, min_length=1, max_length=16, description="Optional: AE Title of OUR listener where retrieved instances should be sent via C-MOVE.")
@@ -87,7 +94,7 @@ class DimseQueryRetrieveSourceBase(BaseModel):
 
 # --- Create Schema (Payload for POST) ---
 class DimseQueryRetrieveSourceCreate(DimseQueryRetrieveSourceBase):
-    pass # Inherits all fields and validation from Base
+    pass # Inherits all fields (including is_active) and validation from Base
 
 # --- Update Schema (Payload for PUT/PATCH) ---
 class DimseQueryRetrieveSourceUpdate(BaseModel):
@@ -100,6 +107,7 @@ class DimseQueryRetrieveSourceUpdate(BaseModel):
     local_ae_title: Optional[str] = Field(None, min_length=1, max_length=16)
     polling_interval_seconds: Optional[int] = Field(None, gt=0)
     is_enabled: Optional[bool] = None
+    is_active: Optional[bool] = None # <-- ADDED THIS SHIT TOO
     query_level: Optional[str] = Field(None, pattern=r"^(STUDY|SERIES|PATIENT)$")
     query_filters: Optional[Dict[str, Any]] = Field(None, description="Update query filters (provide full new object or null to clear).")
     move_destination_ae_title: Optional[str] = Field(None, min_length=1, max_length=16) # Allow null to clear
@@ -130,6 +138,9 @@ class DimseQueryRetrieveSourceRead(DimseQueryRetrieveSourceBase):
     found_study_count: int = Field(0, description="Total studies found by C-FIND.")
     move_queued_study_count: int = Field(0, description="Total studies queued for C-MOVE.")
     processed_instance_count: int = Field(0, description="Total instances processed after C-MOVE.")
+
+    # No need to explicitly add `is_active` here;
+    # it's inherited from Base and `from_attributes` will pull it from the DB model.
 
     model_config = ConfigDict(from_attributes=True) # Enable ORM mode
 

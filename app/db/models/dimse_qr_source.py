@@ -1,7 +1,7 @@
 # app/db/models/dimse_qr_source.py
 from typing import Optional, Dict, Any, List
 from datetime import datetime
-from sqlalchemy import String, Integer, Boolean, Text, JSON, DateTime
+from sqlalchemy import String, Integer, Boolean, Text, JSON, DateTime, text
 # Use JSONB for PostgreSQL if preferred and dialect is available
 # from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -70,7 +70,15 @@ class DimseQueryRetrieveSource(Base):
         nullable=False,
         default=True,
         index=True,
-        comment="Whether polling this source is active."
+        comment="Whether this source configuration is generally enabled and available (e.g., for data browser)."
+    )
+    is_active: Mapped[bool] = mapped_column(  # <-- ADDED THIS SHIT
+        Boolean,
+        nullable=False,
+        default=True, # Default to active if enabled
+        server_default=text('true'),
+        index=True,
+        comment="Whether AUTOMATIC polling for this source is active based on its schedule."
     )
 
     # --- Query Configuration (C-FIND) ---
@@ -136,6 +144,7 @@ class DimseQueryRetrieveSource(Base):
     )
 
     def __repr__(self):
+        # Updated repr to include is_active
         return (f"<DimseQueryRetrieveSource(id={self.id}, name='{self.name}', "
                 f"remote_ae='{self.remote_ae_title}', host='{self.remote_host}:{self.remote_port}', "
-                f"enabled={self.is_enabled})>")
+                f"enabled={self.is_enabled}, active={self.is_active})>") 

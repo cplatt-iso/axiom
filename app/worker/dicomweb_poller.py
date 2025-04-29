@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @shared_task(name="poll_all_dicomweb_sources")
 def poll_all_dicomweb_sources() -> Dict[str, Any]:
     """
-    Celery Beat task to poll all enabled DICOMweb sources for new studies/instances.
+    Celery Beat task to poll all enabled AND active DICOMweb sources for new studies/instances.
     Includes deduplication check and metrics increments.
     """
     logger.info("Starting DICOMweb polling cycle...")
@@ -31,15 +31,22 @@ def poll_all_dicomweb_sources() -> Dict[str, Any]:
 
     try:
         db = SessionLocal()
-        # --- Use alias crud_dicomweb_state ---
         all_sources = crud.dicomweb_state.get_all(db, limit=settings.DICOMWEB_POLLER_MAX_SOURCES)
-        # --- END Use alias ---
-        enabled_sources = [s for s in all_sources if s.is_enabled]
-        logger.info(f"Found {len(enabled_sources)} enabled DICOMweb sources in database to check.")
 
-        for source_config in enabled_sources:
+        # Filter for sources that are BOTH enabled AND active
+        sources_to_poll = [
+            s for s in all_sources if s.is_enabled and s.is_active
+        ]
+        logger.info(f"Found {len(sources_to_poll)} enabled and active DICOMweb sources in database to poll.")
+
+        for source_config in sources_to_poll: # Iterate over the filtered list
+             # Optional: Add check here too, in case state changed mid-cycle
+             if not source_config.is_enabled or not source_config.is_active:
+                 logger.debug(f"Skipping DICOMweb source '{source_config.source_name}' (ID: {source_config.id}) as it became disabled/inactive.")
+                 continue
+
              try:
-                 # Process each enabled source individually
+                 # Process each enabled and active source individually
                  poll_source(db, source_config) # Pass the db session
                  processed_sources += 1
              except Exception as e:
@@ -47,14 +54,12 @@ def poll_all_dicomweb_sources() -> Dict[str, Any]:
                  logger.error(f"Polling failed for source '{source_config.source_name}' (ID: {source_config.id}): {e}", exc_info=True)
                  failed_sources += 1
                  try:
-                      # --- Use alias crud_dicomweb_state ---
                       crud.dicomweb_state.update_run_status(
                           db,
                           source_name=source_config.source_name,
                           last_error_run=datetime.now(timezone.utc),
                           last_error_message=str(e)[:1024] # Store truncated error
                       )
-                      # --- END Use alias ---
                       # No commit here, handled by the main try/finally block
                  except Exception as db_err:
                       logger.error(f"Failed to update error status for {source_config.source_name} in DB: {db_err}", exc_info=True)
@@ -79,6 +84,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
     Polls a single DICOMweb source for new instances based on configuration and last run state.
     Includes deduplication using ProcessedStudyLog and increments metrics.
     """
+    # --- This function remains the same, the check is done before calling it ---
     logger.info(f"Polling DICOMweb source: '{config.source_name}' (ID: {config.id})")
     client = dicomweb_client
     last_successful_run_for_update: Optional[datetime] = None
@@ -86,9 +92,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
     newly_queued_instance_count = 0
     found_instances_in_run = set() # Track unique instance UIDs found in *this* run
     total_instances_found_this_run_for_db = 0
-    # --- Get source ID as string for logging ---
-    source_id_str = str(config.id)
-    # --- END Get source ID as string ---
+    source_id_str = str(config.id) # Get the source ID as string for logging
 
     try:
         # --- Determine query parameters (logic remains the same) ---
@@ -122,14 +126,12 @@ def poll_source(db: Session, config: DicomWebSourceState):
                 logger.info(f"{config.source_name}: Processing Study UID: {study_uid}")
 
                 # Deduplication Check
-                # --- Use correct crud object AND pass source_id as string ---
                 already_processed = crud.crud_processed_study_log.check_exists(
                     db=db,
                     source_type=ProcessedStudySourceType.DICOMWEB,
-                    source_id=source_id_str, # <<< Pass string ID
+                    source_id=source_id_str, # Pass string ID
                     study_instance_uid=study_uid
                 )
-                # --- END Use correct crud object AND pass source_id as string ---
                 if already_processed: logger.debug(f"{config.source_name}: Study UID {study_uid} already logged. Skipping."); continue
 
                 try:
@@ -179,15 +181,13 @@ def poll_source(db: Session, config: DicomWebSourceState):
                     # Log study after attempting to queue its instances
                     if queued_study_in_loop:
                         try:
-                            # --- Use correct crud object AND pass source_id as string ---
                             log_created = crud.crud_processed_study_log.create_log_entry(
                                 db=db,
                                 source_type=ProcessedStudySourceType.DICOMWEB,
-                                source_id=source_id_str, # <<< Pass string ID
+                                source_id=source_id_str, # Pass string ID
                                 study_instance_uid=study_uid,
                                 commit=False
                             )
-                            # --- END Use correct crud object AND pass source_id as string ---
                             if log_created: logger.info(f"Logged Study UID {study_uid} to ProcessedStudyLog.")
                             else: logger.error(f"Failed create ProcessedStudyLog entry for {study_uid}.")
                         except Exception as log_err: logger.error(f"Exception creating ProcessedStudyLog entry for {study_uid}: {log_err}", exc_info=True)
@@ -198,7 +198,6 @@ def poll_source(db: Session, config: DicomWebSourceState):
             # --- Increment Found Count (Total for Run) ---
             if total_instances_found_this_run_for_db > 0:
                  try:
-                     # Use alias crud_dicomweb_state
                      if crud.dicomweb_state.increment_found_count(db=db, source_name=config.source_name, count=total_instances_found_this_run_for_db):
                          logger.info(f"Incremented found count for '{config.source_name}' by {total_instances_found_this_run_for_db}")
                      else:
@@ -220,7 +219,6 @@ def poll_source(db: Session, config: DicomWebSourceState):
         # --- Increment Queued Count ---
         if newly_queued_instance_count > 0:
              try:
-                 # Use alias crud_dicomweb_state
                  if crud.dicomweb_state.increment_queued_count(db=db, source_name=config.source_name, count=newly_queued_instance_count):
                      logger.info(f"Incremented queued count for '{config.source_name}' by {newly_queued_instance_count}")
                  else:
@@ -230,8 +228,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
                   # Continue processing state update even if counter fails
         # --- End Increment ---
 
-        # Use alias crud_dicomweb_state
-        crud.dicomweb_state.update_run_status(db, source_name=config.source_name, **update_payload) # Use alias
+        crud.dicomweb_state.update_run_status(db, source_name=config.source_name, **update_payload)
 
     except client.DicomWebClientError as client_err: logger.error(f"{config.source_name}: Client error: {client_err}"); raise client_err
     except Exception as poll_err: logger.error(f"{config.source_name}: Unexpected error: {poll_err}", exc_info=True); raise poll_err

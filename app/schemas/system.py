@@ -2,6 +2,11 @@
 from pydantic import BaseModel, Field, ConfigDict # Import ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
+
+class DirectoryUsageStats(BaseModel):
+    path: str = Field(..., description="The directory path checked.")
+    content_bytes: int = Field(..., description="Total size of files within this directory in bytes.")
 
 # --- DICOMweb Poller Schemas ---
 # ... (DicomWebSourceStatus and DicomWebPollersStatusResponse remain the same) ...
@@ -83,3 +88,28 @@ class DimseQrSourcesStatusResponse(BaseModel):
     """Schema for the API response containing all DIMSE Q/R source statuses."""
     sources: List[DimseQrSourceStatus] = []
 # --- END DIMSE Q/R Source Status Schemas ---
+
+class DiskUsageStats(BaseModel):
+    # Keep overall filesystem stats for context
+    filesystem_total_bytes: int = Field(..., description="Total disk space on the underlying filesystem in bytes.")
+    filesystem_free_bytes: int = Field(..., description="Free disk space on the underlying filesystem in bytes.")
+    # List of stats for specific relevant directories
+    directories: List[DirectoryUsageStats] = Field(..., description="Usage statistics for specific monitored directories.")
+
+class SystemInfo(BaseModel):
+    project_name: str
+    project_version: str
+    environment: str
+    debug_mode: bool
+    log_original_attributes: bool
+    delete_on_success: bool
+    delete_unmatched_files: bool
+    delete_on_no_destination: bool
+    move_to_error_on_partial_failure: bool
+    dicom_storage_path: str
+    dicom_error_path: str
+    filesystem_storage_path: str
+    temp_dir: Optional[str] = None # TEMP_DIR might be None
+    openai_configured: bool # Just indicate if key is set
+
+    model_config = ConfigDict(from_attributes=True)

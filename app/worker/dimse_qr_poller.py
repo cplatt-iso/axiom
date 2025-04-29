@@ -87,25 +87,48 @@ def _resolve_dynamic_date_filter(value: Any) -> Optional[str]:
 # --- Main Celery Beat Task ---
 @shared_task(name="poll_all_dimse_qr_sources")
 def poll_all_dimse_qr_sources() -> Dict[str, Any]:
-    """Celery Beat task to poll all enabled DIMSE Q/R sources using C-FIND."""
+    """
+    Celery Beat task to poll all enabled AND active DIMSE Q/R sources using C-FIND.
+    """
     logger.info("Starting DIMSE Q/R polling cycle...")
     processed_sources = 0; failed_sources = 0; db: Optional[Session] = None
     try:
-        db = SessionLocal();
-        # --- Use correct crud object ---
-        enabled_sources = crud.crud_dimse_qr_source.get_enabled_sources(db)
-        # --- END Use correct crud object ---
-        logger.info(f"Found {len(enabled_sources)} enabled DIMSE Q/R sources to check.")
-        for source_config in enabled_sources:
-            try: _poll_single_dimse_source(db, source_config); processed_sources += 1
+        db = SessionLocal()
+
+        # Fetch ALL sources first
+        all_sources = crud.crud_dimse_qr_source.get_multi(db, limit=settings.DIMSE_QR_POLLER_MAX_SOURCES) # Assuming limit setting exists
+
+        # Filter for sources that are BOTH enabled AND active
+        sources_to_poll = [
+            s for s in all_sources if s.is_enabled and s.is_active
+        ]
+        logger.info(f"Found {len(sources_to_poll)} enabled and active DIMSE Q/R sources to poll.")
+
+        for source_config in sources_to_poll: # Iterate over the filtered list
+            # Check again just before processing (belt and suspenders, optional)
+            if not source_config.is_enabled or not source_config.is_active:
+                 logger.debug(f"Skipping DIMSE Q/R source '{source_config.name}' (ID: {source_config.id}) as it became disabled/inactive.")
+                 continue
+
+            try:
+                 # Call the polling function for the source
+                 _poll_single_dimse_source(db, source_config)
+                 processed_sources += 1
             except Exception as e:
-                logger.error(f"Polling failed for DIMSE Q/R source '{source_config.name}' (ID: {source_config.id}): {e}", exc_info=True); failed_sources += 1
+                # Log failure and update status
+                logger.error(f"Polling failed for DIMSE Q/R source '{source_config.name}' (ID: {source_config.id}): {e}", exc_info=True)
+                failed_sources += 1
                 try:
-                    # --- Use correct crud object ---
-                    crud.crud_dimse_qr_source.update_query_status( db=db, source_id=source_config.id, last_error_time=datetime.now(timezone.utc), last_error_message=str(e)[:1024] )
-                    # --- END Use correct crud object ---
-                except Exception as db_err: logger.error(f"Failed to update error status for {source_config.name}: {db_err}", exc_info=True)
-        # Commit all updates after loop
+                    crud.crud_dimse_qr_source.update_query_status(
+                         db=db,
+                         source_id=source_config.id,
+                         last_error_time=datetime.now(timezone.utc),
+                         last_error_message=str(e)[:1024] # Truncate error message
+                    )
+                except Exception as db_err:
+                    logger.error(f"Failed to update error status for {source_config.name}: {db_err}", exc_info=True)
+
+        # Commit all updates after the loop
         if db: db.commit(); logger.debug("Committed DB changes after DIMSE polling cycle.")
     except Exception as e:
         logger.error(f"Critical error during DIMSE Q/R polling cycle: {e}", exc_info=True);
@@ -123,6 +146,7 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
 # --- Helper to Poll a Single Source ---
 def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSource):
     """Polls a single DIMSE Q/R source using C-FIND and queues C-MOVE if needed."""
+    # --- This function remains the same, the check is done before calling it ---
     logger.info(f"Polling DIMSE Q/R source: '{config.name}' (ID: {config.id}) -> {config.remote_ae_title}@{config.remote_host}:{config.remote_port}")
     ae = AE(ae_title=config.local_ae_title)
     ae.add_requested_context('1.2.840.10008.1.1') # Verification
@@ -152,9 +176,8 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
     studies_queued_this_run = 0
     found_study_uids_this_run = set()
     source_id_for_task = config.id # Get the source ID
-    # --- Get source ID as string for logging ---
-    source_id_str = str(config.id)
-    # --- END Get source ID as string ---
+    source_id_str = str(config.id) # Get the source ID as string for logging
+
     try:
         assoc = ae.associate( config.remote_host, config.remote_port, ae_title=config.remote_ae_title )
         if assoc.is_established:
@@ -173,28 +196,24 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
                              if study_uid:
                                  found_study_uids_this_run.add(study_uid) # Add found UID
                                  pat_id=result_identifier.get("PatientID", "N/A"); study_date=result_identifier.get("StudyDate", "N/A"); logger.info(f" -> Found Study: {study_uid}, PID={pat_id}, Date={study_date} [{response_count}]")
-                                 # --- Use correct crud object AND pass source_id as string ---
                                  already_processed = crud.crud_processed_study_log.check_exists(
                                      db=db,
                                      source_type=ProcessedStudySourceType.DIMSE_QR,
-                                     source_id=source_id_str, # <<< Pass string ID
+                                     source_id=source_id_str, # Pass string ID
                                      study_instance_uid=study_uid
                                  )
-                                 # --- END Use correct crud object AND pass source_id as string ---
                                  if already_processed: logger.debug(f"Study {study_uid} already logged. Skipping.")
                                  elif config.move_destination_ae_title:
                                      try:
                                          logger.debug(f"Queueing C-MOVE: {study_uid} -> {config.move_destination_ae_title}")
                                          trigger_dimse_cmove_task.delay(source_id=source_id_for_task, study_instance_uid=study_uid)
-                                         # --- Use correct crud object AND pass source_id as string ---
                                          log_created = crud.crud_processed_study_log.create_log_entry(
                                              db=db,
                                              source_type=ProcessedStudySourceType.DIMSE_QR,
-                                             source_id=source_id_str, # <<< Pass string ID
+                                             source_id=source_id_str, # Pass string ID
                                              study_instance_uid=study_uid,
                                              commit=False # Commit handled outside loop
                                          )
-                                         # --- END Use correct crud object AND pass source_id as string ---
                                          if log_created:
                                              studies_queued_this_run += 1 # Increment local counter
                                              logger.info(f"Logged {study_uid} for queueing.")
@@ -212,7 +231,6 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
             # --- Increment Counts AFTER successful loop ---
             if len(found_study_uids_this_run) > 0:
                  try:
-                     # Use correct crud object
                      if crud.crud_dimse_qr_source.increment_found_study_count(db=db, source_id=source_id_for_task, count=len(found_study_uids_this_run)):
                           logger.info(f"Incremented found study count for source ID {source_id_for_task} by {len(found_study_uids_this_run)}")
                      else:
@@ -222,7 +240,6 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
 
             if studies_queued_this_run > 0:
                  try:
-                     # Use correct crud object
                      if crud.crud_dimse_qr_source.increment_move_queued_count(db=db, source_id=source_id_for_task, count=studies_queued_this_run):
                           logger.info(f"Incremented move queued count for source ID {source_id_for_task} by {studies_queued_this_run}")
                      else:
@@ -232,9 +249,7 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
             # --- End Increment ---
 
             # Update last successful query timestamp (commit handled outside)
-            # --- Use correct crud object ---
             crud.crud_dimse_qr_source.update_query_status(db=db, source_id=config.id, last_successful_query=datetime.now(timezone.utc))
-            # --- END Use correct crud object ---
 
             assoc.release(); logger.info(f"Assoc released. Found {len(found_study_uids_this_run)} studies, queued {studies_queued_this_run} new moves.")
         else: raise DimseQrPollingError(f"Association failed with {config.remote_ae_title}")

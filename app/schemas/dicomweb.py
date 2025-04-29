@@ -59,6 +59,8 @@ class FailureReasonCode:
 
 
 # --- DICOMweb Source Configuration Schemas ---
+# NOTE: These schemas map to the DicomWebSourceState model, which currently
+#       mixes configuration and state. A future refactor is recommended.
 
 # Add 'apikey' to the allowed types
 AuthType = Literal["none", "basic", "bearer", "apikey"] # <-- ADDED 'apikey'
@@ -73,7 +75,14 @@ class DicomWebSourceConfigBase(BaseModel):
         default=300, gt=0,
         description="Frequency in seconds at which to poll the source for new studies."
     )
-    is_enabled: bool = Field(True, description="Whether the poller for this source is active.")
+    is_enabled: bool = Field(
+        True,
+        description="Whether this source is generally enabled (e.g., shows in Data Browser, usable by system)." # <-- Clarified
+    )
+    is_active: bool = Field( # <-- ADDED THIS SHIT
+        True,
+        description="Whether AUTOMATIC polling for this source is active based on its schedule."
+    )
     auth_type: AuthType = Field("none", description="Authentication method required by the DICOMweb source.")
     auth_config: Optional[Dict[str, Any]] = Field(
         None,
@@ -146,7 +155,8 @@ class DicomWebSourceConfigBase(BaseModel):
 
 # --- Keep DicomWebSourceConfigCreate as is ---
 class DicomWebSourceConfigCreate(DicomWebSourceConfigBase):
-    pass # Inherits everything, including new 'apikey' possibility
+    # Inherits 'is_active' and everything else
+    pass
 
 
 class DicomWebSourceConfigUpdate(BaseModel):
@@ -156,7 +166,8 @@ class DicomWebSourceConfigUpdate(BaseModel):
     qido_prefix: Optional[str] = Field(None, description="Path prefix for QIDO-RS service.")
     wado_prefix: Optional[str] = Field(None, description="Path prefix for WADO-RS service.")
     polling_interval_seconds: Optional[int] = Field(None, gt=0, description="Frequency in seconds.")
-    is_enabled: Optional[bool] = Field(None, description="Whether the poller for this source is active.")
+    is_enabled: Optional[bool] = Field(None, description="Whether this source is generally enabled.")
+    is_active: Optional[bool] = Field(None, description="Whether AUTOMATIC polling is active.") # <-- ADDED THIS SHIT TOO
     auth_type: Optional[AuthType] = Field(None, description="Authentication method.") # Now includes 'apikey'
     auth_config: Optional[Dict[str, Any]] = Field(None, description="JSON object containing credentials.")
     search_filters: Optional[Dict[str, Any]] = Field(None, description="JSON object containing QIDO-RS query parameters.")
@@ -176,26 +187,30 @@ class DicomWebSourceConfigUpdate(BaseModel):
         auth_type = values.get('auth_type')
         auth_config = values.get('auth_config')
 
+        # This logic seems okay, just ensures if auth_config is provided, it matches the (potentially updated) auth_type
         if 'auth_config' in values:
-            effective_auth_type = auth_type
+            effective_auth_type = auth_type # Use the incoming auth_type if provided
+            # If auth_type is NOT being updated, we'd ideally need the *current* auth_type
+            # Pydantic validators don't easily give access to the existing object state,
+            # so this validation might be better handled in the CRUD/API layer where context exists.
+            # However, this check covers the case where BOTH are provided in the update payload.
             if effective_auth_type == "basic":
                  if not isinstance(auth_config, dict) or 'username' not in auth_config or 'password' not in auth_config:
                       raise ValueError("If providing 'auth_config' with 'basic' auth_type, it must be a dict with 'username' and 'password'.")
             elif effective_auth_type == "bearer":
                  if not isinstance(auth_config, dict) or 'token' not in auth_config:
                       raise ValueError("If providing 'auth_config' with 'bearer' auth_type, it must be a dict with 'token'.")
-            # --- ADDED API Key Check for Update ---
             elif effective_auth_type == "apikey":
                  if not isinstance(auth_config, dict) or 'header_name' not in auth_config or 'key' not in auth_config:
                       raise ValueError("If providing 'auth_config' with 'apikey' auth_type, it must be a dict with 'header_name' and 'key'.")
-            # --- END API Key Check ---
             elif effective_auth_type == "none":
                  if auth_config is not None and isinstance(auth_config, dict) and len(auth_config) > 0 :
                       raise ValueError("If providing 'auth_config', it must be empty or null when auth_type is 'none'.")
-                 values['auth_config'] = None # Normalize
+                 values['auth_config'] = None # Normalize if type is none and config is provided (as empty/null)
 
-        if auth_type == "none":
-            values['auth_config'] = None
+        # If only auth_type is provided and set to 'none', clear auth_config
+        if auth_type == "none" and 'auth_config' not in values:
+             values['auth_config'] = None
 
         return values
 
@@ -207,9 +222,10 @@ class DicomWebSourceConfigRead(BaseModel):
     qido_prefix: str = Field(..., description="Path prefix for QIDO-RS.")
     wado_prefix: str = Field(..., description="Path prefix for WADO-RS.")
     polling_interval_seconds: int = Field(..., description="Polling frequency in seconds.")
-    is_enabled: bool = Field(..., description="Whether polling is active.")
+    is_enabled: bool = Field(..., description="Whether this source is generally enabled.")
+    is_active: bool = Field(..., description="Whether AUTOMATIC polling is active.") # <-- ADDED THIS SHIT HERE AS WELL
     auth_type: AuthType = Field(..., description="Authentication method.") # Includes apikey now
-    auth_config: Optional[Dict[str, Any]] = Field(None, description="Authentication credentials.")
+    auth_config: Optional[Dict[str, Any]] = Field(None, description="Authentication credentials (sensitive info like passwords/tokens omitted).") # Note: Sensitive info should be omitted here
     search_filters: Optional[Dict[str, Any]] = Field(None, description="QIDO-RS query parameters.")
     last_processed_timestamp: Optional[datetime] = Field(None, description="Timestamp of the last instance processed based on its DICOM date/time.")
     last_successful_run: Optional[datetime] = Field(None, description="Timestamp of the last successful polling cycle completion.")
@@ -219,6 +235,16 @@ class DicomWebSourceConfigRead(BaseModel):
     queued_instance_count: int = Field(0, description="Total instances queued for processing.")
     processed_instance_count: int = Field(0, description="Total instances successfully processed.")
 
+    # IMPORTANT: Need to make sure the API endpoint populating this schema
+    #            omits sensitive fields from 'auth_config' before returning it.
+    #            The schema itself can't enforce this easily without more complex logic.
+
     class Config:
         from_attributes = True # Enable ORM mode for Pydantic V2
-
+        # Add alias for name -> source_name for ORM mapping if needed explicitly,
+        # but validation_alias on the field should handle input mapping correctly for Pydantic v2.
+        # Pydantic V2 uses `validation_alias` for input mapping (`source_name` -> `name`)
+        # and `serialization_alias` for output mapping (`name` -> `name`).
+        # Since `name` is the desired output field name, no serialization alias is needed.
+        # `from_attributes=True` handles mapping DB `source_name` to schema `name` if `validation_alias` isn't sufficient alone.
+        # Let's assume `from_attributes=True` handles DB `source_name` -> Schema `name` mapping.

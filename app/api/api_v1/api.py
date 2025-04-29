@@ -36,6 +36,9 @@ api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["DICOMweb"]
 api_router.include_router(ai_assist.router, prefix="/ai-assist", tags=["AI Assist"])
 api_router.include_router(data_browser.router, prefix="/data-browser", tags=["Data Browser"]) # <-- ADDED ROUTER
 
+# Add route for new system config area if needed (using placeholder endpoint)
+# api_router.include_router(system_config_placeholder.router, prefix="/admin/system-config", tags=["System Configuration"])
+
 # Configuration Routers
 api_router.include_router(
     config_dicomweb.router,

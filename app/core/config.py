@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     )
 
     PROJECT_NAME: str = "Axiom Flow"
+    PROJECT_VERSION: str = "pre-alpha 0.04.25.01" # Add if missing
+    ENVIRONMENT: str = "development" # Add if missing
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
 
@@ -89,6 +91,7 @@ class Settings(BaseSettings):
 
     DICOM_STORAGE_PATH: Path = Path("/dicom_data/incoming")
     DICOM_ERROR_PATH: Path = Path("/dicom_data/errors")
+    FILESYSTEM_STORAGE_PATH: Path = Path("/dicom_data/processed")
     TEMP_DIR: Optional[Path] = None
     DELETE_ON_SUCCESS: bool = True
     DELETE_UNMATCHED_FILES: bool = False
@@ -97,10 +100,14 @@ class Settings(BaseSettings):
 
     LOG_ORIGINAL_ATTRIBUTES: bool = True
 
+    # DICOMweb Poller Settings
     DICOMWEB_POLLER_DEFAULT_FALLBACK_DAYS: int = 7
     DICOMWEB_POLLER_OVERLAP_MINUTES: int = 5
     DICOMWEB_POLLER_QIDO_LIMIT: int = 5000
     DICOMWEB_POLLER_MAX_SOURCES: int = 100
+
+    # DIMSE Q/R Poller Settings
+    DIMSE_QR_POLLER_MAX_SOURCES: int = 100 # Added this setting
 
     KNOWN_INPUT_SOURCES: List[str] = [
         "api_json",
@@ -151,6 +158,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+# ... (rest of the logging remains the same) ...
 logger.info("--- Axiom Flow Configuration Loaded ---")
 logger.info(f"DEBUG mode: {settings.DEBUG}")
 db_uri_display = str(settings.SQLALCHEMY_DATABASE_URI).split('@')[-1] if settings.SQLALCHEMY_DATABASE_URI else 'Not Set'
@@ -162,4 +170,6 @@ logger.info(f"Error DICOM Path: {settings.DICOM_ERROR_PATH}")
 logger.info(f"Log Original Attributes: {settings.LOG_ORIGINAL_ATTRIBUTES}")
 logger.info(f"Known Input Sources (Static + Env): {settings.KNOWN_INPUT_SOURCES}")
 logger.info(f"OpenAI API Key Loaded: {'Yes' if settings.OPENAI_API_KEY else 'No'}")
+logger.info(f"DICOMweb Max Sources: {settings.DICOMWEB_POLLER_MAX_SOURCES}") # Log the existing one
+logger.info(f"DIMSE Q/R Max Sources: {settings.DIMSE_QR_POLLER_MAX_SOURCES}") # Log the new one
 logger.info("---------------------------------------")
