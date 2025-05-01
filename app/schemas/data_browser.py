@@ -1,132 +1,156 @@
 # app/schemas/data_browser.py
-from pydantic import BaseModel, Field, field_validator, ConfigDict
-from typing import Optional, List, Dict, Any, Literal
-from datetime import datetime, date
-import re
-import logging
+from typing import List, Dict, Any, Optional, Literal
+from pydantic import BaseModel, Field, model_validator, ConfigDict
+from enum import Enum
 
-logger = logging.getLogger(__name__)
+# Use structlog if available, otherwise fallback for potential logging in validators
+try:
+    import structlog # type: ignore
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
-# --- Query Request Schemas (Keep as is) ---
-AllowedQueryParam = Literal[
-    "PatientName", "PatientID", "AccessionNumber", "StudyDate", "StudyTime",
-    "ModalitiesInStudy", "ReferringPhysicianName", "StudyDescription",
-    "PatientBirthDate",
-]
+# --- Query Level Enum ---
+class QueryLevel(str, Enum):
+    """Defines the DICOM Query/Retrieve levels."""
+    STUDY = "STUDY"
+    SERIES = "SERIES"
+    INSTANCE = "INSTANCE"
+
+# --- Query Parameter Schema ---
 class DataBrowserQueryParam(BaseModel):
-    field: AllowedQueryParam = Field(..., description="DICOM tag keyword or standard query parameter.")
-    value: str = Field(..., description="Value to search for (string format). Use * for wildcard where supported.")
+    """Represents a single query parameter (field=value)."""
+    field: str # DICOM Keyword or Tag (e.g., "PatientName", "00100010")
+    value: str # Value to match (string representation)
+
+# --- Query Request Schema ---
 class DataBrowserQueryRequest(BaseModel):
-    source_id: int = Field(..., description="Database ID of the configured source.")
-    query_parameters: List[DataBrowserQueryParam] = Field( default_factory=list, description="List of parameters to filter the query.")
-    @field_validator('query_parameters')
-    @classmethod
-    def check_date_format(cls, params: List[DataBrowserQueryParam]):
-        # ... (validation logic kept as is) ...
-        for param in params:
-             if param.field.lower() == "studydate":
-                 if not re.match(r"^(\d{8}|\d{8}-|-\d{8}|\d{8}-\d{8}|TODAY|YESTERDAY|-\d+[dD])$", param.value.upper()):
-                     raise ValueError(f"Invalid StudyDate format '{param.value}'. Use YYYYMMDD, YYYYMMDD-, etc.")
-             elif param.field.lower() == "patientbirthdate":
-                  if not re.match(r"^\d{8}$", param.value):
-                     raise ValueError(f"Invalid PatientBirthDate format '{param.value}'. Use YYYYMMDD.")
-        return params
+    """Request body for initiating a data browser query."""
+    source_id: int = Field(..., description="Database ID of the source configuration to query.")
+    source_type: Literal["dicomweb", "dimse-qr"] = Field(..., description="Type of the source to query.")
+    query_parameters: List[DataBrowserQueryParam] = Field(default_factory=list, description="List of parameters to filter the query.")
+    query_level: QueryLevel = Field(default=QueryLevel.STUDY, description="DICOM query level (STUDY, SERIES, INSTANCE).")
 
-
-# --- Query Response Schema ---
-
+# --- Result Item Schema ---
+# Represents a single study/series/instance record *after* transformation
+# from raw DICOM JSON for easier frontend consumption.
 class StudyResultItem(BaseModel):
-    """Represents a single study found in the query results."""
-    # Field definitions with aliases for INPUT mapping remain the same
+    """Formatted result item for display (primarily STUDY level)."""
+    # Allow extra fields captured from the source but not explicitly defined here
+    model_config = ConfigDict(extra='allow')
+
+    # Source Info (Added by service layer before response)
+    source_id: int
+    source_name: str
+    source_type: Literal["dicomweb", "dimse-qr", "Unknown", "Error"] # Allow error state types
+
+    # --- Common DICOM Fields (Mapped from Tags using Field alias) ---
+    # Use Optional[...] = Field(None, alias="TAG_NUMBER_STR")
+    # Required fields use Field(..., alias="TAG_NUMBER_STR")
+
+    # Patient Module
     PatientName: Optional[str] = Field(None, alias="00100010")
     PatientID: Optional[str] = Field(None, alias="00100020")
-    StudyInstanceUID: str = Field(..., alias="0020000D")
+    PatientBirthDate: Optional[str] = Field(None, alias="00100030")
+    PatientSex: Optional[str] = Field(None, alias="00100040")
+
+    # Study Module
+    StudyInstanceUID: str = Field(..., alias="0020000D") # Study level queries MUST return this
     StudyDate: Optional[str] = Field(None, alias="00080020")
     StudyTime: Optional[str] = Field(None, alias="00080030")
     AccessionNumber: Optional[str] = Field(None, alias="00080050")
+    StudyID: Optional[str] = Field(None, alias="00200010")
+    StudyDescription: Optional[str] = Field(None, alias="00081030")
+    # --- This field expects a List[str] ---
     ModalitiesInStudy: Optional[List[str]] = Field(None, alias="00080061")
     ReferringPhysicianName: Optional[str] = Field(None, alias="00080090")
-    PatientBirthDate: Optional[str] = Field(None, alias="00100030")
-    StudyDescription: Optional[str] = Field(None, alias="00081030")
     NumberOfStudyRelatedSeries: Optional[int] = Field(None, alias="00201206")
     NumberOfStudyRelatedInstances: Optional[int] = Field(None, alias="00201208")
 
-    # Source info fields (no alias needed)
-    source_id: int = Field(..., description="ID of the source queried.")
-    source_name: str = Field(..., description="Name of the source queried.")
-    source_type: str = Field(..., description="Type of the source queried (dicomweb or dimse-qr).")
+    # Series Module (Add if supporting SERIES level queries later)
+    # SeriesInstanceUID: Optional[str] = Field(None, alias="0020000E")
+    # SeriesNumber: Optional[int] = Field(None, alias="00200011")
+    # Modality: Optional[str] = Field(None, alias="00080060")
+    # SeriesDescription: Optional[str] = Field(None, alias="0008103E")
+    # NumberOfSeriesRelatedInstances: Optional[int] = Field(None, alias="00201209")
 
-    model_config = ConfigDict(
-        from_attributes=True, # Allow creation from ORM/dataset attributes if needed elsewhere
-        populate_by_name=True # NEED THIS to allow using aliases during input validation/parsing
-        # by_alias=True IS NOT NEEDED HERE - we want default field names on output
-    )
+    # Instance Module (Add if supporting INSTANCE level queries later)
+    # SOPInstanceUID: Optional[str] = Field(None, alias="00080018")
+    # SOPClassUID: Optional[str] = Field(None, alias="00080016")
+    # InstanceNumber: Optional[int] = Field(None, alias="00200013")
 
-    # Validators remain the same (they operate before serialization)
-    @field_validator(
-        'PatientName', 'PatientID', 'StudyInstanceUID', 'StudyDate', 'StudyTime',
-        'AccessionNumber', 'ReferringPhysicianName', 'PatientBirthDate', 'StudyDescription',
-        mode='before'
-    )
+
+    # --- Model Validator (Corrected) ---
+    # This validator now passes the *entire* Value list to Pydantic fields,
+    # letting Pydantic handle coercion based on the field type (List[str] vs Optional[str]).
+
+
+    @model_validator(mode='before')
     @classmethod
-    def flatten_dicom_value(cls, v: Any):
-        # ... (implementation remains the same) ...
-        if isinstance(v, dict) and 'Value' in v:
-             value_list = v.get('Value') # Use .get for safety
-             if isinstance(value_list, list) and len(value_list) > 0:
-                 first_val = value_list[0]
-                 if v.get('vr') == 'PN' and isinstance(first_val, dict) and 'Alphabetic' in first_val:
-                     return first_val.get('Alphabetic')
-                 return str(first_val) if first_val is not None else None
-             else: return None
-        elif isinstance(v, dict) and 'Value' not in v: return None
-        elif isinstance(v, list) and len(v) > 0: return str(v[0]) if v[0] is not None else None
-        elif isinstance(v, (str, int, float)): return str(v)
-        elif v is None: return None
-        else: logger.warning(f"Unhandled DICOM value type: {type(v)}, value: {v}"); return None
+    def transform_dicom_json(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Transforms raw DICOM JSON or partially flattened dict for validation."""
+        if not isinstance(data, dict): return data
+
+        processed_data = {}
+        # Preserve metadata
+        for meta_key in ["source_id", "source_name", "source_type"]:
+            if meta_key in data: processed_data[meta_key] = data[meta_key]
+
+        # Process potential DICOM tag fields
+        for key, value_obj in data.items():
+             if key in ["source_id", "source_name", "source_type"]: continue
+
+             # --- *** NEW HANDLING *** ---
+             final_value: Any = None # Value to pass to Pydantic validation
+
+             # Case 1: Value is DICOM JSON structure {'vr': 'XX', 'Value': [...]}
+             if isinstance(value_obj, dict) and 'Value' in value_obj and isinstance(value_obj['Value'], list):
+                 value_list = value_obj['Value']
+                 vr = value_obj.get('vr')
+
+                 if not value_list:
+                     final_value = None
+                 elif vr == 'PN' and isinstance(value_list[0], dict) and 'Alphabetic' in value_list[0]:
+                     final_value = value_list[0].get('Alphabetic')
+                 # Keep list for ModalitiesInStudy if non-empty
+                 elif key == "00080061" and value_list:
+                     final_value = value_list
+                 # Otherwise, if list has exactly one item, take that item
+                 elif len(value_list) == 1:
+                     final_value = value_list[0]
+                 # If list has multiple items (and not Modalities), keep the list?
+                 # Pydantic will fail if field isn't List[...]. Let's keep list for now.
+                 elif len(value_list) > 1:
+                      final_value = value_list
+                 else: # Empty list already handled
+                      final_value = None
+
+             # Case 2: Value is ALREADY flattened (e.g., string, number, or list from C-FIND)
+             # Or it's a {'vr': 'LO'} dict without 'Value' (empty element from C-FIND?)
+             elif not (isinstance(value_obj, dict) and 'Value' in value_obj):
+                 # If it's just {'vr': 'XX'} with no Value, treat as None/Empty
+                 if isinstance(value_obj, dict) and 'vr' in value_obj and 'Value' not in value_obj:
+                      final_value = None
+                 else:
+                      # Otherwise, assume it's already the correct type (str, int, list)
+                      final_value = value_obj
+
+             # Assign the processed value
+             processed_data[key] = final_value
+             # --- *** END NEW HANDLING *** ---
+
+        return processed_data
 
 
-    @field_validator('ModalitiesInStudy', mode='before')
-    @classmethod
-    def process_modalities(cls, v: Any):
-        # ... (implementation remains the same) ...
-        value_list = None
-        if isinstance(v, dict) and 'Value' in v: value_list = v.get('Value')
-        elif isinstance(v, list): value_list = v
-        elif isinstance(v, str): return [item.strip() for item in v.split('\\') if item.strip()]
-        if isinstance(value_list, list): return [str(item) for item in value_list if item is not None]
-        logger.warning(f"Could not process ModalitiesInStudy from: {v}"); return None
 
-
-    @field_validator('NumberOfStudyRelatedSeries', 'NumberOfStudyRelatedInstances', mode='before')
-    @classmethod
-    def process_counts(cls, v: Any):
-        # ... (implementation remains the same) ...
-        value_to_parse = None
-        if isinstance(v, dict) and 'Value' in v:
-             value_list = v.get('Value')
-             if isinstance(value_list, list) and len(value_list) > 0: value_to_parse = value_list[0]
-        elif isinstance(v, (int, str, float)): value_to_parse = v
-        if value_to_parse is not None:
-             try:
-                 if isinstance(value_to_parse, str) and '.' in value_to_parse: return int(float(value_to_parse))
-                 return int(value_to_parse)
-             except (ValueError, TypeError): logger.warning(f"Could not convert count value to int: {value_to_parse}"); return None
-        return None
-
+# --- Query Response Schema ---
 class DataBrowserQueryResponse(BaseModel):
-    """Response containing the list of studies found."""
-    query_status: Literal["success", "error", "partial"] = Field("success")
-    message: Optional[str] = Field(None, description="Status message, e.g., describing errors.")
-    source_id: int
-    source_name: str
-    source_type: str
-    results: List[StudyResultItem] = Field(default_factory=list)
-
-    # --- CORRECTED Config ---
-    model_config = ConfigDict(
-        # Remove by_alias=True - We want default field names in the final JSON output
-        # Keep populate_by_name=True if StudyResultItem needs it for input validation flexibility
-        populate_by_name=True
-    )
-    # --- END CORRECTED Config ---
+    """Response structure for data browser queries."""
+    query_status: Literal["success", "error", "partial"] = Field(..., description="Status of the query execution.")
+    message: Optional[str] = Field(None, description="Optional message, especially on error or partial success.")
+    source_id: int = Field(..., description="ID of the source that was queried.")
+    source_name: str = Field(..., description="Name of the source that was queried.")
+    source_type: Literal["dicomweb", "dimse-qr", "Unknown", "Error"] = Field(..., description="Type of the source that was queried.")
+    # Results contain formatted items ready for display
+    results: List[StudyResultItem] = Field(default_factory=list, description="List of study/series/instance results matching the query.")

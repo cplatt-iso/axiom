@@ -1,84 +1,141 @@
 # app/main.py
 import logging
+import sys
 from typing import Optional # Import Optional for type hinting
+
+import structlog # type: ignore # <-- ADDED: Import structlog
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 # Core Application Imports
-from app.core.config import settings
+from app.core.config import settings # Needs LOG_LEVEL setting
 from app.db.session import get_db, engine, SessionLocal, try_connect_db # Import necessary DB components
 from app.api import deps # For dependency injection, e.g., getting current user
 from app import schemas # Import Pydantic schemas
 from app.api.api_v1.api import api_router # Import the main V1 router
+from app.db.base import Base # Import Base for table creation
 
-# Configure logging
-# Simplified basicConfig for now
-logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# --- Configure logging ---
+# Clear existing handlers from the root logger
+# to prevent duplicate logs when uvicorn/FastAPI initializes its own handlers
+logging.basicConfig(handlers=[logging.NullHandler()]) # <-- CHANGED: Prevent basicConfig output
+
+# Determine log level from settings or default
+log_level_str = getattr(settings, 'LOG_LEVEL', "INFO").upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+
+def configure_logging():
+    """Configures logging using structlog to output JSON."""
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="iso"), # ISO 8601 timestamp
+            structlog.processors.format_exc_info, # Render exception info if present
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        # Processor to render logs as JSON
+        processor=structlog.processors.JSONRenderer(),
+        # foreign_pre_chain: Process logs from other libraries (optional but good)
+        # Order matters: Add level/name, timestamp, then render
+        foreign_pre_chain=[
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="iso"),
+        ],
+    )
+
+    # Get the root logger and remove existing handlers
+    # This helps prevent duplicate outputs, especially when using --reload
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Add a new handler to output logs to stdout using our JSON formatter
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+    root_logger.addHandler(handler)
+
+    # Set the overall logging level for the root logger
+    root_logger.setLevel(log_level)
+
+    # Optionally silence overly verbose libraries
+    # logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+    # Get a logger for this module AFTER configuration
+    logger = structlog.get_logger(__name__)
+    logger.info(
+        "Structlog logging configured for FastAPI",
+        log_level=log_level_str,
+        config_source=f"settings.LOG_LEVEL={settings.LOG_LEVEL}" if hasattr(settings, 'LOG_LEVEL') else "Default=INFO"
+    )
+    return logger # Return the configured logger instance
+
+# Call configure_logging() immediately to set up logging system-wide
+# and get the logger instance for this module
+logger = configure_logging()
 
 
 # --- Database Table Creation Function ---
 def create_tables():
     """Ensures all tables defined in models are created in the DB if they don't exist."""
     # --- Import ALL Base-inherited models BEFORE create_all ---
-    # This relies on app/db/models/__init__.py importing all model classes
-    # And also relies on app/db/base.py defining the Base class
-    from app.db import models # noqa F401 - Ensure package init runs, registers models
-    from app.db.base import Base # Import Base
+    from app.db import models # noqa F401
 
-    logger.info("Attempting to create database tables (if they don't exist)...")
+    logger.info("Attempting to create database tables (if they don't exist)...") # structlog logger now
     try:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables check/creation complete.")
     except Exception as e:
-        logger.error(f"Error during database table creation: {e}", exc_info=True)
-        # Consider raising the error to halt startup if DB is absolutely essential immediately
+        logger.error("Error during database table creation", error=str(e), exc_info=True)
         # raise e
 
 
 # --- Seed Default Roles ---
 def seed_default_roles(db: Session):
     """Checks for default roles (Admin, User) and creates them if missing."""
-    # Need models imported for querying and creating
     from app.db import models # Ensure models are available
 
-    logger.info("Checking/Seeding default roles...")
+    logger.info("Checking/Seeding default roles...") # structlog logger now
     default_roles_to_seed = {
         "Admin": "Full administrative privileges",
         "User": "Standard user privileges",
-        # Add other default roles here if needed
     }
     roles_created_count = 0
     try:
         existing_roles = {role.name for role in db.query(models.Role.name).all()}
-        logger.debug(f"Existing roles found: {existing_roles}")
+        logger.debug("Existing roles found", roles=existing_roles)
 
         for role_name, role_desc in default_roles_to_seed.items():
             if role_name not in existing_roles:
-                logger.info(f"Creating default role: '{role_name}'")
+                logger.info("Creating default role", role_name=role_name)
                 role = models.Role(name=role_name, description=role_desc)
                 db.add(role)
                 roles_created_count += 1
 
         if roles_created_count > 0:
             db.commit()
-            logger.info(f"Committed {roles_created_count} new default roles.")
+            logger.info("Committed new default roles.", count=roles_created_count)
         else:
             logger.info("All default roles already exist.")
 
     except Exception as e:
-        logger.error(f"Error during role seeding: {e}", exc_info=True)
-        db.rollback() # Rollback on any error during seeding
+        logger.error("Error during role seeding", error=str(e), exc_info=True)
+        db.rollback()
 
 
 # --- Initialize FastAPI App ---
-# Determine root_path based on environment (useful for proxy setups)
 run_environment = getattr(settings, 'ENVIRONMENT', 'development').lower()
 root_path_setting = f"/{settings.PROJECT_NAME.lower().replace(' ', '_')}" if run_environment != "development" else ""
-# Note: You might adjust root_path based on your proxy (Nginx/Traefik) config
-
 app_version = getattr(settings, 'PROJECT_VERSION', '0.1.0')
 
 app = FastAPI(
@@ -89,7 +146,7 @@ app = FastAPI(
     version=app_version,
     description="Axiom Flow: DICOM Tag Morphing and Routing System",
     debug=settings.DEBUG,
-    # root_path=root_path_setting # Uncomment and adjust if running behind a proxy needing path prefix
+    # root_path=root_path_setting
 )
 
 
@@ -104,7 +161,7 @@ if settings.BACKEND_CORS_ORIGINS:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        logger.info(f"CORS enabled for origins: {[str(o) for o in origins]}")
+        logger.info("CORS enabled", origins=[str(o) for o in origins])
     else:
          logger.warning("BACKEND_CORS_ORIGINS specified but resulted in empty list. CORS not configured.")
 else:
@@ -115,6 +172,7 @@ else:
 @app.get("/", tags=["Root"], summary="Root Endpoint")
 async def read_root():
     """ Root endpoint providing basic application information. """
+    logger.debug("Root endpoint requested") # Example debug log
     return {
         "message": f"Welcome to {settings.PROJECT_NAME}",
         "docs_url": app.docs_url,
@@ -129,32 +187,27 @@ async def health_check(db: Session = Depends(get_db)):
     """ Performs a basic health check of the API, including database connectivity. """
     db_status = "ok"
     db_details = "Connection successful."
+    logger.debug("Performing health check...")
     try:
-        # Simple query to check DB connection
         db.execute("SELECT 1")
         logger.debug("Health check: Database connection successful.")
     except Exception as e:
-        logger.error(f"Health check failed: Database connection error: {e}", exc_info=False)
+        logger.error("Health check failed: Database connection error", error=str(e), exc_info=False)
         db_status = "error"
         db_details = f"Database connection error: {e}"
-        # Return 503 immediately if DB is down
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=db_details
         )
 
-    # Add checks for other services (Redis, RabbitMQ) here later if needed
-    # rabbitmq_status = "not_checked"
-    # redis_status = "not_checked"
-
-    return {
+    health_data = {
         "status": "ok",
         "components": {
              "database": {"status": db_status, "details": db_details},
-             # "message_queue": {"status": rabbitmq_status, "details": None},
-             # "cache": {"status": redis_status, "details": None},
         }
     }
+    logger.info("Health check successful", components=health_data["components"])
+    return health_data
 
 
 # Mount the main API router for V1 endpoints
@@ -165,28 +218,21 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 @app.on_event("startup")
 async def startup_event():
     """ Actions to perform on application startup. """
-    logger.info("Application starting up...")
-    logger.info(f"API Root Path (if behind proxy): '{app.root_path}'")
+    logger.info("Application starting up...", api_root_path=app.root_path)
 
-    # 1. Create Database Tables (if they don't exist)
     logger.info("Checking/Creating database tables...")
     create_tables()
 
-    # 2. Seed Default Roles (Admin, User)
     logger.info("Checking/Seeding default roles...")
     db: Optional[Session] = None
     try:
-        db = SessionLocal() # Get a session for seeding
+        db = SessionLocal()
         seed_default_roles(db)
     except Exception as e:
-        logger.error(f"Failed to seed roles during startup: {e}", exc_info=True)
+        logger.error("Failed to seed roles during startup", error=str(e), exc_info=True)
     finally:
         if db:
-            db.close() # Ensure session is closed
-
-    # 3. Optional: Perform initial DB connection check
-    # logger.info("Performing initial database connection check...")
-    # try_connect_db() # Uncomment if you have this function defined
+            db.close()
 
     logger.info("Startup complete.")
 
@@ -196,21 +242,25 @@ async def startup_event():
 async def shutdown_event():
     """ Actions to perform on application shutdown. """
     logger.info("Application shutting down...")
-    # Add any cleanup tasks here if needed
 
 
 # --- Main execution block (for direct running with uvicorn) ---
+# Note: Uvicorn's logger might still output its own non-JSON logs,
+# but our application logs should now be JSON via structlog.
 if __name__ == "__main__":
     import uvicorn
-    # Attempt to get settings for direct run, with defaults
     dev_port = getattr(settings, 'DEV_SERVER_PORT', 8000)
-    log_level = getattr(settings, 'LOG_LEVEL', ("debug" if settings.DEBUG else "info")).lower()
+    # Use the globally configured log_level
+    log_level_cli = log_level_str.lower()
 
-    logger.info(f"Starting Uvicorn server directly on port {dev_port} (for local dev)...")
+    logger.info(f"Starting Uvicorn server directly (for local dev)...", host="0.0.0.0", port=dev_port, log_level=log_level_cli)
     uvicorn.run(
-        "app.main:app", # Point to the FastAPI app instance
-        host="0.0.0.0", # Listen on all interfaces for easier access from host
+        "app.main:app",
+        host="0.0.0.0",
         port=dev_port,
-        reload=settings.DEBUG, # Enable auto-reload if DEBUG is True
-        log_level=log_level
-        )
+        reload=settings.DEBUG,
+        log_level=log_level_cli,
+        # We rely on our handler; don't let uvicorn override stdlib logging completely
+        # Use default uvicorn access logs unless silenced above
+        # use_colors=False # Might help if colors interfere with JSON
+    )

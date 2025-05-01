@@ -81,11 +81,14 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_URL: Optional[str] = None
-    CELERY_RESULT_BACKEND: Optional[str] = None
 
+    CELERY_RESULT_BACKEND: Optional[str] = None
     CELERY_TASK_DEFAULT_QUEUE: str = "default"
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_DELAY: int = 60
+    CELERY_WORKER_CONCURRENCY: int = 4         # Default concurrency
+    CELERY_PREFETCH_MULTIPLIER: int = 1        # Default prefetch multiplier
+    CELERY_ACKS_LATE: bool = True              # Default ack setting
 
     LISTENER_HOST: str = "0.0.0.0"
 

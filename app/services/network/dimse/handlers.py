@@ -1,11 +1,13 @@
 # app/services/network/dimse/handlers.py
 
-import logging
 import os
 import uuid
 import re
 from pathlib import Path
-from typing import Optional, Dict, Any # Added Dict, Any
+from typing import Optional, Dict, Any
+
+# Use structlog for logging
+import structlog # type: ignore
 
 from pydicom import dcmread
 from pydicom.errors import InvalidDicomError
@@ -17,7 +19,8 @@ from app import crud
 from app.db.session import SessionLocal
 from app.db.models import ProcessedStudySourceType
 
-logger = logging.getLogger("dicom_listener.handlers")
+# Get logger instance (should inherit config from server.py)
+logger = structlog.get_logger("dicom_listener.handlers")
 INCOMING_DIR = Path(settings.DICOM_STORAGE_PATH)
 
 _current_listener_name: Optional[str] = None
@@ -28,61 +31,80 @@ def set_current_listener_context(name: str, instance_id: str):
     global _current_listener_name, _current_listener_instance_id
     _current_listener_name = name
     _current_listener_instance_id = instance_id
-    logger.info(f"Handler context set for listener name: '{name}', instance ID: '{instance_id}'")
+    # Bind context for subsequent handler logs if needed, or just log directly
+    log = logger.bind(listener_name=name, listener_instance_id=instance_id)
+    log.info("Handler context set for listener")
 
 # --- C-ECHO Handler ---
 def handle_echo(event):
-    """Handle a C-ECHO request event."""
-    logger.info(f"Received C-ECHO request from {event.assoc.requestor.ae_title} "
-                f"on association {event.assoc.native_id}")
-    return 0x0000
+    """Handle a C-ECHO request event with structured logging."""
+    log = logger.bind(
+        assoc_id=event.assoc.native_id,
+        calling_ae=event.assoc.requestor.ae_title,
+        called_ae=event.assoc.acceptor.ae_title,
+        source_ip=event.assoc.requestor.address,
+        event_type="C-ECHO"
+    )
+    log.info("Received C-ECHO request")
+    return 0x0000 # Success
 
 # --- C-STORE Handler ---
 def handle_store(event):
-    """Handle a C-STORE request event."""
+    """Handle a C-STORE request event with structured logging."""
     filepath: Optional[Path] = None
     assoc_id = event.assoc.native_id
     calling_ae = event.assoc.requestor.ae_title
-    called_ae = event.assoc.acceptor.ae_title # Get our AE title
-    source_ip = event.assoc.requestor.address # Get source IP
+    called_ae = event.assoc.acceptor.ae_title
+    source_ip = event.assoc.requestor.address
 
-    # Use the configured listener name/id set at startup
     source_identifier = _current_listener_name or f"dimse_listener_{settings.LISTENER_HOST}"
     listener_instance_id = _current_listener_instance_id
 
-    if not listener_instance_id:
-         logger.warning("Handler could not determine specific listener instance ID, using fallback source identifier. Metrics will not be incremented.")
+    # Bind context for this specific C-STORE operation
+    log = logger.bind(
+        assoc_id=assoc_id,
+        calling_ae=calling_ae,
+        called_ae=called_ae,
+        source_ip=source_ip,
+        listener_name=source_identifier, # Use the resolved name
+        listener_instance_id=listener_instance_id,
+        event_type="C-STORE"
+    )
 
-    # --- Prepare Association Info Dictionary ---
+    if not listener_instance_id:
+         log.warning("Handler could not determine specific listener instance ID. Metrics will not be incremented.")
+
     association_info: Dict[str, Any] = {
         "calling_ae_title": calling_ae,
         "called_ae_title": called_ae,
         "source_ip": source_ip,
     }
-    # --- END Prepare ---
 
     try:
         ds = event.dataset
         ds.file_meta = event.file_meta
         sop_instance_uid = ds.get("SOPInstanceUID", None)
+        log = log.bind(instance_uid=sop_instance_uid or "Unknown") # Add UID to context
 
         if sop_instance_uid:
-            filename_sop = re.sub(r'[^\w.-]', '_', sop_instance_uid)
-            filename_sop = filename_sop[:100]
+            # Sanitize SOP Instance UID for use in filename
+            filename_sop = re.sub(r'[^\w.-]', '_', str(sop_instance_uid)) # Ensure it's a string
+            filename_sop = filename_sop[:100] # Limit length
             filename = f"{filename_sop}.dcm"
         else:
-             filename = f"no_sopuid_{uuid.uuid4()}.dcm"
-             logger.warning(f"Received instance from {calling_ae} missing SOPInstanceUID. Using filename: {filename}")
+             # Generate a unique filename if SOPInstanceUID is missing
+             unique_id = uuid.uuid4()
+             filename = f"no_sopuid_{unique_id}.dcm"
+             log.warning("Received instance missing SOPInstanceUID. Using generated filename.", generated_filename=filename)
 
         filepath = INCOMING_DIR / filename
-        logger.info(f"C-STORE from {calling_ae} @ {source_ip} -> {called_ae} "
-                    f"[Assoc: {assoc_id}, Source: {source_identifier}]: "
-                    f"SOP Instance {sop_instance_uid or 'Unknown'}")
+        log = log.bind(target_filepath=str(filepath)) # Add target path to context
+        log.info("Received C-STORE request") # Simple message, details in context
 
-        logger.debug(f"Saving received object to {filepath} [Assoc: {assoc_id}]")
+        log.debug("Saving received object")
         INCOMING_DIR.mkdir(parents=True, exist_ok=True)
-        ds.save_as(filepath, write_like_original=False)
-        logger.info(f"Successfully saved DICOM file: {filepath} [Assoc: {assoc_id}]")
+        ds.save_as(filepath, write_like_original=False) # Consider performance implications
+        log.info("Successfully saved DICOM file")
 
         # Increment Received Count
         if listener_instance_id:
@@ -93,54 +115,54 @@ def handle_store(event):
                 increment_succeeded = crud.crud_dimse_listener_state.increment_received_count(
                     db=db_session, listener_id=listener_instance_id, count=1
                 )
+                db_session.commit() # Commit the increment here
                 if not increment_succeeded:
-                     logger.warning(f"Failed to increment received count via CRUD for listener {listener_instance_id}.")
+                     # This might happen if the state row didn't exist initially
+                     log.warning("Received count increment did not affect any rows (state record might be missing initially?).")
+                else:
+                     log.debug("Incremented received count successfully.")
             except Exception as db_err:
-                 logger.error(f"Error during received count increment for listener {listener_instance_id}: {db_err}", exc_info=True)
+                 log.error("Error during received count increment", database_error=str(db_err), exc_info=True)
+                 if db_session and db_session.is_active: db_session.rollback()
             finally:
                  if db_session: db_session.close()
         else:
-             logger.warning("Cannot increment received count: Listener instance ID is unknown.")
+             log.warning("Cannot increment received count: Listener instance ID is unknown.")
 
-        logger.debug(f"Attempting to dispatch processing task for: {filepath} [Assoc: {assoc_id}]")
+        log.debug("Attempting to dispatch processing task...")
         try:
             source_type_str = ProcessedStudySourceType.DIMSE_LISTENER.value
             if not listener_instance_id:
-                 logger.error(f"Cannot dispatch task for {filepath} - Listener instance ID is unknown. File will not be processed.")
+                 log.error("Cannot dispatch task - Listener instance ID is unknown. File will not be processed.")
                  return 0xA700 # Out of Resources
 
-            logger.debug(f"Dispatching task with source_type: '{source_type_str}', source_id: '{listener_instance_id}', assoc: {association_info} [Assoc: {assoc_id}]")
+            log.debug("Dispatching task", task_name='process_dicom_file_task', source_type=source_type_str)
             current_celery_app.send_task(
                  'process_dicom_file_task',
                  args=[str(filepath)],
                  kwargs={
                       'source_type': source_type_str,
                       'source_db_id_or_instance_id': listener_instance_id,
-                      # --- Pass association_info ---
                       'association_info': association_info
-                      # --- END Pass ---
                       }
             )
-            logger.info(f"Task dispatched successfully for {filepath} from source '{source_identifier}' [Assoc: {assoc_id}]")
+            log.info("Task dispatched successfully")
 
         except Exception as celery_err:
-            logger.error(f"Failed to dispatch Celery task for {filepath}: {celery_err} "
-                         f"[Assoc: {assoc_id}]", exc_info=True)
+            log.error("Failed to dispatch Celery task", error=str(celery_err), exc_info=True)
             if filepath and filepath.exists():
-                 try: filepath.unlink(); logger.info(f"Cleaned up file {filepath} after failed Celery dispatch [Assoc: {assoc_id}]")
-                 except OSError as unlink_err: logger.error(f"Could not delete file {filepath} after failed Celery dispatch [Assoc: {assoc_id}]: {unlink_err}")
-            return 0xA700 # Out of Resources
+                 try: filepath.unlink(); log.info("Cleaned up file after failed Celery dispatch")
+                 except OSError as unlink_err: log.error("Could not delete file after failed Celery dispatch", error=str(unlink_err))
+            return 0xA700 # Out of Resources - Cannot Queue
 
         return 0x0000 # Success
 
     except InvalidDicomError as e:
-        logger.error(f"Invalid DICOM data received from {calling_ae} "
-                     f"[Assoc: {assoc_id}]: {e}", exc_info=False)
+        log.error("Invalid DICOM data received", error=str(e), exc_info=False)
         return 0xC000 # Cannot understand
     except Exception as e:
-        logger.error(f"Unexpected error handling C-STORE request from {calling_ae} "
-                     f"[Assoc: {assoc_id}]: {e}", exc_info=True)
+        log.error("Unexpected error handling C-STORE request", error=str(e), exc_info=True)
         if filepath and filepath.exists():
-            try: filepath.unlink(); logger.info(f"Cleaned up potentially partial file {filepath} after error [Assoc: {assoc_id}]")
-            except OSError as unlink_err: logger.error(f"Could not delete file {filepath} after error [Assoc: {assoc_id}]: {unlink_err}")
+            try: filepath.unlink(); log.info("Cleaned up potentially partial file after error")
+            except OSError as unlink_err: log.error("Could not delete file after error", error=str(unlink_err))
         return 0xA900 # Processing Failure

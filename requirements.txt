@@ -76,3 +76,4 @@ alembic
 mysql-connector-python
 pyodbc          # sql server
 openai
+structlog

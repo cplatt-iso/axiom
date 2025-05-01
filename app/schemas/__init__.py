@@ -1,119 +1,190 @@
 # app/schemas/__init__.py
 
+# --- Rule Schemas ---
 from .rule import (
+    # Base/Common
+    MatchOperation,             # Enum
+    ModifyAction,               # Enum
+    RuleSetExecutionMode,       # Enum
+    MatchCriterion,
+    AssociationMatchCriterion,  # <--- ADDED THIS
+    # --- Specific Tag Modification Schemas (assuming they are defined in rule.py) ---
+    # Import the base/union type first
+    TagModification,
+    # Import specific subtypes if needed elsewhere (often not needed directly)
+    # TagSetModification,
+    # TagDeleteModification,
+    # TagPrependModification,
+    # TagSuffixModification,
+    # TagRegexReplaceModification,
+    # TagCopyModification,
+    # TagMoveModification,
+    # TagCrosswalkModification,
+    # --- End Specific Tag Modification Schemas ---
+    # Rule
     RuleBase,
     RuleCreate,
     RuleUpdate,
-    Rule,
+    Rule,                       # Read model (likely includes destinations)
+    # RuleSet
     RuleSetBase,
     RuleSetCreate,
     RuleSetUpdate,
-    RuleSet,
-    RuleSetSummary, # Add if defined and needed
-    MatchCriterion,
-    TagModification, # Basic version, will change later
-#    StorageDestination,
-    MatchOperation, # Export enums too
-    ModifyAction,
-    RuleSetExecutionMode,
+    RuleSet,                    # Read model (likely includes rules)
+    RuleSetSummary,             # Add if defined and needed
 )
 
+# --- User & Auth Schemas ---
 from .user import (
     UserBase,
-    # UserCreate, # Maybe not needed if only Google Auth?
+    # UserCreate, # Using Google Auth primarily
     UserUpdate,
-    User,
-    # UserInDB, # Internal representation, maybe not needed for API surface
-    # RoleBase, # Often part of Role
-    RoleCreate, # Often part of Role
-    Role, # Export main Role schema
+    User,                       # Read model
+    RoleCreate,
+    Role,                       # Read model
 )
-
 from .token import (
     GoogleToken,
     TokenResponse,
     TokenPayload,
 )
-
 from .api_key import (
     ApiKeyBase,
     ApiKeyCreate,
     ApiKeyCreateResponse,
     ApiKeyUpdate,
-    ApiKey,
-    # ApiKeyInDB, # Internal representation
+    ApiKey,                     # Read model
 )
 
+# --- Health & System Status Schemas ---
 from .health import (
     ComponentStatus,
     HealthCheckResponse,
 )
-
-from .processing import (
-    JsonProcessRequest,
-    JsonProcessResponse,
-)
-
-from .system import (
+from .system import ( # Renamed for clarity from your example
     DicomWebSourceStatus,
     DicomWebPollersStatusResponse,
     DimseListenerStatus,
     DimseListenersStatusResponse,
-    DimseQrSourceStatus,          # Added
-    DimseQrSourcesStatusResponse, # Added
+    DimseQrSourceStatus,
+    DimseQrSourcesStatusResponse,
 )
 
+# --- DICOMweb & DIMSE Config Schemas ---
 from .dicomweb import (
-    ReferencedSOP,
-    FailedSOP,
-    STOWResponse,
-    FailureReasonCode,
-    DicomWebSourceConfigBase, # Make sure these are exported if needed elsewhere
+    AuthType,                   # Enum
+    DicomWebSourceConfigBase,
     DicomWebSourceConfigCreate,
     DicomWebSourceConfigUpdate,
     DicomWebSourceConfigRead,
-    AuthType
+    # --- Add STOWResponse related schemas if used directly ---
+    # ReferencedSOP,
+    # FailedSOP,
+    # STOWResponse,
+    # FailureReasonCode, # Enum
 )
-
 from .dimse_listener_config import (
     DimseListenerConfigBase,
     DimseListenerConfigCreate,
     DimseListenerConfigUpdate,
     DimseListenerConfigRead,
 )
-
+# Add DimseListenerState if needed for API responses
+# from .dimse_listener_state import DimseListenerState, DimseListenerStateCreate, DimseListenerStateUpdate
 from .dimse_qr_source import (
     DimseQueryRetrieveSourceBase,
     DimseQueryRetrieveSourceCreate,
     DimseQueryRetrieveSourceUpdate,
     DimseQueryRetrieveSourceRead,
-    DimseQueryRetrieveSourceCreatePayload, # Export Payloads too
+    DimseQueryRetrieveSourceCreatePayload,
     DimseQueryRetrieveSourceUpdatePayload,
 )
 
+# --- Storage & Processing Schemas ---
 from .storage_backend_config import (
+    AllowedBackendType,         # Literal/Enum
     StorageBackendConfigBase,
     StorageBackendConfigCreate,
     StorageBackendConfigUpdate,
     StorageBackendConfigRead,
-    AllowedBackendType, # Export the Literal type too
+)
+from .processing import (
+    JsonProcessRequest,
+    JsonProcessResponse,
+    # --- Add ProcessedStudyLog schemas if used directly by API ---
+    # ProcessedStudyLog,
+    # ProcessedStudyLogCreate,
 )
 
+# --- Crosswalk Schemas ---
 from .crosswalk import (
-    CrosswalkDataSourceBase, CrosswalkDataSourceCreate, CrosswalkDataSourceUpdate, CrosswalkDataSourceRead,
-    CrosswalkMapBase, CrosswalkMapCreate, CrosswalkMapUpdate, CrosswalkMapRead,
-    CrosswalkDbType, CrosswalkSyncStatus
+    CrosswalkDbType,            # Enum
+    CrosswalkSyncStatus,        # Enum
+    CrosswalkDataSourceBase,
+    CrosswalkDataSourceCreate,
+    CrosswalkDataSourceUpdate,
+    CrosswalkDataSourceRead,
+    CrosswalkMapBase,
+    CrosswalkMapCreate,
+    CrosswalkMapUpdate,
+    CrosswalkMapRead,
 )
 
+# --- Schedule Schemas ---
 from .schedule import (
-    TimeRange, # Export if needed individually
+    TimeRange,                  # Schema for time ranges
     ScheduleBase,
     ScheduleCreate,
     ScheduleUpdate,
     ScheduleRead
 )
+
+# --- AI Assist Schemas ---
 from .ai_assist import (
     RuleGenRequest,
     RuleGenSuggestion,
     RuleGenResponse,
 )
+
+# --- Data Browser Schemas (if defined) ---
+# from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
+
+
+# Optional: Define __all__ to control 'from app.schemas import *' behavior
+# This explicitly lists what gets imported with *. It's good practice but verbose.
+__all__ = [
+    # Rule Schemas
+    "MatchOperation", "ModifyAction", "RuleSetExecutionMode", "MatchCriterion",
+    "AssociationMatchCriterion", "TagModification", "RuleBase", "RuleCreate",
+    "RuleUpdate", "Rule", "RuleSetBase", "RuleSetCreate", "RuleSetUpdate",
+    "RuleSet", "RuleSetSummary",
+    # User & Auth
+    "UserBase", "UserUpdate", "User", "RoleCreate", "Role",
+    "GoogleToken", "TokenResponse", "TokenPayload",
+    "ApiKeyBase", "ApiKeyCreate", "ApiKeyCreateResponse", "ApiKeyUpdate", "ApiKey",
+    # Health & System
+    "ComponentStatus", "HealthCheckResponse", "SystemInfo", "DiskUsage",
+    "DicomWebSourceStatus", "DicomWebPollersStatusResponse", "DimseListenerStatus",
+    "DimseListenersStatusResponse", "DimseQrSourceStatus", "DimseQrSourcesStatusResponse",
+    # DICOMweb & DIMSE Config
+    "AuthType", "DicomWebSourceConfigBase", "DicomWebSourceConfigCreate",
+    "DicomWebSourceConfigUpdate", "DicomWebSourceConfigRead",
+    "DimseListenerConfigBase", "DimseListenerConfigCreate", "DimseListenerConfigUpdate",
+    "DimseListenerConfigRead", "DimseQueryRetrieveSourceBase",
+    "DimseQueryRetrieveSourceCreate", "DimseQueryRetrieveSourceUpdate",
+    "DimseQueryRetrieveSourceRead", "DimseQueryRetrieveSourceCreatePayload",
+    "DimseQueryRetrieveSourceUpdatePayload",
+    # Storage & Processing
+    "AllowedBackendType", "StorageBackendConfigBase", "StorageBackendConfigCreate",
+    "StorageBackendConfigUpdate", "StorageBackendConfigRead",
+    "JsonProcessRequest", "JsonProcessResponse",
+    # Crosswalk
+    "CrosswalkDbType", "CrosswalkSyncStatus", "CrosswalkDataSourceBase",
+    "CrosswalkDataSourceCreate", "CrosswalkDataSourceUpdate", "CrosswalkDataSourceRead",
+    "CrosswalkMapBase", "CrosswalkMapCreate", "CrosswalkMapUpdate", "CrosswalkMapRead",
+    # Schedule
+    "TimeRange", "ScheduleBase", "ScheduleCreate", "ScheduleUpdate", "ScheduleRead",
+    # AI Assist
+    "RuleGenRequest", "RuleGenSuggestion", "RuleGenResponse",
+    # Data Browser (Add if defined)
+]

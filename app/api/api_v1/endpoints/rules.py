@@ -5,184 +5,172 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 import pydicom
 from pydicom.errors import InvalidDicomError
-import logging
+# Use structlog if available, otherwise fallback
+try:
+    import structlog # type: ignore
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 from copy import deepcopy
 from pydantic import TypeAdapter
+import json # Import json for potential string parsing
 
 from app.db import models
-
 from app.api import deps
-
 from app import crud, schemas
 from app.schemas import JsonProcessRequest, JsonProcessResponse
 
+# --- Import helpers, handle potential ImportErrors ---
 try:
     from app.worker.processing_logic import check_match, apply_modifications, parse_dicom_tag
     from app.db.models.rule import RuleSetExecutionMode
+    PROCESSING_LOGIC_AVAILABLE = True
 except ImportError as e:
-    logging.getLogger(__name__).error(f"Could not import helpers from app.worker.processing_logic or models: {e}. JSON processing endpoint will fail.")
+    logger.error(f"Could not import helpers from app.worker.processing_logic or models: {e}. JSON processing endpoint may fail or be disabled.")
+    # Define dummy functions if import fails
     def check_match(*args, **kwargs): raise NotImplementedError("Rule matching logic not available")
     def apply_modifications(*args, **kwargs): raise NotImplementedError("Tag modification logic not available")
-    RuleSetExecutionMode = None
+    RuleSetExecutionMode = None # type: ignore
+    PROCESSING_LOGIC_AVAILABLE = False
 
-
-logger = logging.getLogger(__name__)
 router = APIRouter()
-
 
 # <------------------------------------------------------->
 # <---         RuleSet and Rule CRUD Endpoints         --->
+# <---      (UNCHANGED - Keep existing CRUD code)      --->
 # <------------------------------------------------------->
 
-# --- RuleSet Endpoints --- (No changes needed here) ---
+# --- RuleSet Endpoints ---
 @router.post( "/rulesets", response_model=schemas.RuleSet, status_code=status.HTTP_201_CREATED, summary="Create a new RuleSet", tags=["RuleSets"],)
 def create_ruleset_endpoint(*, db: Session = Depends(deps.get_db), ruleset_in: schemas.RuleSetCreate, current_user: models.User = Depends(deps.get_current_active_user),) -> Any:
-    logger.info(f"User '{current_user.email}' attempting to create ruleset '{ruleset_in.name}'.")
+    log = logger.bind(user_email=current_user.email, ruleset_name=ruleset_in.name)
+    log.info("Attempting to create ruleset")
     try: created_ruleset = crud.ruleset.create(db=db, ruleset=ruleset_in)
-    except ValueError as e: raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    logger.info(f"RuleSet '{created_ruleset.name}' (ID: {created_ruleset.id}) created successfully.")
+    except ValueError as e:
+        log.warning("RuleSet creation conflict", error=str(e))
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    log.info("RuleSet created successfully", ruleset_id=created_ruleset.id)
     return created_ruleset
 
 @router.get( "/rulesets", response_model=List[schemas.RuleSet], summary="Retrieve multiple RuleSets", tags=["RuleSets"],)
 def read_rulesets_endpoint( db: Session = Depends(deps.get_db), skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    logger.debug(f"User '{current_user.email}' reading rulesets (skip={skip}, limit={limit}).")
+    log = logger.bind(user_email=current_user.email, skip=skip, limit=limit)
+    log.debug("Reading rulesets")
     rulesets = crud.ruleset.get_multi(db=db, skip=skip, limit=limit)
-    logger.debug(f"Retrieved {len(rulesets)} rulesets.")
+    log.debug("Retrieved rulesets", count=len(rulesets))
     return rulesets
 
 @router.get( "/rulesets/{ruleset_id}", response_model=schemas.RuleSet, summary="Retrieve a specific RuleSet by ID", tags=["RuleSets"],)
 def read_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    logger.debug(f"User '{current_user.email}' reading ruleset ID: {ruleset_id}.")
+    log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
+    log.debug("Reading ruleset")
     db_ruleset = crud.ruleset.get(db=db, ruleset_id=ruleset_id)
     if db_ruleset is None:
-        logger.warning(f"RuleSet ID {ruleset_id} not found for user '{current_user.email}'.")
+        log.warning("RuleSet not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
-    logger.debug(f"Successfully retrieved RuleSet ID: {ruleset_id}, Name: '{db_ruleset.name}'.")
+    log.debug("Successfully retrieved RuleSet", ruleset_name=db_ruleset.name)
     return db_ruleset
 
 @router.put( "/rulesets/{ruleset_id}", response_model=schemas.RuleSet, summary="Update a RuleSet", tags=["RuleSets"],)
 def update_ruleset_endpoint( *, db: Session = Depends(deps.get_db), ruleset_id: int, ruleset_in: schemas.RuleSetUpdate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    logger.info(f"User '{current_user.email}' attempting to update ruleset ID: {ruleset_id}.")
-    # Use the simple get here, no need to load rules/destinations for ruleset update
+    log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
+    log.info("Attempting to update ruleset")
     db_ruleset = db.query(models.RuleSet).filter(models.RuleSet.id == ruleset_id).first()
     if db_ruleset is None:
-        logger.warning(f"Update failed: RuleSet ID {ruleset_id} not found for user '{current_user.email}'.")
+        log.warning("Update failed: RuleSet not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
     try:
         updated_ruleset = crud.ruleset.update(db=db, ruleset_id=ruleset_id, ruleset_update=ruleset_in)
     except ValueError as e:
-        logger.warning(f"Update conflict for ruleset ID {ruleset_id}: {e}")
+        log.warning("Update conflict for ruleset", error=str(e))
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    logger.info(f"RuleSet ID: {ruleset_id} updated successfully by user '{current_user.email}'.")
+    log.info("RuleSet updated successfully")
     return updated_ruleset
 
 @router.delete( "/rulesets/{ruleset_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a RuleSet", tags=["RuleSets"],)
 def delete_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> None:
-    logger.info(f"User '{current_user.email}' attempting to delete ruleset ID: {ruleset_id}.")
+    log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
+    log.info("Attempting to delete ruleset")
     deleted = crud.ruleset.delete(db=db, ruleset_id=ruleset_id)
     if not deleted:
-        logger.warning(f"Delete failed: RuleSet ID {ruleset_id} not found for user '{current_user.email}'.")
+        log.warning("Delete failed: RuleSet not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
-    logger.info(f"RuleSet ID: {ruleset_id} deleted successfully by user '{current_user.email}'.")
+    log.info("RuleSet deleted successfully")
     return None
 
-# --- Rule Endpoints --- (UPDATED) ---
+# --- Rule Endpoints ---
 @router.post( "/rules", response_model=schemas.Rule, status_code=status.HTTP_201_CREATED, summary="Create a new Rule for a RuleSet", tags=["Rules"],)
 def create_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_in: schemas.RuleCreate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    """
-    Creates a new Rule within a specified RuleSet.
-    Accepts a list of `destination_ids` to link StorageBackendConfigs.
-    """
-    logger.info(f"User '{current_user.email}' attempting to create rule '{rule_in.name}' for ruleset ID: {rule_in.ruleset_id}.")
+    log = logger.bind(user_email=current_user.email, rule_name=rule_in.name, ruleset_id=rule_in.ruleset_id)
+    log.info("Attempting to create rule")
     try:
-        # CRUD create now handles destination ID lookup and association
         created_rule = crud.rule.create(db=db, rule=rule_in)
-    except ValueError as e: # Catch ruleset/destination not found errors from CRUD
-        logger.warning(f"Rule creation failed for user '{current_user.email}': {e}")
-        # Determine appropriate status code based on error message
-        if "RuleSet with id" in str(e):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-        elif "destination IDs not found" in str(e):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) # Bad request if destination IDs are invalid
-        else:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) # Generic bad request
-    logger.info(f"Rule '{created_rule.name}' (ID: {created_rule.id}) created successfully in ruleset ID: {created_rule.ruleset_id}.")
-    # The returned rule object will have the destinations populated due to ORM mode and eager loading
+    except ValueError as e:
+        log.warning("Rule creation failed", error=str(e))
+        status_code = status.HTTP_400_BAD_REQUEST
+        if "RuleSet with id" in str(e): status_code = status.HTTP_404_NOT_FOUND
+        elif "destination IDs not found" in str(e): status_code = status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=str(e))
+    log.info("Rule created successfully", rule_id=created_rule.id)
     return created_rule
 
 @router.get( "/rules", response_model=List[schemas.Rule], summary="Retrieve multiple Rules (optionally filter by RuleSet)", tags=["Rules"],)
 def read_rules_endpoint( db: Session = Depends(deps.get_db), ruleset_id: Optional[int] = Query(None), skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    """
-    Retrieves Rules. Filtering by `ruleset_id` is required.
-    Returns rules with their associated destinations.
-    """
-    logger.debug(f"User '{current_user.email}' reading rules (ruleset_id={ruleset_id}, skip={skip}, limit={limit}).")
+    log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id, skip=skip, limit=limit)
+    log.debug("Reading rules")
     if ruleset_id is not None:
-         # Check if ruleset exists first
          db_ruleset = db.query(models.RuleSet).filter(models.RuleSet.id == ruleset_id).first()
          if not db_ruleset:
-             logger.warning(f"Attempt to read rules for non-existent RuleSet ID: {ruleset_id} by user '{current_user.email}'.")
+             log.warning("Attempt to read rules for non-existent RuleSet ID")
              raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"RuleSet with id {ruleset_id} not found.")
-
-         # CRUD method now loads destinations eagerly
          rules = crud.rule.get_multi_by_ruleset(db=db, ruleset_id=ruleset_id, skip=skip, limit=limit)
-         logger.debug(f"Retrieved {len(rules)} rules for ruleset ID: {ruleset_id}.")
+         log.debug("Retrieved rules for ruleset", count=len(rules))
          return rules
     else:
-         logger.warning(f"User '{current_user.email}' attempted to read rules without specifying ruleset_id.")
+         log.warning("Attempted to read rules without specifying ruleset_id.")
          raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filtering by ruleset_id is required.")
 
 @router.get( "/rules/{rule_id}", response_model=schemas.Rule, summary="Retrieve a specific Rule by ID", tags=["Rules"],)
 def read_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    """
-    Retrieves a specific Rule by its ID, including its associated destinations.
-    """
-    logger.debug(f"User '{current_user.email}' reading rule ID: {rule_id}.")
-    # CRUD method now loads destinations eagerly
+    log = logger.bind(user_email=current_user.email, rule_id=rule_id)
+    log.debug("Reading rule")
     db_rule = crud.rule.get(db=db, rule_id=rule_id)
     if db_rule is None:
-        logger.warning(f"Rule ID {rule_id} not found for user '{current_user.email}'.")
+        log.warning("Rule not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
-    logger.debug(f"Successfully retrieved Rule ID: {rule_id}, Name: '{db_rule.name}'.")
+    log.debug("Successfully retrieved Rule", rule_name=db_rule.name)
     return db_rule
 
 @router.put( "/rules/{rule_id}", response_model=schemas.Rule, summary="Update a Rule", tags=["Rules"],)
 def update_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_id: int, rule_in: schemas.RuleUpdate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
-    """
-    Updates an existing Rule.
-    Accepts a list of `destination_ids` to replace the existing destinations.
-    """
-    logger.info(f"User '{current_user.email}' attempting to update rule ID: {rule_id}.")
-    # CRUD get loads the rule with destinations
+    log = logger.bind(user_email=current_user.email, rule_id=rule_id)
+    log.info("Attempting to update rule")
     db_rule = crud.rule.get(db=db, rule_id=rule_id)
     if db_rule is None:
-        logger.warning(f"Update failed: Rule ID {rule_id} not found for user '{current_user.email}'.")
+        log.warning("Update failed: Rule not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
-
     try:
-        # CRUD update now handles destination ID lookup and association update
         updated_rule = crud.rule.update(db=db, rule_id=rule_id, rule_update=rule_in)
-    except ValueError as e: # Catch destination not found errors from CRUD
-        logger.warning(f"Rule update failed for user '{current_user.email}': {e}")
+    except ValueError as e:
+        log.warning("Rule update failed", error=str(e))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    logger.info(f"Rule ID: {rule_id} updated successfully by user '{current_user.email}'.")
-    # The returned rule object will have the updated destinations populated
+    log.info("Rule updated successfully")
     return updated_rule
 
 @router.delete( "/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a Rule", tags=["Rules"],)
 def delete_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> None:
-    """Deletes a specific Rule by its ID."""
-    logger.info(f"User '{current_user.email}' attempting to delete rule ID: {rule_id}.")
+    log = logger.bind(user_email=current_user.email, rule_id=rule_id)
+    log.info("Attempting to delete rule")
     deleted = crud.rule.delete(db=db, rule_id=rule_id)
     if not deleted:
-        logger.warning(f"Delete failed: Rule ID {rule_id} not found for user '{current_user.email}'.")
+        log.warning("Delete failed: Rule not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
-    logger.info(f"Rule ID: {rule_id} deleted successfully by user '{current_user.email}'.")
+    log.info("Rule deleted successfully")
     return None
 
 
-# --- JSON Processing Endpoint --- (No changes needed here) ---
+# --- JSON Processing Endpoint --- (CORRECTED) ---
 @router.post(
     "/process-json",
     response_model=schemas.JsonProcessResponse,
@@ -199,10 +187,12 @@ def process_dicom_json(
     Accepts a DICOM header in JSON format, applies configured rules,
     and returns the morphed JSON header. Destinations are ignored.
     """
-    # ... (existing logic remains the same, as it doesn't interact with destination persistence) ...
-    logger.info(f"Received JSON processing request from user {current_user.email} "
-                f"for source '{request_data.source_identifier}' "
-                f"(RuleSet ID: {request_data.ruleset_id or 'Active'})")
+    log = logger.bind(user_email=current_user.email, request_source_identifier=request_data.source_identifier, request_ruleset_id=request_data.ruleset_id)
+    log.info("Received JSON processing request")
+
+    if not PROCESSING_LOGIC_AVAILABLE:
+        log.error("Cannot process JSON request because processing logic failed to import.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Rule processing logic not available.")
 
     original_json = request_data.dicom_json
     errors: List[str] = []
@@ -212,125 +202,166 @@ def process_dicom_json(
     morphed_ds: Optional[pydicom.Dataset] = None
     ds: Optional[pydicom.Dataset] = None
 
+    # Define a default source identifier for JSON API calls
+    # This is needed for apply_modifications, especially crosswalk
+    json_api_source_identifier = request_data.source_identifier or "JSON_API_Source" # Use provided or default
+    log = log.bind(effective_source_identifier=json_api_source_identifier)
+
     # 1. Convert JSON to pydicom Dataset
     try:
         ds = pydicom.dataset.Dataset.from_json(original_json)
+        # Ensure file_meta exists (needed by some logic/output formats)
         if not hasattr(ds, 'file_meta'):
              file_meta = pydicom.dataset.FileMetaDataset()
-             file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
+             file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian # Default
              sop_class_uid_tag = '00080016'; sop_instance_uid_tag = '00080018'
-             if sop_class_uid_tag in ds: file_meta.MediaStorageSOPClassUID = ds[sop_class_uid_tag].value
-             else: warnings.append("SOPClassUID missing."); file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
-             if sop_instance_uid_tag in ds: file_meta.MediaStorageSOPInstanceUID = ds[sop_instance_uid_tag].value
-             else: warnings.append("SOPInstanceUID missing."); file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+             if sop_class_uid_tag in ds and ds[sop_class_uid_tag].value: file_meta.MediaStorageSOPClassUID = ds[sop_class_uid_tag].value[0] # Assume single value
+             else: warnings.append("SOPClassUID missing from JSON."); file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2" # Default CT
+             if sop_instance_uid_tag in ds and ds[sop_instance_uid_tag].value: file_meta.MediaStorageSOPInstanceUID = ds[sop_instance_uid_tag].value[0] # Assume single value
+             else: warnings.append("SOPInstanceUID missing from JSON."); file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid() # Generate one if missing
              file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
              file_meta.ImplementationVersionName = f"pydicom {pydicom.__version__}"
              ds.file_meta = file_meta
-             logger.debug("Added default file_meta to dataset created from JSON.")
-        morphed_ds = deepcopy(ds)
-        logger.debug("Successfully converted input JSON to pydicom Dataset.")
+             log.debug("Added default file_meta to dataset created from JSON.")
+        morphed_ds = deepcopy(ds) # Start with a copy to modify
+        log.debug("Successfully converted input JSON to pydicom Dataset.")
     except Exception as e:
-        logger.error(f"Error converting input JSON to pydicom Dataset: {e}", exc_info=True)
+        log.error("Error converting input JSON to pydicom Dataset", error=str(e), exc_info=True)
         errors.append(f"Invalid input JSON format or structure: {e}")
-        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=request_data.source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
+        # Return early if conversion fails
+        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
 
     # 2. Fetch Rules
     rulesets_to_evaluate: List[models.RuleSet] = []
     try:
         if request_data.ruleset_id:
-            logger.debug(f"Fetching specific RuleSet ID: {request_data.ruleset_id}")
-            ruleset = crud.ruleset.get(db=db, ruleset_id=request_data.ruleset_id)
+            log.debug("Fetching specific RuleSet", requested_ruleset_id=request_data.ruleset_id)
+            ruleset = crud.ruleset.get(db=db, ruleset_id=request_data.ruleset_id) # get should load relationships
             if ruleset:
                 if ruleset.is_active: rulesets_to_evaluate.append(ruleset)
                 else: warnings.append(f"Specified RuleSet ID {request_data.ruleset_id} is inactive.")
             else: errors.append(f"Specified RuleSet ID {request_data.ruleset_id} not found.")
         else:
-            logger.debug("Fetching active, ordered RuleSets...")
-            rulesets_to_evaluate = crud.ruleset.get_active_ordered(db=db)
+            log.debug("Fetching active, ordered RuleSets...")
+            rulesets_to_evaluate = crud.ruleset.get_active_ordered(db=db) # get_active_ordered should load relationships
         if not rulesets_to_evaluate and not errors and request_data.ruleset_id is None:
             warnings.append("No active rulesets found for processing.")
     except Exception as db_exc:
-        logger.error(f"Database error fetching rulesets: {db_exc}", exc_info=True)
+        log.error("Database error fetching rulesets", error=str(db_exc), exc_info=True)
         errors.append(f"Database error fetching rules: {db_exc}")
-        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=request_data.source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
+        # Return early if DB fails
+        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
 
     # 3. Apply Rules
-    if RuleSetExecutionMode is None:
-         logger.critical("RuleSetExecutionMode import failed! Cannot proceed.")
-         errors.append("Rule processing logic not available due to import error.")
-    elif not errors: # Only proceed if no critical errors so far
+    if not errors: # Only proceed if no critical errors so far
         any_rule_matched_and_applied = False
         modifications_made = False
-        effective_source = request_data.source_identifier
-        logger.debug(f"Starting evaluation of {len(rulesets_to_evaluate)} rulesets...")
+        log.debug("Starting evaluation of rulesets", ruleset_count=len(rulesets_to_evaluate))
         for ruleset_obj in rulesets_to_evaluate:
+            ruleset_log = log.bind(ruleset_id=ruleset_obj.id, ruleset_name=ruleset_obj.name)
             try:
-                logger.debug(f"--- Evaluating RuleSet ID: {ruleset_obj.id}, Name: '{ruleset_obj.name}' ---")
-                rules_list = getattr(ruleset_obj, 'rules', None)
-                if rules_list is None: logger.warning(f"RuleSet ID: {ruleset_obj.id} has no 'rules' attribute."); continue
-                if not rules_list: logger.debug(f"RuleSet ID: {ruleset_obj.id} has no rules."); continue
-                logger.debug(f"RuleSet ID: {ruleset_obj.id} has {len(rules_list)} rules.")
+                ruleset_log.debug("--- Evaluating RuleSet ---")
+                rules_list = getattr(ruleset_obj, 'rules', [])
+                if not rules_list: ruleset_log.debug("RuleSet has no rules."); continue
+
+                ruleset_log.debug("Rules in set", rule_count=len(rules_list))
                 matched_rule_in_this_set = False
                 for rule_obj in rules_list:
+                    rule_log = ruleset_log.bind(rule_id=rule_obj.id, rule_name=rule_obj.name)
                     try:
-                        logger.debug(f"Processing Rule ID: {rule_obj.id}, Name: '{rule_obj.name}', Active: {rule_obj.is_active}")
-                        if not rule_obj.is_active: logger.debug(f"Rule ID: {rule_obj.id} is inactive."); continue
+                        rule_log.debug("Processing Rule", rule_is_active=rule_obj.is_active)
+                        if not rule_obj.is_active: rule_log.debug("Rule is inactive."); continue
+
+                        # Check source match
                         rule_sources = rule_obj.applicable_sources
-                        if rule_sources and effective_source not in rule_sources: logger.debug(f"Skipping rule ID: {rule_obj.id} - does not apply to source '{effective_source}'."); continue
-                        logger.debug(f"Checking match criteria for Rule ID: {rule_obj.id}")
-                        criteria_list = rule_obj.match_criteria
-                        match_criteria_models: List[schemas.MatchCriterion] = []
-                        if isinstance(criteria_list, list):
-                             try: match_criteria_models = [schemas.MatchCriterion(**crit) for crit in criteria_list]
-                             except Exception as val_err: logger.warning(f"Rule ID: {rule_obj.id} - Failed to validate match_criteria: {val_err}. Skipping match."); continue
-                        elif criteria_list: logger.warning(f"Rule ID: {rule_obj.id} match_criteria is not a list ({type(criteria_list)}). Skipping match."); continue
+                        source_match = not rule_sources or (isinstance(rule_sources, list) and json_api_source_identifier in rule_sources)
+                        if not source_match: rule_log.debug("Skipping rule - does not apply to source", rule_sources=rule_sources); continue
+
+                        # Validate/parse criteria & modifications (using TypeAdapter for robustness)
+                        try:
+                             match_criteria_models = TypeAdapter(List[schemas.MatchCriterion]).validate_python(rule_obj.match_criteria or [])
+                             # JSON endpoint doesn't use association criteria, but parse anyway if present for validation
+                             assoc_criteria_models = TypeAdapter(List[schemas.AssociationMatchCriterion]).validate_python(rule_obj.association_criteria or [])
+                             tag_mod_adapter = TypeAdapter(List[schemas.TagModification])
+                             mod_schemas = tag_mod_adapter.validate_python(rule_obj.tag_modifications or [])
+                        except Exception as val_err:
+                             rule_log.error("Rule skipped due to invalid criteria/modification format", validation_error=str(val_err), exc_info=False)
+                             errors.append(f"Invalid definition for Rule ID {rule_obj.id}: {val_err}")
+                             continue # Skip this rule if definition is invalid
+
+                        # Perform matching (only tag criteria relevant for JSON API)
+                        rule_log.debug("Checking match criteria", criteria_count=len(match_criteria_models))
                         is_match = check_match(ds, match_criteria_models)
-                        logger.debug(f"Rule ID: {rule_obj.id} match result: {is_match}")
+                        rule_log.debug("Match result", is_match=is_match)
+
                         if is_match:
-                            logger.info(f"Rule '{ruleset_obj.name}' / '{rule_obj.name}' (ID: {rule_obj.id}) MATCHED.")
+                            rule_log.info("Rule MATCHED.")
                             any_rule_matched_and_applied = True
                             matched_rule_in_this_set = True
                             applied_rule_ids.append(rule_obj.id)
                             if applied_ruleset_id is None: applied_ruleset_id = ruleset_obj.id
-                            modifications_list = rule_obj.tag_modifications
-                            if isinstance(modifications_list, list) and modifications_list:
+
+                            # Apply modifications (if any)
+                            if mod_schemas:
+                                rule_log.debug("Applying modifications...", modification_count=len(mod_schemas))
                                 try:
-                                     ta_tag_modification = TypeAdapter(schemas.TagModification)
-                                     mod_schemas = [ta_tag_modification.validate_python(mod) for mod in modifications_list]
-                                     if mod_schemas:
-                                         logger.debug(f"Applying {len(mod_schemas)} modifications for rule ID: {rule_obj.id}...")
-                                         apply_modifications(morphed_ds, mod_schemas)
-                                         modifications_made = True
-                                     else: logger.debug(f"Rule ID: {rule_obj.id} had modifications list, but none validated.")
-                                except Exception as mod_val_err: logger.error(f"Rule ID: {rule_obj.id} - Failed to validate/apply tag_modifications: {mod_val_err}", exc_info=True); errors.append(f"Error validating modifications for Rule ID {rule_obj.id}: {mod_val_err}")
-                            else: logger.debug(f"Rule ID: {rule_obj.id} matched but has no modifications defined.")
+                                    # --- CORRECTED CALL ---
+                                    # Pass the default source identifier
+                                    apply_modifications(morphed_ds, mod_schemas, json_api_source_identifier)
+                                    # --- END CORRECTION ---
+                                    modifications_made = True
+                                except Exception as mod_apply_err:
+                                     rule_log.error("Failed to apply tag_modifications", error=str(mod_apply_err), exc_info=True)
+                                     errors.append(f"Error applying modifications for Rule ID {rule_obj.id}: {mod_apply_err}")
+                            else:
+                                rule_log.debug("Rule matched but has no modifications defined.")
+
+                            # Handle FIRST_MATCH mode for the ruleset
                             ruleset_mode = ruleset_obj.execution_mode
-                            if ruleset_mode == RuleSetExecutionMode.FIRST_MATCH: logger.debug(f"FIRST_MATCH mode triggered. Stopping rule processing for RuleSet ID: {ruleset_obj.id}."); break
-                    except Exception as single_rule_exc: logger.error(f"!!! Exception processing SINGLE RULE ID: {getattr(rule_obj, 'id', 'N/A')} !!!", exc_info=True); errors.append(f"Internal error processing rule ID {getattr(rule_obj, 'id', 'N/A')}")
-                if matched_rule_in_this_set and ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH: logger.debug(f"Breaking outer loop due to FIRST_MATCH in RuleSet ID: {ruleset_obj.id}"); break
-            except Exception as ruleset_exc: logger.error(f"!!! Exception processing RULESET ID: {getattr(ruleset_obj, 'id', 'N/A')} !!!", exc_info=True); errors.append(f"Internal error processing ruleset ID {getattr(ruleset_obj, 'id', 'N/A')}")
-        logger.debug("Finished evaluating rulesets.")
+                            if ruleset_mode == RuleSetExecutionMode.FIRST_MATCH:
+                                ruleset_log.debug("FIRST_MATCH mode triggered. Stopping rule processing for this RuleSet.")
+                                break # Stop processing rules in THIS ruleset
+
+                    except Exception as single_rule_exc:
+                         rule_log.error("!!! Exception processing SINGLE RULE !!!", error=str(single_rule_exc), exc_info=True)
+                         errors.append(f"Internal error processing rule ID {rule_obj.id}")
+
+                # Handle FIRST_MATCH mode for the outer loop (stop processing further rulesets)
+                if matched_rule_in_this_set and ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH:
+                    log.debug("Breaking ruleset loop due to FIRST_MATCH mode.", matched_ruleset_id=ruleset_obj.id)
+                    break
+
+            except Exception as ruleset_exc:
+                 ruleset_log.error("!!! Exception processing RULESET !!!", error=str(ruleset_exc), exc_info=True)
+                 errors.append(f"Internal error processing ruleset ID {ruleset_obj.id}")
+        log.debug("Finished evaluating rulesets.")
 
     # 4. Convert Morphed Dataset back to JSON
     morphed_json: Dict[str, Any] = {}
     try:
+        # Convert the dataset that was potentially modified
         dataset_to_convert = morphed_ds if modifications_made else ds
-        if dataset_to_convert: morphed_json = dataset_to_convert.to_json_dict()
-        else: logger.warning("No dataset available to convert back to JSON."); morphed_json = original_json
+        if dataset_to_convert:
+             morphed_json = dataset_to_convert.to_json_dict()
+             log.debug("Converted final dataset back to JSON")
+        else:
+             # Should not happen if initial conversion succeeded
+             log.warning("No dataset available (original or morphed) to convert back to JSON.")
+             morphed_json = original_json # Fallback to original if something went wrong
     except Exception as e:
-        logger.error(f"Error converting final dataset back to JSON: {e}", exc_info=True)
+        log.error("Error converting final dataset back to JSON", error=str(e), exc_info=True)
         errors.append(f"Error serializing result: {e}")
-        morphed_json = original_json
+        morphed_json = {} # Return empty dict on serialization error
 
     # 5. Return Response
     response = schemas.JsonProcessResponse(
         original_json=original_json,
         morphed_json=morphed_json,
-        source_identifier=effective_source,
+        source_identifier=json_api_source_identifier, # Return the identifier used
         applied_ruleset_id=applied_ruleset_id,
         applied_rule_ids=applied_rule_ids,
         errors=errors,
         warnings=warnings
     )
-    logger.info(f"Finished JSON processing request. Matched Rules: {len(applied_rule_ids)}. Errors: {len(errors)}. Warnings: {len(warnings)}")
+    log.info("Finished JSON processing request.", matched_rule_count=len(applied_rule_ids), error_count=len(errors), warning_count=len(warnings))
     return response
