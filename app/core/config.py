@@ -111,6 +111,9 @@ class Settings(BaseSettings):
 
     # DIMSE Q/R Poller Settings
     DIMSE_QR_POLLER_MAX_SOURCES: int = 100 # Added this setting
+    DIMSE_ACSE_TIMEOUT: int = 30     # Timeout for establishing association (seconds)
+    DIMSE_DIMSE_TIMEOUT: int = 60    # Timeout for DIMSE message responses (seconds)
+    DIMSE_NETWORK_TIMEOUT: int = 30  # Low-level network activity timeout (seconds)
 
     KNOWN_INPUT_SOURCES: List[str] = [
         "api_json",

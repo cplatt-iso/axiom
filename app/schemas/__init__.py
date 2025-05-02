@@ -102,7 +102,6 @@ from .dimse_qr_source import (
 
 # --- Storage & Processing Schemas ---
 from .storage_backend_config import (
-    AllowedBackendType,         # Literal/Enum
     StorageBackendConfigBase,
     StorageBackendConfigCreate,
     StorageBackendConfigUpdate,
@@ -175,7 +174,7 @@ __all__ = [
     "DimseQueryRetrieveSourceRead", "DimseQueryRetrieveSourceCreatePayload",
     "DimseQueryRetrieveSourceUpdatePayload",
     # Storage & Processing
-    "AllowedBackendType", "StorageBackendConfigBase", "StorageBackendConfigCreate",
+    "StorageBackendConfigBase", "StorageBackendConfigCreate",
     "StorageBackendConfigUpdate", "StorageBackendConfigRead",
     "JsonProcessRequest", "JsonProcessResponse",
     # Crosswalk
