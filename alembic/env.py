@@ -24,9 +24,20 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 # --- ADDED: Import Base and models ---
 from app.db.base import Base
+from app.db.models import user
+from app.db.models import rule
+from app.db.models import api_key
+from app.db.models import dicomweb_source_state
+from app.db.models import dimse_listener_state
+from app.db.models import dimse_listener_config  # <--- Ensure this one is present
+from app.db.models import dimse_qr_source        # <--- Ensure this one is present
+from app.db.models import processed_study_log
+from app.db.models import storage_backend_config # <--- Ensure this one is present
+from app.db.models import crosswalk
+from app.db.models import schedule
 # Import your models here so Alembic can see them
 # This relies on app/db/models/__init__.py importing all model classes
-from app.db import models # noqa F401 - Imports __init__, which imports all models
+# from app.db import models # noqa F401 - Imports __init__, which imports all models
 target_metadata = Base.metadata
 # --- END ADDED ---
 

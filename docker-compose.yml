@@ -29,7 +29,7 @@ services:
       driver: "fluentd"
       options:
         fluentd-address: "192.168.88.115:24224" # Use Host IP hack
-        tag: "postgres.db.{{.Name}}"
+        tag: "axiom.postgres.{{.Name}}"
         mode: non-blocking
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
@@ -57,6 +57,16 @@ services:
     networks:
       - default
       - shared # Added shared for potential external access/consistency
+    logging: # <-- CONFIGURED LOGGING DRIVER -->
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "192.168.88.115:24224"
+        tag: "axiom.rabbitmq.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
+
 
   redis:
     image: redis:7-alpine # Use a specific alpine version

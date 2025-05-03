@@ -1,16 +1,17 @@
 # app/db/models/dimse_listener_config.py
 from typing import Optional
-from sqlalchemy import String, Integer, Boolean, Text, Index
+from sqlalchemy import String, Integer, Boolean, Text, Index, text # Added text
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import expression # Added expression
 
 from app.db.base import Base # Import your Base class
 
 class DimseListenerConfig(Base):
     """
     Database model to store the configuration for DIMSE C-STORE SCP listeners.
-    Each record defines a potential listener instance.
+    Each record defines a potential listener instance. Includes TLS server config.
     """
-    __tablename__ = "dimse_listener_configs" # New table name
+    __tablename__ = "dimse_listener_configs"
 
     # Inherits id, created_at, updated_at from Base
 
@@ -27,7 +28,7 @@ class DimseListenerConfig(Base):
         comment="Optional description of the listener's purpose."
     )
     ae_title: Mapped[str] = mapped_column(
-        String(16), # DICOM AE Titles are max 16 chars
+        String(16),
         nullable=False,
         index=True,
         comment="The Application Entity Title the listener will use."
@@ -42,25 +43,48 @@ class DimseListenerConfig(Base):
         Boolean,
         nullable=False,
         default=True,
+        server_default=expression.true(), # Added server default
         index=True,
         comment="Whether this listener configuration is active and should be started."
     )
-    # This instance_id links the config to a specific running listener process/container.
-    # The listener process reads its AXIOM_INSTANCE_ID env var and looks up its config using this field.
-    # Making it nullable allows defining configs before assigning them to specific instances.
-    # Making it unique ensures only one config applies to a specific instance ID.
     instance_id: Mapped[Optional[str]] = mapped_column(
         String(255),
         unique=True,
         index=True,
-        nullable=True, # Nullable: Allows creating configs without immediate assignment
+        nullable=True,
         comment="Unique ID matching AXIOM_INSTANCE_ID env var of the listener process using this config."
     )
 
-    # Add unique constraints on ae_title/port combination if desired
-    # __table_args__ = (UniqueConstraint('ae_title', 'port', name='uq_aetitle_port'),)
+    # --- TLS Server Configuration ---
+    tls_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=expression.false(), # Added server default
+        index=True,
+        comment="Enable TLS for incoming connections to this listener."
+    )
+    # Server Certificate and Key (Required if TLS is enabled)
+    tls_cert_secret_name: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="REQUIRED if TLS enabled: Secret Manager resource name for the server's TLS certificate (PEM)."
+    )
+    tls_key_secret_name: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="REQUIRED if TLS enabled: Secret Manager resource name for the server's TLS private key (PEM)."
+    )
+    # Client Authentication Certificate Authority (Optional, for mTLS)
+    tls_ca_cert_secret_name: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="Optional (for mTLS): Secret Manager resource name for the CA certificate (PEM) used to verify client certificates."
+    )
+    # --- End TLS ---
 
     def __repr__(self):
+        tls_status = f"TLS={'Enabled' if self.tls_enabled else 'Disabled'}"
         return (f"<DimseListenerConfig(id={self.id}, name='{self.name}', "
                 f"ae_title='{self.ae_title}', port={self.port}, enabled={self.is_enabled}, "
-                f"instance_id='{self.instance_id}')>")
+                f"instance_id='{self.instance_id}', {tls_status})>") # Updated repr
