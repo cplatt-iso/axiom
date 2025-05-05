@@ -145,6 +145,13 @@ from .ai_assist import (
     RuleGenResponse,
 )
 
+from .google_healthcare_source import (
+    GoogleHealthcareSourceBase,
+    GoogleHealthcareSourceCreate,
+    GoogleHealthcareSourceUpdate,
+    GoogleHealthcareSourceRead,
+)
+
 # --- Data Browser Schemas (if defined) ---
 # from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
 

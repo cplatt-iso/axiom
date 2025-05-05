@@ -10,12 +10,14 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
 *   **DICOM Polling/Querying:**
     *   Poll DICOMweb sources (QIDO-RS) for new studies/instances.
     *   Poll DIMSE sources (C-FIND) for new studies/instances.
+    *   **Poll Google Healthcare DICOM Stores (QIDO-RS) for new studies.**
 *   **DICOM Retrieval:**
     *   Retrieve DICOM metadata/instances via DICOMweb WADO-RS (used by DICOMweb poller).
     *   Initiate DICOM retrieval via DIMSE C-MOVE (triggered by DIMSE Q/R poller).
+    *   **(GHC Poller currently retrieves metadata only, full instance retrieval TBD).**
 *   **Rule Engine:**
     *   Apply complex matching criteria based on DICOM tags (equality, comparison, existence, contains, regex, list membership) and DICOM association details (Calling AE, Called AE, Source IP - *IP matching logic pending*).
-    *   Match rules against specific input sources or apply globally.
+    *   Match rules against specific input sources (DICOMweb, DIMSE Listener, DIMSE Q/R, **Google Healthcare**, STOW-RS) or apply globally.
     *   Support `FIRST_MATCH` or `ALL_MATCHES` execution modes per ruleset.
     *   **Scheduling:** Rules can be optionally linked to reusable Schedule definitions, activating them only during specified time windows (days of week, start/end times, handles overnight). Rules without a schedule are considered always active (if enabled).
 *   **Tag Morphing & Crosswalking:**
@@ -25,18 +27,20 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
     *   Log original tag values to Original Attributes Sequence (0x0400,0x0550) when modifications occur (controlled by `LOG_ORIGINAL_ATTRIBUTES` setting - *requires full verification*).
 *   **Flexible Routing:** Send processed objects to various destinations configured as Storage Backends:
     *   Local Filesystem (within container volume mounts)
-    *   Remote DICOM peers via C-STORE SCU
+    *   Remote DICOM peers via C-STORE SCU (supports TLS)
     *   Google Cloud Storage (GCS)
     *   Google Cloud Healthcare DICOM Store (via STOW-RS)
     *   Generic DICOMweb STOW-RS endpoints
     *   Rules link to Storage Backends via a Many-to-Many relationship.
 *   **Scalability:** Designed for high throughput using asynchronous task processing (Celery/RabbitMQ) and containerization (Docker).
-*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Schedules, Rulesets, Rules, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
+*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R, **Google Healthcare Sources**), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Schedules, Rulesets, Rules, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
 *   **Security:**
     *   User authentication via Google OAuth 2.0 (backend validates Google token, issues JWT).
     *   API Key authentication (prefix + secret, hashed storage, scoped to user).
-    *   Role-Based Access Control (RBAC): Admin/User roles seeded, API endpoints protected via dependencies.
+    *   Role-Based Access Control (RBAC): Admin/User roles seeded, API endpoints protected via dependencies (configurable, e.g., superuser or admin role).
+    *   **TLS Support:** Implemented for outgoing DIMSE SCU operations (C-FIND, C-MOVE, C-STORE Storage Backend) and incoming DIMSE SCP (Listener). Configured via GCP Secret Manager secrets.
 *   **Monitoring:** API endpoints provide status for core components, pollers (DICOMweb, DIMSE Q/R), listeners, and crosswalk sync jobs, including metrics (found, queued, processed counts).
+*   **Data Browser API:** Endpoint (`/data-browser/query`) supports querying enabled DICOMweb, DIMSE Q/R, and **Google Healthcare** sources.
 *   **Database:** Uses PostgreSQL with SQLAlchemy 2.x ORM and Alembic for migrations.
 
 ## Technology Stack
@@ -44,16 +48,19 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
 *   **Backend:** Python 3.11+, FastAPI
 *   **DICOM:** Pydicom, Pynetdicom
 *   **Async Tasks:** Celery
+*   **HTTP Client:** **httpx**
+*   **Async Support:** **aiohttp** (for google-auth async)
 *   **Message Broker:** RabbitMQ
 *   **Cache/Backend:** Redis (for Celery results/backend and Crosswalk lookups)
 *   **Database:** PostgreSQL
 *   **ORM:** SQLAlchemy 2.x
 *   **Migrations:** Alembic
 *   **API Schema/Validation:** Pydantic V2
-*   **Authentication:** python-jose (JWT), passlib (bcrypt), google-auth, google-api-python-client
-*   **Cloud:** google-cloud-storage
+*   **Authentication:** python-jose (JWT), passlib (bcrypt), **google-auth[aiohttp]**
+*   **Cloud:** google-cloud-storage, **google-cloud-secret-manager**
 *   **External DB Drivers:** psycopg[binary], mysql-connector-python, pyodbc
 *   **Containerization:** Docker, Docker Compose
+*   **Logging:** **structlog**
 
 ## Getting Started
 
@@ -62,104 +69,102 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
 *   Docker ([Install Docker](https://docs.docker.com/engine/install/))
 *   Docker Compose ([Install Docker Compose](https://docs.docker.com/compose/install/))
 *   Git
+*   **(Optional but Recommended)** Google Cloud SDK (`gcloud`) configured for Application Default Credentials (ADC) if using GCS/GHC/Secret Manager backends/features.
 
 ### Installation & Running
 
 1.  **Clone the repository:**
     ```bash
     git clone <your-repo-url> axiom-flow
-    cd axiom-flow/backend # Assuming backend is in a 'backend' subfolder
+    cd axiom-flow/backend # Adjust if backend is elsewhere
     ```
 
 2.  **Configure Environment:**
     *   Copy the example environment file: `cp .env.example .env`
     *   **Edit `.env`:**
         *   Change `POSTGRES_PASSWORD`.
-        *   Generate a new secure `SECRET_KEY` (`openssl rand -hex 32`).
-        *   Set your `GOOGLE_OAUTH_CLIENT_ID` if using Google Login.
-        *   Configure `BACKEND_CORS_ORIGINS` to include your frontend URL (e.g., `http://localhost:3000`).
-        *   Set `LOG_ORIGINAL_ATTRIBUTES` to `True` or `False`.
-        *   Review other DB, RabbitMQ, Redis, storage paths. Ensure paths like `DICOM_STORAGE_PATH`, `DICOM_ERROR_PATH`, `FILESYSTEM_STORAGE_PATH` exist within the container or map correctly to host volumes in `docker-compose.yml`.
-    *   *(Optional)* Place Google Cloud service account key file (e.g., `axiom-flow-gcs-key.json`) in the project root if using GCS/Healthcare backends and update `GOOGLE_APPLICATION_CREDENTIALS` in `docker-compose.yml` if needed.
-    *   **DO NOT** commit your actual `.env` file.
+        *   Generate a new secure `SECRET_KEY`.
+        *   Set your `GOOGLE_OAUTH_CLIENT_ID`.
+        *   Configure `BACKEND_CORS_ORIGINS` (e.g., `https://your-frontend-domain.com`).
+        *   Review DB, RabbitMQ, Redis settings.
+        *   Review storage paths (`DICOM_STORAGE_PATH`, etc.) and ensure corresponding volumes are mapped in `docker-compose.yml`.
+    *   **(Optional/Required for GCS/GHC/Secrets):** Configure Google Cloud Authentication.
+        *   **ADC (Recommended):** Run `gcloud auth application-default login` on your host machine *before* starting containers if volumes mount your ADC file, OR ensure the service account running the container has necessary IAM permissions.
+        *   **Service Account Key:** Place the key file (e.g., `axiom-flow-gcs-key.json`) accessible to the containers and update `GOOGLE_APPLICATION_CREDENTIALS` environment variable in `docker-compose.yml`.
+    *   **TLS Secrets:** If using TLS for DIMSE, create the necessary certificates/keys and upload them to GCP Secret Manager. Update references in configuration (e.g., `tls_ca_cert_secret_name`) with the full Secret Manager resource name (e.g., `projects/.../secrets/.../versions/latest`).
 
-3.  **Create Crosswalk Init Script (Optional for Demo):**
-    *   If using the example MySQL crosswalk DB in `docker-compose.yml`, create the `crosswalk_init` directory and `crosswalk_init/init_crosswalk.sql` file as described previously.
-
-4.  **Build and Run Docker Containers:** (Run from the directory containing `docker-compose.yml`)
+3.  **Build and Run Docker Containers:** (Run from the directory containing `docker-compose.yml`)
     ```bash
     docker compose build
     docker compose up -d
     ```
 
-5.  **Database Migrations:** Apply any pending database schema changes:
+4.  **Database Migrations:** Apply any pending database schema changes:
     ```bash
     docker compose exec api alembic upgrade head
     ```
-    *(Run this initially and after pulling changes that include new migrations, especially after adding the Schedule model)*
+    *(Run initially and after pulling changes with new migrations)*
 
-6.  **Create Initial Superuser/Admin (Recommended):**
-    *   Use the provided script (ensure DB is up):
-        ```bash
-        docker compose exec api python inject_admin.py
-        ```
+5.  **Create Initial Superuser/Admin:**
+    ```bash
+    docker compose exec api python inject_admin.py
+    ```
+    *(Verify in DB if `is_superuser=True` is needed for full access based on API dependencies)*
 
-7.  **Verify Services:**
+6.  **Verify Services:**
     *   Check container status: `docker compose ps`
-    *   View logs: `docker compose logs -f api worker beat listener listener_2 listener_3 crosswalk_db` (adjust listener names as needed)
-    *   Access API docs: `http://localhost:8001/api/v1/docs` (assuming default host port mapping)
-    *   Access RabbitMQ UI: `http://localhost:15672` (default user: guest, pass: guest)
-    *   Access Orthanc UI: `http://localhost:8042` (default user: orthancuser, pass: orthancpassword)
+    *   View logs: `docker compose logs -f api worker beat` (and others as needed)
+    *   Access API docs: `http://localhost:8001/api/v1/docs` (or your mapped host port)
 
 ## Usage
 
-1.  **Login:** Use the frontend UI (connected to this backend) with Google Login or generate an API Key via the UI/API (`/apikeys`).
-2.  **Configure:** Use the frontend UI or the API endpoints (`/api/v1/docs`) to manage:
-    *   Storage Backends (`/config/storage-backends`).
-    *   **Schedules** (`/config/schedules`).
-    *   Crosswalk Data Sources and Mappings (`/config/crosswalk/...`).
-    *   RuleSets and Rules (`/rules-engine/*`), linking rules to destinations and **optional schedules**, and adding modifications including `crosswalk`.
-    *   Input sources: DICOMweb Sources (`/config/dicomweb-sources`), DIMSE Listeners (`/config/dimse-listeners`), DIMSE Q/R Sources (`/config/dimse-qr-sources`).
-    *   Users, Roles, and API keys (`/users`, `/roles`, `/apikeys`).
-3.  **Send DICOM Data:**
-    *   **C-STORE:** Send to the AE Title/Port defined in active `DimseListenerConfig` records.
-    *   **STOW-RS:** POST multipart/related DICOM data to `/api/v1/dicomweb/studies`.
-4.  **Monitor:**
-    *   Check the frontend dashboard for component status and metrics.
-    *   View container logs.
-    *   Use API status endpoints (`/dashboard/status`, `/system/.../status`).
+1.  **Login:** Use the frontend UI with Google Login or an API Key.
+2.  **Configure:** Use the UI or API to manage:
+    *   Storage Backends
+    *   Schedules
+    *   Crosswalk Data Sources & Mappings
+    *   RuleSets & Rules (linking to destinations, optional schedules, modifications)
+    *   Input sources: DICOMweb, DIMSE Listeners, DIMSE Q/R, **Google Healthcare Sources**.
+    *   Users, Roles, API keys.
+3.  **Send/Poll Data:** Configure sources and destinations, enable rules. Data received via Listener/STOW or polled via DICOMweb/DIMSE Q/R/**GHC Poller** will be processed.
+4.  **Monitor:** Use dashboard, logs, API status endpoints.
 
 ## API Documentation
 
-Interactive API documentation (Swagger UI) is available at `/api/v1/docs` when the API service is running. ReDoc documentation is at `/api/v1/redoc`.
+Interactive API documentation (Swagger UI) is available at `/api/v1/docs`. ReDoc documentation is at `/api/v1/redoc`.
 
 ## Current Status
 
 *   Core architecture functional.
 *   Authentication (Google, API Key) and RBAC implemented.
-*   All planned DIMSE/DICOMweb input sources and polling/retrieval methods implemented.
-*   All planned output destinations implemented.
+*   All planned input sources (C-STORE, STOW-RS, DICOMweb Poll, DIMSE Q/R Poll, **GHC Poll**) implemented.
+*   All planned output destinations implemented (Filesystem, C-STORE, GCS, GHC STOW, DICOMweb STOW). TLS supported for C-STORE SCU.
 *   Rule engine supports tag/association matching (IP Ops pending), **scheduling**, and tag modifications (`set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`).
 *   Crosswalk feature fully implemented.
-*   **Scheduling feature fully implemented (backend models, schemas, CRUD, API, processing logic).**
-*   Original Attributes Sequence logging framework implemented (needs full verification).
-*   Configuration via API available for all major components including Schedules.
+*   Scheduling feature fully implemented.
+*   **Google Healthcare polling and basic metadata processing task implemented.**
+*   **Data Browser API supports querying DICOMweb, DIMSE Q/R, and Google Healthcare sources.**
+*   Configuration via API available for all major components.
 *   Monitoring endpoints functional.
+*   Original Attributes Sequence logging framework in place (needs verification).
+*   Secrets management via GCP Secret Manager integrated for TLS.
 
 ## Next Steps / Future Goals
 
 *   **Implement IP Matching (Backend):** Logic for association criteria.
 *   **Verify Original Attributes Logging (Backend):** Test across all modification types.
-*   **Implement GCS Polling (Backend & Frontend):** Config, task, UI page/widget.
+*   **Enhance GHC Poller Processing:** Implement full study retrieval (WADO?) or instance-level processing based on polled metadata.
+*   **Seed/Dump Script Overhaul:** Make config seeding/dumping robust.
 *   **Testing:** Develop comprehensive backend (pytest) and frontend test suites.
-*   **UI Refinements:** Enhance Crosswalk form (schema discovery?), dashboard visuals, rule testing feature.
+*   **UI Refinements:** Rule testing feature, dashboard visuals.
+*   **Logging Improvements:** Route all logs via Fluentd, fix Uvicorn/Postgres text logs.
 *   **Documentation:** Add API examples, deployment guides.
-*   **Longer-Term:** C-GET support, AI integration, Kubernetes.
+*   **Longer-Term:** C-GET support, AI integration (Gemini?), Kubernetes.
 
 ## Contributing
 
-*(Placeholder: Contribution guidelines will be added here.)*
+*(Placeholder)*
 
 ## License
 
-*(Placeholder: MIT or Apache 2.0 recommended.)*
+*(Placeholder)*

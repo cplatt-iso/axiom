@@ -162,6 +162,7 @@ app = Celery(
         'app.worker.dimse_qr_poller',
         'app.worker.dimse_qr_retriever',
         'app.crosswalk.tasks',
+        'app.worker.google_healthcare_poller',
         ]
 )
 
@@ -185,13 +186,17 @@ app.conf.beat_schedule = {
         'task': 'poll_all_dicomweb_sources',
         'schedule': 60.0, # Consider making interval configurable via settings
     },
-    'poll-all-dimse-qr-sources-every-five-minutes': {
+    'poll-all-dimse-qr-sources-every-minute': {
         'task': 'poll_all_dimse_qr_sources',
-        'schedule': 300.0, # Consider making interval configurable via settings
+        'schedule': 60.0, # Consider making interval configurable via settings
     },
     'sync-all-crosswalk-sources-every-hour': {
         'task': 'sync_all_enabled_crosswalk_sources',
         'schedule': 3600.0, # Consider making interval configurable via settings
+    },
+    'poll-all-google-healthcare-sources-every-five-minutes': { # Adjust name/interval as needed
+        'task': 'poll_all_google_healthcare_sources', # Name of the SCHEDULER task (we need to create this)
+        'schedule': 300.0, # Example: Run every 5 minutes
     },
     # 'cleanup-old-files-every-day': {
     #     'task': 'app.worker.tasks.cleanup_task',

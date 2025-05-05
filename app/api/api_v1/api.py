@@ -20,6 +20,7 @@ from app.api.api_v1.endpoints import (
     config_schedules,
     ai_assist,
     data_browser, # <-- ADDED IMPORT
+    config_google_healthcare_sources,
 )
 
 api_router = APIRouter()
@@ -70,3 +71,4 @@ api_router.include_router(
     prefix="/config/schedules",
     tags=["Configuration - Schedules"]
 )
+api_router.include_router(config_google_healthcare_sources.router, prefix="/config/google-healthcare-sources", tags=["config-google-healthcare-sources"])

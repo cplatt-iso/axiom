@@ -28,6 +28,7 @@ from app.services import dicomweb_client
 from app.core.config import settings
 
 from app.worker.processing_logic import process_dicom_instance
+from app.services.storage_backends.google_healthcare import GoogleHealthcareDicomStoreStorage
 
 # Get a logger instance configured by structlog (via celery_app.py signals)
 logger = structlog.get_logger(__name__) # Use module name
@@ -754,3 +755,233 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
             db.close()
 
         log.info("Finished processing STOW instance.", final_status=final_status, final_message=final_message)
+
+@shared_task(bind=True, name="process_google_healthcare_metadata_task",
+             acks_late=True,
+             max_retries=settings.CELERY_TASK_MAX_RETRIES,
+             default_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
+             autoretry_for=RETRYABLE_EXCEPTIONS,
+             retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
+async def process_google_healthcare_metadata_task(self, source_id: int, study_uid: str):
+    """
+    Celery task to process DICOM metadata retrieved from a Google Healthcare source.
+    Fetches metadata for one instance, converts, and processes via rules.
+    """
+    task_id = self.request.id
+    log = logger.bind(
+        task_id=task_id,
+        task_name=self.name,
+        source_id=source_id,
+        study_uid=study_uid,
+        source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE.value
+    )
+    log.info("Received request to process Google Healthcare study metadata.")
+
+    db: Optional[Session] = None
+    final_status = "unknown"
+    final_message = "Task did not complete."
+    success_status = {}
+    original_ds: Optional[pydicom.Dataset] = None
+    source_identifier_for_matching: str = f"GoogleHealthcare_{source_id}" # Fallback
+    instance_uid_str: str = "Unknown" # Keep track of the instance we actually process
+
+    try:
+        log.debug("Opening database session...")
+        db = SessionLocal()
+        log.debug("Fetching configuration for Google Healthcare source...")
+        source_config = crud.google_healthcare_source.get(db, id=source_id)
+
+        if not source_config:
+            log.error("Could not find configuration for source ID. Cannot fetch metadata.")
+            return {"status": "error", "message": f"Configuration for source ID {source_id} not found.", "study_uid": study_uid, "source_id": source_id}
+
+        source_identifier_for_matching = source_config.name
+        log = log.bind(source_name=source_identifier_for_matching) # Add source name to context
+        log.info("Fetching metadata from source...")
+
+        ghc_backend: Optional[GoogleHealthcareDicomStoreStorage] = None
+        dicom_metadata_list: Optional[List[Dict[str, Any]]] = None
+        try:
+            # Instantiate and initialize the backend
+            backend_config_dict = { # Reconstruct config dict
+                "type": "google_healthcare", "name": f"Processor_{source_config.name}",
+                "gcp_project_id": source_config.gcp_project_id, "gcp_location": source_config.gcp_location,
+                "gcp_dataset_id": source_config.gcp_dataset_id, "gcp_dicom_store_id": source_config.gcp_dicom_store_id,
+            }
+            ghc_backend = GoogleHealthcareDicomStoreStorage(config=backend_config_dict)
+            await ghc_backend.initialize_client()
+
+            # Fetch *instance* metadata - let's grab the first instance of the first series for simplicity
+            # You might need more robust logic depending on requirements
+            series_list = await ghc_backend.search_series(study_instance_uid=study_uid, limit=1)
+            if not series_list:
+                log.warning("No series found for study. Cannot fetch instance metadata.", study_uid=study_uid)
+                db.close()
+                # Don't mark study as processed here, maybe it appears later? Or was deleted?
+                return {"status": "success", "message": "No series found for study.", "source": source_identifier_for_matching, "study_uid": study_uid, "source_id": source_id}
+
+            first_series_uid = series_list[0].get("0020000E", {}).get("Value", [None])[0]
+            if not first_series_uid:
+                log.error("Could not extract SeriesInstanceUID from fetched series data.", series_data=series_list[0])
+                db.close()
+                return {"status": "error", "message": "Failed to get SeriesInstanceUID.", "source": source_identifier_for_matching, "study_uid": study_uid, "source_id": source_id}
+
+            log = log.bind(series_uid=first_series_uid)
+            log.debug("Fetching metadata for first instance of first series...")
+
+            dicom_metadata_list = await ghc_backend.search_instances(
+                 study_instance_uid=study_uid, series_instance_uid=first_series_uid, limit=1
+            )
+
+            if not dicom_metadata_list:
+                 log.warning("Instance metadata not found (or 404). Skipping study processing.", series_uid=first_series_uid)
+                 db.close()
+                 # Already logged as processed in poller, just return success
+                 return {"status": "success", "message": "Instance metadata not found (likely deleted/empty series).", "source": source_identifier_for_matching, "study_uid": study_uid, "series_uid":first_series_uid, "source_id": source_id}
+
+            dicom_metadata = dicom_metadata_list[0] # Get the first instance's metadata
+            instance_uid_str = dicom_metadata.get("00080018", {}).get("Value", ["Unknown"])[0]
+            log = log.bind(instance_uid=instance_uid_str) # Add actual instance UID
+            log.debug("Successfully retrieved instance metadata.")
+
+        except Exception as fetch_exc:
+             log.error("Error fetching metadata from Google Healthcare", error=str(fetch_exc), exc_info=True)
+             # Don't rollback processed log here, let retry handle it or fail permanently
+             raise fetch_exc # Let celery handle retry
+
+        log.debug("Converting JSON metadata to pydicom Dataset...")
+        try:
+            original_ds = pydicom.dataset.Dataset.from_json(dicom_metadata)
+            file_meta = pydicom.dataset.FileMetaDataset()
+            file_meta.FileMetaInformationVersion = b'\x00\x01'
+            sop_class_uid_data = original_ds.get("SOPClassUID")
+            sop_class_uid_val = getattr(sop_class_uid_data, 'value', ['1.2.840.10008.5.1.4.1.1.2'])[0]
+            file_meta.MediaStorageSOPClassUID = sop_class_uid_val
+            file_meta.MediaStorageSOPInstanceUID = instance_uid_str # Use actual UID
+            file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
+            file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
+            file_meta.ImplementationVersionName = f"pydicom {pydicom.__version__}"
+            original_ds.file_meta = file_meta
+        except Exception as e:
+            log.error("Failed to convert retrieved GHC JSON metadata to Dataset", error=str(e), exc_info=True)
+            # Don't rollback processed log, this is a processing error for this instance
+            db.close()
+            return {"status": "error", "message": f"Failed to parse retrieved metadata: {e}", "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+        if original_ds is None:
+             log.error("Dataset object is None after conversion block, cannot proceed.")
+             db.close()
+             return {"status": "error", "message": "Dataset creation failed unexpectedly.", "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+        log.debug("Querying active rulesets...")
+        active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
+        if not active_rulesets:
+             log.info("No active rulesets found. No action needed.")
+             final_status = "success"
+             final_message = "No active rulesets found"
+             db.close()
+             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+        log.debug("Calling core processing logic...")
+        try:
+            modified_ds, applied_rules_info, unique_destination_configs = process_dicom_instance(
+                original_ds=original_ds,
+                active_rulesets=active_rulesets,
+                source_identifier=source_identifier_for_matching
+            )
+        except Exception as proc_exc:
+             log.error("Error during core processing logic", error=str(proc_exc), exc_info=True)
+             db.close()
+             # Don't rollback processed log, just report processing error
+             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=[r['name'] for r in applied_rules_info])
+
+        if not applied_rules_info:
+             log.info("No applicable rules matched this source. No actions taken.")
+             final_status = "success"
+             final_message = f"No matching rules found for source '{source_identifier_for_matching}'"
+             db.close()
+             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+        log = log.bind(unique_destination_count=len(unique_destination_configs))
+
+        if not unique_destination_configs:
+            log.info("Rules matched, but no destinations configured.")
+            final_status = "success"
+            final_message = "Rules matched, modifications applied (if any), but no destinations configured"
+            db.close()
+            return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+        dataset_to_send = modified_ds if modified_ds is not None else original_ds
+        log.info("Processing unique destinations...")
+        all_destinations_succeeded = True
+        # --- DESTINATION LOOP (same as process_dicomweb_metadata_task) ---
+        for i, dest_config in enumerate(unique_destination_configs):
+            dest_log = log.bind(destination_index=i+1, destination_config=dest_config)
+            dest_type = dest_config.get('type','?')
+            dest_id_parts = [f"Dest_{i+1}", dest_type]
+            if dest_type == 'cstore': dest_id_parts.append(dest_config.get('ae_title','?'))
+            elif dest_type == 'filesystem': dest_id_parts.append(dest_config.get('path','?'))
+            dest_id = "_".join(part for part in dest_id_parts if part != '?')
+            dest_log = dest_log.bind(destination_id=dest_id)
+
+            dest_log.debug("Attempting destination")
+            try:
+                storage_backend = get_storage_backend(dest_config)
+                # Re-use actual instance UID if available, otherwise fallback
+                filename_context = f"{instance_uid_str or study_uid}.dcm"
+
+                # For GHC metadata task, we don't have an original file path
+                store_result = await storage_backend.store( # Use await if store method is async
+                    dataset_to_send,
+                    original_filepath=None,
+                    filename_context=filename_context,
+                    source_identifier=source_identifier_for_matching
+                )
+
+                # Handle async store result if needed
+                dest_log.info("Destination completed successfully.", store_result=store_result)
+                success_status[dest_id] = {"status": "success", "result": store_result}
+            except StorageBackendError as e:
+                dest_log.error("Failed to store to destination", error=str(e), exc_info=False)
+                all_destinations_succeeded = False
+                success_status[dest_id] = {"status": "error", "message": str(e)}
+                if isinstance(e, RETRYABLE_EXCEPTIONS): raise
+            except Exception as e:
+                 dest_log.error("Unexpected error storing to destination", error=str(e), exc_info=True)
+                 all_destinations_succeeded = False
+                 success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
+        # --- END DESTINATION LOOP ---
+
+        if all_destinations_succeeded:
+            final_status = "success"
+            final_message = f"Processed GHC metadata and dispatched successfully to {len(unique_destination_configs)} destination(s)."
+            # Note: Processed count increment is not done here, only in poller after dispatch.
+        else:
+            failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
+            log.warning("Some destinations failed for GHC metadata task", failed_count=failed_count, total_destinations=len(unique_destination_configs))
+            final_status = "partial_failure"
+            final_message = f"Processing complete for GHC metadata, but {failed_count} destination(s) failed dispatch."
+
+        db.close()
+        return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "destinations": success_status, "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+
+    except Exception as exc:
+        log.error("Unhandled exception during GHC metadata task execution", error=str(exc), error_type=type(exc).__name__, exc_info=True)
+        if db and db.is_active:
+            try: db.rollback() # Rollback potentially failed processed log commit if error occurred after
+            except Exception as rb_e: logger.error("Error rolling back DB session in GHC metadata main exception handler", rollback_error=str(rb_e), task_id=task_id)
+            finally: db.close()
+        if isinstance(exc, RETRYABLE_EXCEPTIONS):
+             log.info("Re-raising retryable exception", error_type=type(exc).__name__)
+             raise
+        else:
+            final_status = "error"
+            final_message = f"Fatal error during GHC metadata processing: {exc!r}"
+            return {"status": final_status, "message": final_message, "source_id": source_id, "study_uid": study_uid, "instance_uid": instance_uid_str} # Include instance_uid if known
+    finally:
+        if db and db.is_active:
+            logger.warning("Closing database session in GHC metadata finally block (may indicate early exit or unclosed session).", task_id=task_id)
+            db.close()
+        log.info("Finished GHC metadata task processing.", final_status=final_status, final_message=final_message)

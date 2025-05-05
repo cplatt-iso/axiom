@@ -44,3 +44,4 @@ rule_destination_association = Table(
     Column('rule_id', Integer, ForeignKey('rules.id', ondelete="CASCADE"), primary_key=True),
     Column('storage_backend_config_id', Integer, ForeignKey('storage_backend_configs.id', ondelete="CASCADE"), primary_key=True)
 )
+
