@@ -1,4 +1,5 @@
 # app/worker/tasks.py
+import asyncio
 import json
 import os
 import shutil
@@ -8,8 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Union
 from copy import deepcopy
 
-# Use structlog for logging
-import structlog # type: ignore
+import structlog
 
 from celery import shared_task
 from sqlalchemy.orm import Session
@@ -21,6 +21,7 @@ from app.db.session import SessionLocal
 from app import crud
 from app.db import models
 from app.db.models import ProcessedStudySourceType
+from app.db.models.storage_backend_config import StorageBackendConfig as DBStorageBackendConfigModel
 
 from app.services.storage_backends import get_storage_backend, StorageBackendError
 from app.services import dicomweb_client
@@ -30,16 +31,24 @@ from app.core.config import settings
 from app.worker.processing_logic import process_dicom_instance
 from app.services.storage_backends.google_healthcare import GoogleHealthcareDicomStoreStorage
 
-# Get a logger instance configured by structlog (via celery_app.py signals)
-logger = structlog.get_logger(__name__) # Use module name
+from app.db.models.storage_backend_config import (
+    StorageBackendConfig as DBStorageBackendConfigModel, # Keep base if needed elsewhere, but subclasses are key now
+    FileSystemBackendConfig,
+    GcsBackendConfig,
+    CStoreBackendConfig,
+    GoogleHealthcareBackendConfig,
+    StowRsBackendConfig
+)
+
+
+logger = structlog.get_logger(__name__)
 
 
 def move_to_error_dir(filepath: Path, task_id: str):
-    """Moves a file to the configured error directory with timestamp and task ID."""
     if not isinstance(filepath, Path):
          filepath = Path(filepath)
 
-    log = logger.bind(task_id=task_id, original_filepath=str(filepath)) # Bind context
+    log = logger.bind(task_id=task_id, original_filepath=str(filepath))
 
     if not filepath.is_file():
          log.warning("Source path is not a file or does not exist. Cannot move to error dir.")
@@ -60,10 +69,9 @@ def move_to_error_dir(filepath: Path, task_id: str):
         shutil.move(str(filepath), str(error_path))
         log.info("Moved file to error directory", error_path=str(error_path))
     except Exception as move_err:
-        # Use logger directly here as 'log' binding might be stale if error_dir assignment failed
         logger.critical(
             "CRITICAL - Could not move file to error dir",
-            task_id=task_id, # Repeat context for critical log
+            task_id=task_id,
             original_filepath=str(filepath),
             target_error_dir=str(error_dir) if 'error_dir' in locals() else 'Unknown',
             error=str(move_err),
@@ -92,14 +100,10 @@ def process_dicom_file_task(
     source_db_id_or_instance_id: Union[int, str],
     association_info: Optional[Dict[str, str]] = None
 ):
-    """
-    Celery task to process a DICOM file (filesystem/listener) with structured logging.
-    """
     task_id = self.request.id
     original_filepath = Path(dicom_filepath_str)
-    log_source_identifier = f"{source_type}_{source_db_id_or_instance_id}" # For logging/fallback
+    log_source_identifier = f"{source_type}_{source_db_id_or_instance_id}"
 
-    # Bind common context for this task execution
     log = logger.bind(
         task_id=task_id,
         task_name=self.name,
@@ -109,11 +113,18 @@ def process_dicom_file_task(
         association_info=association_info or {}
     )
 
-    log.info(f"Received request from source: {log_source_identifier}") # Keep short message, details are bound
+    log.info(f"Received request from source: {log_source_identifier}")
 
     if not original_filepath.is_file():
         log.error("File not found or is not a file. Cannot process.")
-        return {"status": "error", "message": "File not found", "filepath": dicom_filepath_str, "source": log_source_identifier, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+        return {
+            "status": "error",
+            "message": "File not found",
+            "filepath": dicom_filepath_str,
+            "source": log_source_identifier,
+            "source_type": source_type,
+            "source_id": source_db_id_or_instance_id
+            }
 
     db: Optional[Session] = None
     original_ds: Optional[pydicom.Dataset] = None
@@ -121,52 +132,53 @@ def process_dicom_file_task(
     final_message = "Task did not complete."
     success_status = {}
     instance_uid_str = "Unknown"
-    source_identifier_for_matching = log_source_identifier # Default
+    source_identifier_for_matching = log_source_identifier
+    applied_rules_info: List[str] = []
 
     try:
         db = SessionLocal()
 
-        # --- Determine Source Identifier for Matching ---
         try:
             source_type_enum = ProcessedStudySourceType(source_type)
             if source_type_enum == ProcessedStudySourceType.DIMSE_LISTENER and isinstance(source_db_id_or_instance_id, str):
                 listener_config = crud.crud_dimse_listener_config.get_by_instance_id(db, instance_id=source_db_id_or_instance_id)
                 if listener_config:
                     source_identifier_for_matching = listener_config.name
-                    log.debug("Matched DIMSE Listener config name for instance ID", config_name=source_identifier_for_matching)
                 else:
-                    log.warning("Could not find listener config for instance ID. Using default source identifier for matching.", default_identifier=log_source_identifier)
+                    log.warning("Could not find listener config for instance ID.", default_identifier=log_source_identifier)
             elif source_type_enum == ProcessedStudySourceType.DIMSE_QR and isinstance(source_db_id_or_instance_id, int):
                  qr_config = crud.crud_dimse_qr_source.get(db, id=source_db_id_or_instance_id)
                  if qr_config:
                       source_identifier_for_matching = qr_config.name
-                      log.debug("Matched DIMSE QR config name for source ID", config_name=source_identifier_for_matching)
                  else:
-                     log.warning("Could not find DIMSE QR config for source ID. Using default source identifier.", default_identifier=log_source_identifier)
-            # TODO: Add other source types if needed
-            else:
-                 log.debug("Using default source identifier for matching", default_identifier=log_source_identifier, source_id_type=type(source_db_id_or_instance_id).__name__)
+                     log.warning("Could not find DIMSE QR config for source ID.", default_identifier=log_source_identifier)
         except ValueError:
-             log.error("Invalid source_type received. Using fallback identifier.", received_source_type=source_type)
+             log.error("Invalid source_type received.", received_source_type=source_type)
         except Exception as e:
-             log.error("Error looking up source config name. Using fallback identifier.", error=str(e), exc_info=False) # Don't need full trace usually
+             log.error("Error looking up source config name.", error=str(e), exc_info=False)
 
-        # Update bound logger if identifier changed
         log = log.bind(source_identifier_for_matching=source_identifier_for_matching)
 
         log.debug("Reading DICOM file...")
         try:
             original_ds = pydicom.dcmread(str(original_filepath), force=True)
             instance_uid_str = getattr(original_ds, 'SOPInstanceUID', 'Unknown')
-            log = log.bind(instance_uid=instance_uid_str) # Bind UID once read
-            log.debug("Successfully read file")
+            log = log.bind(instance_uid=instance_uid_str)
         except InvalidDicomError as e:
             log.error("Invalid DICOM file format", error=str(e))
-            move_to_error_dir(original_filepath, task_id) # Pass task_id for error move logging
-            return {"status": "error", "message": f"Invalid DICOM file format: {e}", "filepath": dicom_filepath_str, "source": log_source_identifier, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+            move_to_error_dir(original_filepath, task_id)
+            return {
+                "status": "error",
+                "message": f"Invalid DICOM file format: {e}",
+                "filepath": dicom_filepath_str,
+                "source": log_source_identifier,
+                "instance_uid": instance_uid_str,
+                "source_type": source_type,
+                "source_id": source_db_id_or_instance_id
+                }
         except Exception as read_exc:
             log.error("Error reading DICOM file", error=str(read_exc), exc_info=True)
-            raise read_exc # Let celery handle retry for other read errors
+            raise read_exc
 
         log.debug("Querying active rulesets...")
         active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
@@ -183,11 +195,19 @@ def process_dicom_file_task(
              else:
                  log.info("Leaving file as no rulesets were active (DELETE_UNMATCHED_FILES=false).")
              db.close()
-             return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": log_source_identifier, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+             return {
+                 "status": final_status,
+                 "message": final_message,
+                 "filepath": dicom_filepath_str,
+                 "source": log_source_identifier,
+                 "instance_uid": instance_uid_str,
+                 "source_type": source_type,
+                 "source_id": source_db_id_or_instance_id
+                 }
 
         log.debug("Calling core processing logic...")
         try:
-            modified_ds, applied_rules_info, unique_destination_configs = process_dicom_instance(
+            modified_ds, applied_rules_info, unique_destination_identifier_dicts = process_dicom_instance(
                 original_ds=original_ds,
                 active_rulesets=active_rulesets,
                 source_identifier=source_identifier_for_matching,
@@ -197,9 +217,16 @@ def process_dicom_file_task(
              log.error("Error during core processing logic", error=str(proc_exc), exc_info=True)
              move_to_error_dir(original_filepath, task_id)
              db.close()
-             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "filepath": dicom_filepath_str, "source": log_source_identifier, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+             return {
+                 "status": "error",
+                 "message": f"Error during rule processing: {proc_exc}",
+                 "filepath": dicom_filepath_str,
+                 "source": log_source_identifier,
+                 "instance_uid": instance_uid_str,
+                 "source_type": source_type,
+                 "source_id": source_db_id_or_instance_id
+                 }
 
-        # Log which rules were applied
         log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=applied_rules_info)
 
         if not applied_rules_info:
@@ -215,11 +242,19 @@ def process_dicom_file_task(
              else:
                  log.info("Leaving file as no rules matched this source (DELETE_UNMATCHED_FILES=false).")
              db.close()
-             return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": log_source_identifier, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+             return {
+                 "status": final_status,
+                 "message": final_message,
+                 "filepath": dicom_filepath_str,
+                 "source": log_source_identifier,
+                 "instance_uid": instance_uid_str,
+                 "source_type": source_type,
+                 "source_id": source_db_id_or_instance_id
+                 }
 
-        log = log.bind(unique_destination_count=len(unique_destination_configs))
+        log = log.bind(unique_destination_count=len(unique_destination_identifier_dicts))
 
-        if not unique_destination_configs:
+        if not unique_destination_identifier_dicts:
             log.info("Rules matched, but no destinations configured in matched rules.")
             final_status = "success"
             final_message = "Rules matched, modifications applied (if any), but no destinations configured"
@@ -227,137 +262,309 @@ def process_dicom_file_task(
             if delete_original:
                 try:
                     original_filepath.unlink(missing_ok=True)
-                    log.info("Deleting original file as rules matched (and modified?), but had no destinations (DELETE_ON_NO_DESTINATION=true).")
                 except OSError as e:
                     log.warning("Failed to delete original file after processing with no destinations", error=str(e))
-            else:
-                log.info("Leaving original file as rules matched but had no destinations (DELETE_ON_NO_DESTINATION=false or no modification).")
             db.close()
-            return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "filepath": dicom_filepath_str, "source": log_source_identifier, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+            return {
+                "status": final_status,
+                "message": final_message,
+                "applied_rules": applied_rules_info,
+                "filepath": dicom_filepath_str,
+                "source": log_source_identifier,
+                "instance_uid": instance_uid_str,
+                "source_type": source_type,
+                "source_id": source_db_id_or_instance_id
+                }
 
         dataset_to_send = modified_ds if modified_ds is not None else original_ds
         log.info("Processing unique destinations...")
         all_destinations_succeeded = True
-        for i, dest_config in enumerate(unique_destination_configs):
-            dest_log = log.bind(destination_index=i+1, destination_config=dest_config) # Bind destination info
-            dest_type = dest_config.get('type','?')
-            dest_id_parts = [f"Dest_{i+1}", dest_type]
-            if dest_type == 'cstore': dest_id_parts.append(dest_config.get('ae_title','?'))
-            elif dest_type == 'filesystem': dest_id_parts.append(dest_config.get('path','?'))
-            dest_id = "_".join(part for part in dest_id_parts if part != '?')
-            dest_log = dest_log.bind(destination_id=dest_id)
+        for i, dest_identifier_dict in enumerate(unique_destination_identifier_dicts):
+            dest_id_from_dict = dest_identifier_dict.get("id")
+            dest_name_from_dict = dest_identifier_dict.get("name", "UnknownName")
+            
+            dest_log = log.bind(
+                destination_index=i+1,
+                destination_id_from_dict=dest_id_from_dict,
+                destination_name_from_dict=dest_name_from_dict
+            )
 
-            dest_log.debug("Attempting destination")
+            if dest_id_from_dict is None:
+                dest_log.error("Destination identifier dict is missing 'id'. Skipping.")
+                all_destinations_succeeded = False
+                success_status[f"Dest_{i+1}_Malformed"] = {"status": "error", "message": "Missing ID in destination identifier"}
+                continue
+
+            db_storage_backend_model: Optional[DBStorageBackendConfigModel] = crud.crud_storage_backend_config.get(db, id=dest_id_from_dict)
+
+            if not db_storage_backend_model:
+                dest_log.error("Could not find storage backend configuration in DB.", target_db_id=dest_id_from_dict)
+                all_destinations_succeeded = False
+                success_status[f"Dest_{i+1}_{dest_name_from_dict}"] = {"status": "error", "message": f"DB config not found for ID {dest_id_from_dict}"}
+                continue
+            
+            if not db_storage_backend_model.is_enabled:
+                dest_log.info("Storage backend configuration is disabled in DB. Skipping.", target_db_id=dest_id_from_dict, name=db_storage_backend_model.name)
+                success_status[f"Dest_{i+1}_{db_storage_backend_model.name}"] = {"status": "skipped_disabled", "message": f"Destination {db_storage_backend_model.name} is disabled."}
+                continue
+
+# BEGIN FUCKED UP CODE
+            # This is the replacement for your existing try...except block
+            # that was failing with "AttributeError: ... object has no attribute 'config'"
+            actual_storage_config_dict = {}
             try:
-                storage_backend = get_storage_backend(dest_config)
-                filename_context = f"{instance_uid_str}.dcm"
+                # 1. Resolve backend_type to a string
+                backend_type_value_from_db_model = db_storage_backend_model.backend_type
+                resolved_backend_type_for_config: Optional[str] = None
 
-                store_result = storage_backend.store(
-                    dataset_to_send,
-                    original_filepath=original_filepath,
-                    filename_context=filename_context,
-                    source_identifier=source_identifier_for_matching
-                 )
-                if store_result == "duplicate":
-                    dest_log.info("Destination reported duplicate instance (HTTP 409). Handled.")
-                    success_status[dest_id] = {"status": "duplicate", "result": store_result}
+                if isinstance(backend_type_value_from_db_model, str):
+                    resolved_backend_type_for_config = backend_type_value_from_db_model
+                elif hasattr(backend_type_value_from_db_model, 'value') and isinstance(getattr(backend_type_value_from_db_model, 'value', None), str):
+                    resolved_backend_type_for_config = backend_type_value_from_db_model.value
                 else:
-                    dest_log.info("Destination completed successfully", store_result=store_result)
-                    success_status[dest_id] = {"status": "success", "result": store_result}
+                    # Using dest_log if available, otherwise fall back to log or a generic logger
+                    # Assuming dest_log is defined in the loop iterating destinations
+                    current_logger = dest_log if 'dest_log' in locals() else log
+                    current_logger.error(
+                        "DB model 'backend_type' is invalid or not a string/enum.value.",
+                        raw_backend_type=backend_type_value_from_db_model,
+                        type_of_raw=type(backend_type_value_from_db_model).__name__,
+                        destination_name=db_storage_backend_model.name, # Added for context
+                        destination_id=db_storage_backend_model.id      # Added for context
+                    )
+                    all_destinations_succeeded = False # Ensure this flag is set if used in your loop
+                    success_status[db_storage_backend_model.name] = {"status": "error", "message": "Invalid backend_type format from DB."}
+                    continue
+
+                if resolved_backend_type_for_config is None:
+                    current_logger = dest_log if 'dest_log' in locals() else log
+                    current_logger.error(
+                        "Failed to resolve backend_type for config dict construction.",
+                        destination_name=db_storage_backend_model.name,
+                        destination_id=db_storage_backend_model.id
+                        )
+                    all_destinations_succeeded = False
+                    success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal error resolving backend_type."}
+                    continue
+
+                # Initialize with common fields expected by get_storage_backend's config dict
+                actual_storage_config_dict['type'] = resolved_backend_type_for_config
+                # The 'name' from the DB model might be useful for some storage backend initializations
+                actual_storage_config_dict['name'] = db_storage_backend_model.name
+
+                # 2. Populate type-specific fields by DIRECTLY accessing attributes
+                #    of db_storage_backend_model, which is an instance of the correct subclass.
+
+                if resolved_backend_type_for_config == "filesystem":
+                    if isinstance(db_storage_backend_model, FileSystemBackendConfig):
+                        actual_storage_config_dict['path'] = db_storage_backend_model.path
+                    else:
+                        (dest_log if 'dest_log' in locals() else log).error("Type mismatch: Expected FileSystemBackendConfig.", model_actual_type=type(db_storage_backend_model).__name__, dest_name=db_storage_backend_model.name)
+                        all_destinations_succeeded = False; success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+
+                elif resolved_backend_type_for_config == "gcs":
+                    if isinstance(db_storage_backend_model, GcsBackendConfig):
+                        actual_storage_config_dict['bucket'] = db_storage_backend_model.bucket
+                        actual_storage_config_dict['prefix'] = db_storage_backend_model.prefix
+                    else:
+                        (dest_log if 'dest_log' in locals() else log).error("Type mismatch: Expected GcsBackendConfig.", model_actual_type=type(db_storage_backend_model).__name__, dest_name=db_storage_backend_model.name)
+                        all_destinations_succeeded = False; success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+
+                elif resolved_backend_type_for_config == "cstore":
+                    if isinstance(db_storage_backend_model, CStoreBackendConfig):
+                        actual_storage_config_dict['remote_ae_title'] = db_storage_backend_model.remote_ae_title
+                        actual_storage_config_dict['remote_host'] = db_storage_backend_model.remote_host
+                        actual_storage_config_dict['remote_port'] = db_storage_backend_model.remote_port
+                        actual_storage_config_dict['local_ae_title'] = db_storage_backend_model.local_ae_title
+                        actual_storage_config_dict['tls_enabled'] = db_storage_backend_model.tls_enabled
+                        actual_storage_config_dict['tls_ca_cert_secret_name'] = db_storage_backend_model.tls_ca_cert_secret_name
+                        actual_storage_config_dict['tls_client_cert_secret_name'] = db_storage_backend_model.tls_client_cert_secret_name
+                        actual_storage_config_dict['tls_client_key_secret_name'] = db_storage_backend_model.tls_client_key_secret_name
+                    else:
+                        (dest_log if 'dest_log' in locals() else log).error("Type mismatch: Expected CStoreBackendConfig.", model_actual_type=type(db_storage_backend_model).__name__, dest_name=db_storage_backend_model.name)
+                        all_destinations_succeeded = False; success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+
+                elif resolved_backend_type_for_config == "google_healthcare":
+                    if isinstance(db_storage_backend_model, GoogleHealthcareBackendConfig):
+                        actual_storage_config_dict['gcp_project_id'] = db_storage_backend_model.gcp_project_id
+                        actual_storage_config_dict['gcp_location'] = db_storage_backend_model.gcp_location
+                        actual_storage_config_dict['gcp_dataset_id'] = db_storage_backend_model.gcp_dataset_id
+                        actual_storage_config_dict['gcp_dicom_store_id'] = db_storage_backend_model.gcp_dicom_store_id
+                    else:
+                        (dest_log if 'dest_log' in locals() else log).error("Type mismatch: Expected GoogleHealthcareBackendConfig.", model_actual_type=type(db_storage_backend_model).__name__, dest_name=db_storage_backend_model.name)
+                        all_destinations_succeeded = False; success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+
+                elif resolved_backend_type_for_config == "stow_rs":
+                     if isinstance(db_storage_backend_model, StowRsBackendConfig):
+                        actual_storage_config_dict['base_url'] = db_storage_backend_model.base_url
+                     else:
+                        (dest_log if 'dest_log' in locals() else log).error("Type mismatch: Expected StowRsBackendConfig.", model_actual_type=type(db_storage_backend_model).__name__, dest_name=db_storage_backend_model.name)
+                        all_destinations_succeeded = False; success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+                else:
+                    (dest_log if 'dest_log' in locals() else log).error("Unknown resolved_backend_type_for_config for building specific config.", type_val=resolved_backend_type_for_config, dest_name=db_storage_backend_model.name)
+                    all_destinations_succeeded = False
+                    success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Unknown type '{resolved_backend_type_for_config}' for config construction."}
+                    continue
+
+            except AttributeError as attr_err:
+                # This catch is if a specific attribute (e.g., .bucket) is missing from an expected model type.
+                (dest_log if 'dest_log' in locals() else log).error(
+                    "Attribute error building specific config dict from DB model. A field expected for the backend type was missing on the model instance.",
+                    error=str(attr_err), model_type=type(db_storage_backend_model).__name__,
+                    destination_name=db_storage_backend_model.name, exc_info=True
+                )
+                all_destinations_succeeded = False
+                success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Attribute error constructing config: {attr_err}"}
+                continue
+            except Exception as config_build_err: # Catch any other unexpected error during this block
+                (dest_log if 'dest_log' in locals() else log).error(
+                    "Generic error building specific config dict from DB model.",
+                    error=str(config_build_err), destination_name=db_storage_backend_model.name, exc_info=True
+                )
+                all_destinations_succeeded = False
+                success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Error building config: {config_build_err}"}
+                continue
+# END FUCKED UP CODE
+
+            dest_log = dest_log.bind(actual_destination_type=actual_storage_config_dict.get('type','?'))
+            dest_log.debug(f"Attempting destination type: {actual_storage_config_dict.get('type')}")
+
+            try:
+                storage_backend = get_storage_backend(actual_storage_config_dict)
+                filename_context = f"{instance_uid_str}.dcm"
+                store_result: Any = None
+
+                if actual_storage_config_dict.get('type') == 'google_healthcare':
+                    if asyncio.iscoroutinefunction(storage_backend.store):
+                        try:
+                            store_result = asyncio.run(storage_backend.store(
+                                dataset_to_send,
+                                original_filepath=original_filepath,
+                                filename_context=filename_context,
+                                source_identifier=source_identifier_for_matching
+                            ))
+                        except RuntimeError as e:
+                            dest_log.error("Failed to run async GHC store via asyncio.run", error=str(e), exc_info=True)
+                            raise StorageBackendError(f"RuntimeError running async GHC store: {e}") from e
+                    else:
+                        store_result = storage_backend.store(
+                           dataset_to_send,
+                           original_filepath=original_filepath,
+                           filename_context=filename_context,
+                           source_identifier=source_identifier_for_matching
+                        )
+                else:
+                    store_result = storage_backend.store(
+                       dataset_to_send,
+                       original_filepath=original_filepath,
+                       filename_context=filename_context,
+                       source_identifier=source_identifier_for_matching
+                    )
+
+                if store_result == "duplicate":
+                    success_status[db_storage_backend_model.name] = {"status": "duplicate", "result": store_result}
+                else:
+                    success_status[db_storage_backend_model.name] = {"status": "success", "result": store_result}
+
             except StorageBackendError as e:
                 dest_log.error("Failed to store to destination", error=str(e), exc_info=False)
                 all_destinations_succeeded = False
-                success_status[dest_id] = {"status": "error", "message": str(e)}
-                if isinstance(e, RETRYABLE_EXCEPTIONS): raise # Re-raise to trigger Celery retry
+                success_status[db_storage_backend_model.name] = {"status": "error", "message": str(e)}
+                if any(isinstance(e, exc_type) for exc_type in RETRYABLE_EXCEPTIONS): 
+                    raise
             except Exception as e:
                  dest_log.error("Unexpected error during storage to destination", error=str(e), exc_info=True)
                  all_destinations_succeeded = False
-                 success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
-
+                 success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Unexpected error: {e}"}
 
         if all_destinations_succeeded:
-            log.info("All destinations succeeded.")
-            if settings.DELETE_ON_SUCCESS:
-                 log.info("Deleting original file (DELETE_ON_SUCCESS=true)")
-                 try: original_filepath.unlink(missing_ok=True)
-                 except OSError as e: log.warning("Failed to delete original file", error=str(e))
-            else:
-                 log.info("Leaving original file (DELETE_ON_SUCCESS=false)")
             final_status = "success"
-            final_message = f"Processed and stored successfully to {len(unique_destination_configs)} destination(s)."
-
-            # --- Increment Processed Count ---
-            processed_incremented = False
-            local_db = None # Define before try block
+            final_message = f"Processed and stored successfully to {len(unique_destination_identifier_dicts)} destination(s)."
+            if settings.DELETE_ON_SUCCESS:
+                 try: 
+                     original_filepath.unlink(missing_ok=True)
+                 except OSError as e: 
+                     log.warning("Failed to delete original file", error=str(e))
+            
+            local_db = None
             try:
                 local_db = SessionLocal()
+                processed_incremented = False
                 if source_type == ProcessedStudySourceType.DIMSE_LISTENER.value and isinstance(source_db_id_or_instance_id, str):
-                    log.debug("Incrementing processed count for DIMSE Listener", listener_instance_id=source_db_id_or_instance_id)
                     processed_incremented = crud.crud_dimse_listener_state.increment_processed_count(db=local_db, listener_id=source_db_id_or_instance_id, count=1)
                 elif source_type == ProcessedStudySourceType.DIMSE_QR.value and isinstance(source_db_id_or_instance_id, int):
-                     log.debug("Incrementing processed count for DIMSE QR source", dimse_qr_source_id=source_db_id_or_instance_id)
                      processed_incremented = crud.crud_dimse_qr_source.increment_processed_count(db=local_db, source_id=source_db_id_or_instance_id, count=1)
-                # TODO: Add other source types if needed
-                else:
-                    log.warning("Unknown source type or mismatched ID type for processed count increment.", source_id_type=type(source_db_id_or_instance_id).__name__)
-
-                if processed_incremented:
-                    log.info("Successfully incremented processed count for source.")
-                else:
-                    # This case might happen if the listener state/source wasn't found during increment
-                    log.warning("Failed to increment processed count for source (perhaps source state record missing?).")
-                local_db.close() # Close session after use
+                
+                if processed_incremented: 
+                    local_db.commit()
+                else: 
+                    log.warning("Failed to increment processed count for source.")
             except Exception as e:
                 log.error("DB Error incrementing processed count for source", error=str(e), exc_info=True)
-                if local_db and local_db.is_active:
-                     try: local_db.rollback()
-                     except Exception as rb_e: log.error("Error rolling back DB session during count increment error handling", rollback_error=str(rb_e))
-                     finally: local_db.close()
-
+                if local_db and local_db.is_active: 
+                    local_db.rollback()
+            finally:
+                if local_db: 
+                    local_db.close()
         else:
-            failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
-            log.warning("Some destinations failed", failed_count=failed_count, total_destinations=len(unique_destination_configs))
+            failed_count = sum(1 for status_info in success_status.values() if status_info['status'] == 'error')
+            log.warning("Some destinations failed", failed_count=failed_count)
             if settings.MOVE_TO_ERROR_ON_PARTIAL_FAILURE:
-                 log.info("Moving original file to error directory due to partial failure.")
                  move_to_error_dir(original_filepath, task_id)
             final_status = "partial_failure"
             final_message = f"Processing complete, but {failed_count} destination(s) failed."
 
         db.close()
+        serializable_success_status = {}
+        for k, v in success_status.items():
+            result_val = v.get("result")
+            if isinstance(result_val, (dict, str, int, float, list, bool, type(None))):
+                 serializable_success_status[k] = v
+            elif isinstance(result_val, Path):
+                 serializable_success_status[k] = {"status": v["status"], "result": str(result_val)}
+            else:
+                 serializable_success_status[k] = {"status": v["status"], "result": f"<{type(result_val).__name__}>"}
+
         return {
             "status": final_status,
             "message": final_message,
-            "applied_rules": applied_rules_info, # <-- CHANGED THIS: Use the list directly
-            "destinations": success_status,
+            "applied_rules": applied_rules_info,
+            "destinations": serializable_success_status,
             "source": log_source_identifier,
             "instance_uid": instance_uid_str,
             "source_type": source_type,
             "source_id": source_db_id_or_instance_id
-        }   
+        }
     except Exception as exc:
-        # Log using the logger bound with initial context if possible
-        log.error("Unhandled exception during task execution", error=str(exc), error_type=type(exc).__name__, exc_info=True)
-        if original_filepath.exists(): move_to_error_dir(original_filepath, task_id)
+        log.error("Unhandled exception during task execution", error=str(exc), exc_info=True)
+        if original_filepath and original_filepath.exists():
+            move_to_error_dir(original_filepath, task_id)
         final_status = "error"
         final_message = f"Fatal error during processing: {exc!r}"
         if db and db.is_active:
-             try: db.rollback()
-             except Exception as rb_e: logger.error("Error rolling back DB session in main exception handler", rollback_error=str(rb_e), task_id=task_id) # Use base logger
-             finally: db.close()
-        # Re-raise retryable exceptions for Celery, otherwise return error dict
-        if isinstance(exc, RETRYABLE_EXCEPTIONS):
-             log.info("Re-raising retryable exception", error_type=type(exc).__name__)
+             try: 
+                 db.rollback()
+             except Exception as rb_e: 
+                 logger.error("Error rolling back DB session.", task_id=task_id, rollback_error=str(rb_e))
+             finally: 
+                 db.close()
+
+        if any(isinstance(exc, exc_type) for exc_type in RETRYABLE_EXCEPTIONS):
              raise
         else:
-            return {"status": final_status, "message": final_message, "filepath": dicom_filepath_str, "source": log_source_identifier, "instance_uid": instance_uid_str, "source_type": source_type, "source_id": source_db_id_or_instance_id}
+            return {
+                "status": final_status,
+                "message": final_message,
+                "filepath": dicom_filepath_str,
+                "source": log_source_identifier,
+                "instance_uid": instance_uid_str,
+                "source_type": source_type,
+                "source_id": source_db_id_or_instance_id
+                }
     finally:
         if db and db.is_active:
-            # Use base logger here as 'log' context might be misleading if error happened early
-            logger.warning("Closing database session in finally block (may indicate early exit or unclosed session).", task_id=task_id)
             db.close()
-        # Use bound logger for final status log
         log.info("Finished task processing.", final_status=final_status, final_message=final_message)
-
 
 
 @shared_task(bind=True, name="process_dicomweb_metadata_task",
@@ -367,9 +574,7 @@ def process_dicom_file_task(
              autoretry_for=RETRYABLE_EXCEPTIONS,
              retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
 def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_uid: str, instance_uid: str):
-    """Celery task to process DICOM metadata from DICOMweb source with structured logging."""
     task_id = self.request.id
-    # Bind initial context
     log = logger.bind(
         task_id=task_id,
         task_name=self.name,
@@ -379,382 +584,323 @@ def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_
         instance_uid=instance_uid,
         source_type=ProcessedStudySourceType.DICOMWEB_POLLER.value
     )
-    log.info("Received request to process DICOMweb instance metadata.")
 
     db: Optional[Session] = None
     final_status = "unknown"
     final_message = "Task did not complete."
     success_status = {}
     original_ds: Optional[pydicom.Dataset] = None
-    source_identifier_for_matching: str = f"DICOMweb_Source_{source_id}" # Fallback
+    source_identifier_for_matching: str = f"DICOMweb_Source_{source_id}"
+    applied_rules_info: List[str] = []
 
     try:
-        log.debug("Opening database session...")
         db = SessionLocal()
-        log.debug("Fetching configuration for DICOMweb source...")
-        source_config = crud.dicomweb_source.get(db, id=source_id)
+        source_config = crud.crud_dicomweb_source.get(db, id=source_id)
         if not source_config:
-            log.error("Could not find configuration for source ID. Cannot fetch metadata.")
-            return {"status": "error", "message": f"Configuration for source ID {source_id} not found.", "instance_uid": instance_uid, "source_id": source_id}
+            return {
+                "status": "error",
+                "message": f"Configuration for source ID {source_id} not found.",
+                "instance_uid": instance_uid,
+                "source_id": source_id
+                }
 
         source_identifier_for_matching = source_config.name
-        log = log.bind(source_name=source_identifier_for_matching) # Add source name to context
-        log.info("Fetching metadata from source...")
-
+        log = log.bind(source_name=source_identifier_for_matching)
+        
         try:
             client = dicomweb_client
             dicom_metadata = client.retrieve_instance_metadata(
                 config=source_config, study_uid=study_uid, series_uid=series_uid, instance_uid=instance_uid
             )
             if dicom_metadata is None:
-                 log.warning("Metadata not found (or 404). Skipping instance.")
                  db.close()
-                 return {"status": "success", "message": "Instance metadata not found (likely deleted).", "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
-            log.debug("Successfully retrieved metadata.")
+                 return {
+                     "status": "success",
+                     "message": "Instance metadata not found (likely deleted).",
+                     "source": source_identifier_for_matching,
+                     "instance_uid": instance_uid,
+                     "source_id": source_id
+                     }
         except Exception as fetch_exc:
-             log.error("Error fetching metadata", error=str(fetch_exc), exc_info=isinstance(fetch_exc, dicomweb_client.DicomWebClientError))
-             raise fetch_exc # Let celery handle retry
+             raise fetch_exc
 
-        log.debug("Converting JSON metadata to pydicom Dataset...")
         try:
-            # Assume dicom_metadata is the raw dictionary from JSON parsing
             original_ds = pydicom.dataset.Dataset.from_json(dicom_metadata)
-            # Create basic file meta - necessary for some storage backends
             file_meta = pydicom.dataset.FileMetaDataset()
             file_meta.FileMetaInformationVersion = b'\x00\x01'
-            # Extract SOP Class UID safely
             sop_class_uid_data = original_ds.get("SOPClassUID")
-            sop_class_uid_val = getattr(sop_class_uid_data, 'value', ['1.2.840.10008.5.1.4.1.1.2'])[0] # Default to CT Image Storage if missing/malformed
+            sop_class_uid_val = getattr(sop_class_uid_data, 'value', ['1.2.840.10008.5.1.4.1.1.2'])[0]
             file_meta.MediaStorageSOPClassUID = sop_class_uid_val
             file_meta.MediaStorageSOPInstanceUID = instance_uid
-            file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian # Assume default if not present in metadata
+            file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
             file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
             file_meta.ImplementationVersionName = f"pydicom {pydicom.__version__}"
             original_ds.file_meta = file_meta
         except Exception as e:
-            log.error("Failed to convert retrieved DICOMweb JSON metadata to Dataset", error=str(e), exc_info=True)
-            return {"status": "error", "message": f"Failed to parse retrieved metadata: {e}", "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
+            return {
+                "status": "error",
+                "message": f"Failed to parse retrieved metadata: {e}",
+                "source": source_identifier_for_matching,
+                "instance_uid": instance_uid,
+                "source_id": source_id
+                }
 
-        if original_ds is None: # Should not happen if from_json doesn't raise, but check anyway
-             log.error("Dataset object is None after conversion block, cannot proceed.")
-             return {"status": "error", "message": "Dataset creation failed unexpectedly.", "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
+        if original_ds is None:
+             return {
+                 "status": "error",
+                 "message": "Dataset creation failed unexpectedly.",
+                 "source": source_identifier_for_matching,
+                 "instance_uid": instance_uid,
+                 "source_id": source_id
+                 }
 
-        log.debug("Querying active rulesets...")
         active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
         if not active_rulesets:
-             log.info("No active rulesets found. No action needed.")
-             final_status = "success"
-             final_message = "No active rulesets found"
              db.close()
-             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
+             return {
+                 "status": "success",
+                 "message": "No active rulesets found",
+                 "source": source_identifier_for_matching,
+                 "instance_uid": instance_uid,
+                 "source_id": source_id
+                 }
 
-        log.debug("Calling core processing logic...")
         try:
-            modified_ds, applied_rules_info, unique_destination_configs = process_dicom_instance(
+            modified_ds, applied_rules_info, unique_destination_identifier_dicts = process_dicom_instance(
                 original_ds=original_ds,
                 active_rulesets=active_rulesets,
                 source_identifier=source_identifier_for_matching
             )
         except Exception as proc_exc:
-             log.error("Error during core processing logic", error=str(proc_exc), exc_info=True)
              db.close()
-             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
+             return {
+                 "status": "error",
+                 "message": f"Error during rule processing: {proc_exc}",
+                 "source": source_identifier_for_matching,
+                 "instance_uid": instance_uid,
+                 "source_id": source_id
+                 }
 
-        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=[r['name'] for r in applied_rules_info])
+        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=applied_rules_info)
 
         if not applied_rules_info:
-             log.info("No applicable rules matched this source. No actions taken.")
-             final_status = "success"
-             final_message = f"No matching rules found for source '{source_identifier_for_matching}'"
              db.close()
-             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
+             return {
+                 "status": "success",
+                 "message": f"No matching rules found for source '{source_identifier_for_matching}'",
+                 "source": source_identifier_for_matching,
+                 "instance_uid": instance_uid,
+                 "source_id": source_id
+                 }
 
-        log = log.bind(unique_destination_count=len(unique_destination_configs))
+        log = log.bind(unique_destination_count=len(unique_destination_identifier_dicts))
 
-        if not unique_destination_configs:
-            log.info("Rules matched, but no destinations configured.")
-            final_status = "success"
-            final_message = "Rules matched, modifications applied (if any), but no destinations configured"
+        if not unique_destination_identifier_dicts:
             db.close()
-            return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
+            return {
+                "status": "success",
+                "message": "Rules matched, modifications applied (if any), but no destinations configured",
+                "applied_rules": applied_rules_info,
+                "source": source_identifier_for_matching,
+                "instance_uid": instance_uid,
+                "source_id": source_id
+                }
 
         dataset_to_send = modified_ds if modified_ds is not None else original_ds
-        log.info("Processing unique destinations...")
         all_destinations_succeeded = True
-        for i, dest_config in enumerate(unique_destination_configs):
-            dest_log = log.bind(destination_index=i+1, destination_config=dest_config)
-            dest_type = dest_config.get('type','?')
-            dest_id_parts = [f"Dest_{i+1}", dest_type]
-            if dest_type == 'cstore': dest_id_parts.append(dest_config.get('ae_title','?'))
-            elif dest_type == 'filesystem': dest_id_parts.append(dest_config.get('path','?'))
-            dest_id = "_".join(part for part in dest_id_parts if part != '?')
-            dest_log = dest_log.bind(destination_id=dest_id)
+        for i, dest_identifier_dict in enumerate(unique_destination_identifier_dicts):
+            dest_id_from_dict = dest_identifier_dict.get("id")
+            dest_name_from_dict = dest_identifier_dict.get("name", "UnknownName")
+            
+            dest_log = log.bind(
+                destination_index=i+1,
+                destination_id_from_dict=dest_id_from_dict,
+                destination_name_from_dict=dest_name_from_dict
+            )
 
-            dest_log.debug("Attempting destination")
-            try:
-                storage_backend = get_storage_backend(dest_config)
-                filename_context = f"{instance_uid}.dcm"
-
-                store_result = storage_backend.store(
-                    dataset_to_send,
-                    original_filepath=None, # No original file path for DICOMweb
-                    filename_context=filename_context,
-                    source_identifier=source_identifier_for_matching
-                )
-
-                dest_log.info("Destination completed successfully.", store_result=store_result)
-                success_status[dest_id] = {"status": "success", "result": store_result}
-            except StorageBackendError as e:
-                dest_log.error("Failed to store to destination", error=str(e), exc_info=False)
+            if dest_id_from_dict is None:
+                dest_log.error("Destination identifier dict is missing 'id'. Skipping.")
                 all_destinations_succeeded = False
-                success_status[dest_id] = {"status": "error", "message": str(e)}
-                if isinstance(e, RETRYABLE_EXCEPTIONS): raise
+                success_status[f"Dest_{i+1}_Malformed"] = {"status": "error", "message": "Missing ID"}
+                continue
+
+            db_storage_backend_model: Optional[DBStorageBackendConfigModel] = crud.crud_storage_backend_config.get(db, id=dest_id_from_dict)
+
+            if not db_storage_backend_model:
+                dest_log.error("Could not find storage backend config in DB.", target_db_id=dest_id_from_dict)
+                all_destinations_succeeded = False
+                success_status[f"Dest_{i+1}_{dest_name_from_dict}"] = {"status": "error", "message": f"DB config not found for ID {dest_id_from_dict}"}
+                continue
+
+            if not db_storage_backend_model.is_enabled:
+                dest_log.info("Storage backend config is disabled in DB. Skipping.", target_db_id=dest_id_from_dict, name=db_storage_backend_model.name)
+                success_status[f"Dest_{i+1}_{db_storage_backend_model.name}"] = {"status": "skipped_disabled", "message": f"Destination {db_storage_backend_model.name} is disabled."}
+                continue
+
+            actual_storage_config_dict = {}
+
+            try:
+                # 1. Resolve backend_type to a string
+                backend_type_value_from_db_model = db_storage_backend_model.backend_type
+                resolved_type_str: Optional[str] = None
+
+                if isinstance(backend_type_value_from_db_model, str):
+                    resolved_type_str = backend_type_value_from_db_model
+                elif hasattr(backend_type_value_from_db_model, 'value') and isinstance(getattr(backend_type_value_from_db_model, 'value', None), str):
+                    resolved_type_str = backend_type_value_from_db_model.value
+                else:
+                    dest_log.error("DB model 'backend_type' is invalid or not a string/enum.value.",
+                                   raw_backend_type=backend_type_value_from_db_model,
+                                   type_of_raw=type(backend_type_value_from_db_model).__name__)
+                    all_destinations_succeeded = False
+                    success_status[db_storage_backend_model.name] = {"status": "error", "message": "Invalid backend_type format from DB."}
+                    continue 
+
+                if resolved_type_str is None: 
+                    dest_log.error("Failed to resolve backend_type for config dict construction.")
+                    all_destinations_succeeded = False
+                    success_status[db_storage_backend_model.name] = {"status": "error", "message": "Internal error resolving backend_type."}
+                    continue
+                
+                actual_storage_config_dict['type'] = resolved_type_str
+                actual_storage_config_dict['name'] = db_storage_backend_model.name # Common field, might be used by backends
+
+                # 2. Populate type-specific fields by DIRECTLY accessing attributes
+                #    of db_storage_backend_model, which is an instance of the correct subclass.
+                if resolved_type_str == "filesystem":
+                    if isinstance(db_storage_backend_model, FileSystemBackendConfig):
+                        actual_storage_config_dict['path'] = db_storage_backend_model.path
+                    else: # Should not happen if polymorphic loading works and types match
+                        dest_log.error("Type mismatch: expected FileSystemBackendConfig.", model_type=type(db_storage_backend_model).__name__)
+                        all_destinations_succeeded = False; success_status[db_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+                
+                elif resolved_type_str == "gcs":
+                    if isinstance(db_storage_backend_model, GcsBackendConfig):
+                        actual_storage_config_dict['bucket'] = db_storage_backend_model.bucket
+                        actual_storage_config_dict['prefix'] = db_storage_backend_model.prefix
+                    else:
+                        dest_log.error("Type mismatch: expected GcsBackendConfig.", model_type=type(db_storage_backend_model).__name__)
+                        all_destinations_succeeded = False; success_status[db_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+
+                elif resolved_type_str == "cstore":
+                    if isinstance(db_storage_backend_model, CStoreBackendConfig):
+                        actual_storage_config_dict['remote_ae_title'] = db_storage_backend_model.remote_ae_title
+                        actual_storage_config_dict['remote_host'] = db_storage_backend_model.remote_host
+                        actual_storage_config_dict['remote_port'] = db_storage_backend_model.remote_port
+                        actual_storage_config_dict['local_ae_title'] = db_storage_backend_model.local_ae_title
+                        actual_storage_config_dict['tls_enabled'] = db_storage_backend_model.tls_enabled
+                        actual_storage_config_dict['tls_ca_cert_secret_name'] = db_storage_backend_model.tls_ca_cert_secret_name
+                        actual_storage_config_dict['tls_client_cert_secret_name'] = db_storage_backend_model.tls_client_cert_secret_name
+                        actual_storage_config_dict['tls_client_key_secret_name'] = db_storage_backend_model.tls_client_key_secret_name
+                    else:
+                        dest_log.error("Type mismatch: expected CStoreBackendConfig.", model_type=type(db_storage_backend_model).__name__)
+                        all_destinations_succeeded = False; success_status[db_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+
+                elif resolved_type_str == "google_healthcare":
+                    if isinstance(db_storage_backend_model, GoogleHealthcareBackendConfig):
+                        actual_storage_config_dict['gcp_project_id'] = db_storage_backend_model.gcp_project_id
+                        actual_storage_config_dict['gcp_location'] = db_storage_backend_model.gcp_location
+                        actual_storage_config_dict['gcp_dataset_id'] = db_storage_backend_model.gcp_dataset_id
+                        actual_storage_config_dict['gcp_dicom_store_id'] = db_storage_backend_model.gcp_dicom_store_id
+                    else:
+                        dest_log.error("Type mismatch: expected GoogleHealthcareBackendConfig.", model_type=type(db_storage_backend_model).__name__)
+                        all_destinations_succeeded = False; success_status[db_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+                        
+                elif resolved_type_str == "stow_rs":
+                     if isinstance(db_storage_backend_model, StowRsBackendConfig):
+                        actual_storage_config_dict['base_url'] = db_storage_backend_model.base_url
+                     else:
+                        dest_log.error("Type mismatch: expected StowRsBackendConfig.", model_type=type(db_storage_backend_model).__name__)
+                        all_destinations_succeeded = False; success_status[db_model.name] = {"status": "error", "message": "Internal model type mismatch."}; continue
+                else:
+                    dest_log.error("Unknown resolved_type_str for building specific config.", type_val=resolved_type_str)
+                    all_destinations_succeeded = False
+                    success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Unknown type '{resolved_type_str}' for config construction."}
+                    continue
+
+            except AttributeError as attr_err: 
+                dest_log.error("Attribute error building specific config dict from DB model. This means a field expected for the backend type was missing on the model instance.", error=str(attr_err), exc_info=True)
+                all_destinations_succeeded = False
+                success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Attribute error: {attr_err}"}
+                continue
+
+            except Exception as config_build_err:
+                dest_log.error("Generic error building specific config dict from DB model.", error=str(config_build_err), exc_info=True)
+                all_destinations_succeeded = False
+                success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Error building config: {config_build_err}"}
+                continue
+
+            dest_log = dest_log.bind(actual_destination_type=actual_storage_config_dict.get('type','?'))
+            dest_log.debug(f"Attempting destination type: {actual_storage_config_dict.get('type')}")
+            
+            try:
+                storage_backend = get_storage_backend(actual_storage_config_dict)
+                store_result: Any = None
+                if actual_storage_config_dict.get('type') == 'google_healthcare':
+                    if asyncio.iscoroutinefunction(storage_backend.store):
+                        try: 
+                            store_result = asyncio.run(storage_backend.store(dataset_to_send,None,f"{instance_uid}.dcm",source_identifier_for_matching))
+                        except RuntimeError as e: 
+                            raise StorageBackendError(f"Async GHC store error: {e}") from e
+                    else: 
+                        store_result = storage_backend.store(dataset_to_send,None,f"{instance_uid}.dcm",source_identifier_for_matching)
+                else: 
+                    store_result = storage_backend.store(dataset_to_send,None,f"{instance_uid}.dcm",source_identifier_for_matching)
+                
+                success_status[db_storage_backend_model.name] = {"status": "success", "result": store_result}
+            except StorageBackendError as e:
+                all_destinations_succeeded = False
+                success_status[db_storage_backend_model.name] = {"status": "error", "message": str(e)}
+                if any(isinstance(e, exc_type) for exc_type in RETRYABLE_EXCEPTIONS): 
+                    raise
             except Exception as e:
-                 dest_log.error("Unexpected error storing to destination", error=str(e), exc_info=True)
                  all_destinations_succeeded = False
-                 success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
+                 success_status[db_storage_backend_model.name] = {"status": "error", "message": f"Unexpected error: {e}"}
 
         if all_destinations_succeeded:
             final_status = "success"
-            final_message = f"Processed instance and dispatched successfully to {len(unique_destination_configs)} destination(s)."
-
-            # --- Increment Processed Count ---
-            processed_incremented = False
+            final_message = f"Processed and dispatched to {len(unique_destination_identifier_dicts)} destination(s)."
             local_db = None
             try:
-                log.debug("Incrementing processed count for DICOMweb source")
                 local_db = SessionLocal()
-                # Assuming crud.dicomweb_state exists and has the increment method
-                processed_incremented = crud.dicomweb_state.increment_processed_count(db=local_db, source_name=source_identifier_for_matching, count=1)
-                local_db.commit() # Commit after successful increment
-                local_db.close()
+                if crud.dicomweb_state.increment_processed_count(db=local_db, source_name=source_identifier_for_matching, count=1):
+                    local_db.commit()
+                else: 
+                    log.warning("Failed to increment processed count for DICOMweb source.")
             except Exception as e:
-                log.error("DB Error incrementing processed count for DICOMweb source", error=str(e), exc_info=True)
-                if local_db and local_db.is_active:
-                     try: local_db.rollback()
-                     except Exception as rb_e: log.error("Error rolling back DB session during count increment error handling", rollback_error=str(rb_e))
-                     finally: local_db.close()
-
-            if processed_incremented:
-                log.info("Successfully incremented processed count for source.")
-            else:
-                log.warning("Failed to increment processed count for source (perhaps state record missing?).")
-
+                if local_db and local_db.is_active: 
+                    local_db.rollback()
+            finally:
+                if local_db: 
+                    local_db.close()
         else:
-            failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
-            log.warning("Some destinations failed", failed_count=failed_count, total_destinations=len(unique_destination_configs))
+            failed_count = sum(1 for si in success_status.values() if si['status'] == 'error')
             final_status = "partial_failure"
-            final_message = f"Processing complete, but {failed_count} destination(s) failed dispatch."
+            final_message = f"Processing complete, but {failed_count} destination(s) failed."
 
         db.close()
-        return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "destinations": success_status, "source": source_identifier_for_matching, "instance_uid": instance_uid, "source_id": source_id}
-
+        serializable_success_status = {k: ({"status": v["status"], "result": str(v["result"])} if isinstance(v.get("result"), Path) else {"status": v["status"], "result": f"<{type(v.get('result')).__name__}>"} if not isinstance(v.get("result"), (dict, str, int, float, list, bool, type(None))) else v) for k, v in success_status.items()}
+        return {
+            "status": final_status, "message": final_message, "applied_rules": applied_rules_info,
+            "destinations": serializable_success_status, "source": source_identifier_for_matching,
+            "instance_uid": instance_uid, "source_id": source_id
+            }
     except Exception as exc:
-        log.error("Unhandled exception during task execution", error=str(exc), error_type=type(exc).__name__, exc_info=True)
         if db and db.is_active:
-            try: db.rollback()
-            except Exception as rb_e: logger.error("Error rolling back DB session in main exception handler", rollback_error=str(rb_e), task_id=task_id)
-            finally: db.close()
-        if isinstance(exc, RETRYABLE_EXCEPTIONS):
-             log.info("Re-raising retryable exception", error_type=type(exc).__name__)
-             raise
+            try: 
+                db.rollback()
+            except Exception as rb_e: 
+                logger.error("DB rollback error.", task_id=task_id, rb_error=str(rb_e))
+            finally: 
+                db.close()
+        if any(isinstance(exc, exc_type) for exc_type in RETRYABLE_EXCEPTIONS): 
+            raise
         else:
-             final_status = "error"
-             final_message = f"Fatal error during processing: {exc!r}"
-             return {"status": final_status, "message": final_message, "source_id": source_id, "instance_uid": instance_uid}
+             return {"status": "error", "message": f"Fatal error: {exc!r}", "source_id": source_id, "instance_uid": instance_uid}
     finally:
-        if db and db.is_active:
-            logger.warning("Closing database session in finally block (may indicate early exit or unclosed session).", task_id=task_id)
+        if db and db.is_active: 
             db.close()
-        log.info("Finished task processing.", final_status=final_status, final_message=final_message)
-
-
-
-@shared_task(bind=True, name="process_stow_instance_task",
-             acks_late=True,
-             max_retries=settings.CELERY_TASK_MAX_RETRIES,
-             default_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
-             autoretry_for=RETRYABLE_EXCEPTIONS,
-             retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
-def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional[str] = None):
-    """Celery task to process DICOM instance received via STOW-RS with structured logging."""
-    task_id = self.request.id
-    temp_filepath = Path(temp_filepath_str)
-    source_identifier_for_matching = f"STOW_RS_FROM_{source_ip or 'UnknownIP'}"
-
-    # Bind initial context
-    log = logger.bind(
-        task_id=task_id,
-        task_name=self.name,
-        temp_filepath=temp_filepath_str,
-        source_ip=source_ip,
-        source_identifier=source_identifier_for_matching,
-        source_type=ProcessedStudySourceType.STOW_RS.value # Assuming enum exists
-    )
-
-    log.info("Received STOW-RS request.")
-
-    if not temp_filepath.is_file():
-        log.error("Temporary file not found. Cannot process.")
-        return {"status": "error", "message": "Temporary file not found", "filepath": temp_filepath_str, "source": source_identifier_for_matching}
-
-    db: Optional[Session] = None
-    original_ds: Optional[pydicom.Dataset] = None
-    final_status = "unknown"
-    final_message = "Task did not complete."
-    success_status = {}
-    instance_uid_str = "Unknown"
-
-    try:
-        db = SessionLocal()
-
-        log.debug("Reading DICOM file from temporary path...")
-        try:
-            original_ds = pydicom.dcmread(str(temp_filepath), force=True)
-            instance_uid_str = getattr(original_ds, 'SOPInstanceUID', 'Unknown')
-            log = log.bind(instance_uid=instance_uid_str) # Add instance UID to context
-            log.debug("Successfully read temp file.")
-        except InvalidDicomError as e:
-            log.error("Invalid DICOM file format received via STOW-RS", error=str(e))
-            # No move_to_error for temp files, just report error
-            return {"status": "error", "message": f"Invalid DICOM format: {e}", "filepath": temp_filepath_str, "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-        except Exception as read_exc:
-            log.error("Error reading DICOM temp file", error=str(read_exc), exc_info=True)
-            raise read_exc # Let celery handle retry
-
-        log.debug("Querying active rulesets...")
-        active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
-        if not active_rulesets:
-             log.info("No active rulesets found. No action needed.")
-             final_status = "success"
-             final_message = "No active rulesets found"
-             db.close()
-             # Clean up temp file before returning
-             if temp_filepath and temp_filepath.exists():
-                 try: os.remove(temp_filepath); log.debug("Removed temp file (no active rulesets).")
-                 except OSError as e: log.error("Failed to remove temp file (no active rulesets)", error=str(e))
-             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-
-        log.debug("Calling core processing logic...")
-        try:
-            modified_ds, applied_rules_info, unique_destination_configs = process_dicom_instance(
-                original_ds=original_ds,
-                active_rulesets=active_rulesets,
-                source_identifier=source_identifier_for_matching
-            )
-        except Exception as proc_exc:
-             log.error("Error during core processing logic for STOW instance", error=str(proc_exc), exc_info=True)
-             db.close()
-             # Clean up temp file before returning
-             if temp_filepath and temp_filepath.exists():
-                 try: os.remove(temp_filepath); log.debug("Removed temp file (processing error).")
-                 except OSError as e: log.error("Failed to remove temp file (processing error)", error=str(e))
-             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-
-        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=[r['name'] for r in applied_rules_info])
-
-        if not applied_rules_info:
-             log.info("No applicable rules matched this source. No actions taken.")
-             final_status = "success"
-             final_message = "No matching rules found for this source"
-             db.close()
-             # Clean up temp file before returning
-             if temp_filepath and temp_filepath.exists():
-                 try: os.remove(temp_filepath); log.debug("Removed temp file (no matching rules).")
-                 except OSError as e: log.error("Failed to remove temp file (no matching rules)", error=str(e))
-             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-
-        log = log.bind(unique_destination_count=len(unique_destination_configs))
-
-        if not unique_destination_configs:
-            log.info("Rules matched, but no destinations configured.")
-            final_status = "success"
-            final_message = "Rules matched, modifications applied (if any), but no destinations configured"
-            db.close()
-            # Clean up temp file before returning
-            if temp_filepath and temp_filepath.exists():
-                 try: os.remove(temp_filepath); log.debug("Removed temp file (no destinations).")
-                 except OSError as e: log.error("Failed to remove temp file (no destinations)", error=str(e))
-            return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-
-        dataset_to_send = modified_ds if modified_ds is not None else original_ds
-        log.info("Processing unique destinations...")
-        all_destinations_succeeded = True
-        for i, dest_config in enumerate(unique_destination_configs):
-            dest_log = log.bind(destination_index=i+1, destination_config=dest_config)
-            dest_type = dest_config.get('type','?')
-            dest_id_parts = [f"Dest_{i+1}", dest_type]
-            if dest_type == 'cstore': dest_id_parts.append(dest_config.get('ae_title','?'))
-            elif dest_type == 'filesystem': dest_id_parts.append(dest_config.get('path','?'))
-            dest_id = "_".join(part for part in dest_id_parts if part != '?')
-            dest_log = dest_log.bind(destination_id=dest_id)
-
-            dest_log.debug("Attempting destination")
-            try:
-                storage_backend = get_storage_backend(dest_config)
-                filename_context = f"{instance_uid_str}.dcm"
-
-                # Pass temp_filepath as original_filepath for storage backends that might use it (like filesystem copy)
-                store_result = storage_backend.store(
-                    dataset_to_send,
-                    original_filepath=temp_filepath,
-                    filename_context=filename_context,
-                    source_identifier=source_identifier_for_matching
-                )
-
-                dest_log.info("Destination completed successfully.", store_result=store_result)
-                success_status[dest_id] = {"status": "success", "result": store_result}
-            except StorageBackendError as e:
-                dest_log.error("Failed to store STOW instance to destination", error=str(e), exc_info=False)
-                all_destinations_succeeded = False
-                success_status[dest_id] = {"status": "error", "message": str(e)}
-                if isinstance(e, RETRYABLE_EXCEPTIONS): raise
-            except Exception as e:
-                 dest_log.error("Unexpected error storing STOW instance to destination", error=str(e), exc_info=True)
-                 all_destinations_succeeded = False
-                 success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
-
-        if all_destinations_succeeded:
-            final_status = "success"
-            final_message = f"Processed STOW instance and stored successfully to {len(unique_destination_configs)} destination(s)."
-            log.info("STOW instance processed successfully. Metrics increment TBD.") # Placeholder for STOW metrics
-        else:
-            failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
-            log.warning("Some destinations failed for STOW instance", failed_count=failed_count, total_destinations=len(unique_destination_configs))
-            final_status = "partial_failure"
-            final_message = f"Processing complete for STOW instance, but {failed_count} destination(s) failed."
-
-        db.close()
-        return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "destinations": success_status, "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-
-    except Exception as exc:
-        log.error("Unhandled exception during STOW task execution", error=str(exc), error_type=type(exc).__name__, exc_info=True)
-        if db and db.is_active:
-            try: db.rollback()
-            except Exception as rb_e: logger.error("Error rolling back DB session in STOW main exception handler", rollback_error=str(rb_e), task_id=task_id)
-            finally: db.close()
-        if isinstance(exc, RETRYABLE_EXCEPTIONS):
-             log.info("Re-raising retryable exception", error_type=type(exc).__name__)
-             raise
-        else:
-            final_status = "error"
-            final_message = f"Fatal error during processing: {exc!r}"
-            return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "instance_uid": instance_uid_str}
-    finally:
-        # --- Crucial: Clean up the temporary file ---
-        if temp_filepath and temp_filepath.exists():
-            try:
-                os.remove(temp_filepath)
-                log.info("Removed temporary STOW-RS file.")
-            except OSError as e:
-                # Use base logger as 'log' context might be incomplete if error happened early
-                logger.critical("FAILED TO REMOVE temporary STOW-RS file", temp_filepath=str(temp_filepath), error=str(e), task_id=task_id)
-
-        if db and db.is_active:
-            logger.warning("Closing database session in STOW finally block (may indicate early exit or unclosed session).", task_id=task_id)
-            db.close()
-
-        log.info("Finished processing STOW instance.", final_status=final_status, final_message=final_message)
+        log.info("Finished task.", final_status=final_status)
 
 @shared_task(bind=True, name="process_google_healthcare_metadata_task",
              acks_late=True,
@@ -763,225 +909,448 @@ def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional
              autoretry_for=RETRYABLE_EXCEPTIONS,
              retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
 async def process_google_healthcare_metadata_task(self, source_id: int, study_uid: str):
-    """
-    Celery task to process DICOM metadata retrieved from a Google Healthcare source.
-    Fetches metadata for one instance, converts, and processes via rules.
-    """
     task_id = self.request.id
-    log = logger.bind(
-        task_id=task_id,
-        task_name=self.name,
-        source_id=source_id,
-        study_uid=study_uid,
-        source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE.value
-    )
-    log.info("Received request to process Google Healthcare study metadata.")
+    log = logger.bind(task_id=task_id, task_name=self.name, source_id=source_id, study_uid=study_uid, source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE.value)
 
     db: Optional[Session] = None
-    final_status = "unknown"
-    final_message = "Task did not complete."
-    success_status = {}
-    original_ds: Optional[pydicom.Dataset] = None
-    source_identifier_for_matching: str = f"GoogleHealthcare_{source_id}" # Fallback
-    instance_uid_str: str = "Unknown" # Keep track of the instance we actually process
+    final_status = "unknown"; final_message = "Task did not complete."
+    success_status = {}; original_ds: Optional[pydicom.Dataset] = None
+    source_identifier_for_matching: str = f"GoogleHealthcare_{source_id}"
+    instance_uid_str: str = "Unknown"; applied_rules_info: List[str] = []
 
     try:
-        log.debug("Opening database session...")
         db = SessionLocal()
-        log.debug("Fetching configuration for Google Healthcare source...")
-        source_config = crud.google_healthcare_source.get(db, id=source_id)
+        source_config_model = crud.google_healthcare_source.get(db, id=source_id)
+        if not source_config_model:
+            return {"status": "error", "message": f"Config for source ID {source_id} not found.", "study_uid": study_uid, "source_id": source_id}
 
-        if not source_config:
-            log.error("Could not find configuration for source ID. Cannot fetch metadata.")
-            return {"status": "error", "message": f"Configuration for source ID {source_id} not found.", "study_uid": study_uid, "source_id": source_id}
-
-        source_identifier_for_matching = source_config.name
-        log = log.bind(source_name=source_identifier_for_matching) # Add source name to context
-        log.info("Fetching metadata from source...")
+        source_identifier_for_matching = source_config_model.name
+        log = log.bind(source_name=source_identifier_for_matching)
 
         ghc_backend: Optional[GoogleHealthcareDicomStoreStorage] = None
-        dicom_metadata_list: Optional[List[Dict[str, Any]]] = None
+        dicom_metadata: Optional[Dict[str, Any]] = None
         try:
-            # Instantiate and initialize the backend
-            backend_config_dict = { # Reconstruct config dict
-                "type": "google_healthcare", "name": f"Processor_{source_config.name}",
-                "gcp_project_id": source_config.gcp_project_id, "gcp_location": source_config.gcp_location,
-                "gcp_dataset_id": source_config.gcp_dataset_id, "gcp_dicom_store_id": source_config.gcp_dicom_store_id,
+            backend_config_dict = {
+                "type": "google_healthcare", "name": f"Processor_{source_config_model.name}",
+                "gcp_project_id": source_config_model.gcp_project_id, "gcp_location": source_config_model.gcp_location,
+                "gcp_dataset_id": source_config_model.gcp_dataset_id, "gcp_dicom_store_id": source_config_model.gcp_dicom_store_id,
             }
             ghc_backend = GoogleHealthcareDicomStoreStorage(config=backend_config_dict)
             await ghc_backend.initialize_client()
-
-            # Fetch *instance* metadata - let's grab the first instance of the first series for simplicity
-            # You might need more robust logic depending on requirements
             series_list = await ghc_backend.search_series(study_instance_uid=study_uid, limit=1)
             if not series_list:
-                log.warning("No series found for study. Cannot fetch instance metadata.", study_uid=study_uid)
                 db.close()
-                # Don't mark study as processed here, maybe it appears later? Or was deleted?
-                return {"status": "success", "message": "No series found for study.", "source": source_identifier_for_matching, "study_uid": study_uid, "source_id": source_id}
-
+                return {"status": "success", "message": "No series found.", "source": source_identifier_for_matching, "study_uid": study_uid, "source_id": source_id}
+            
             first_series_uid = series_list[0].get("0020000E", {}).get("Value", [None])[0]
             if not first_series_uid:
-                log.error("Could not extract SeriesInstanceUID from fetched series data.", series_data=series_list[0])
                 db.close()
-                return {"status": "error", "message": "Failed to get SeriesInstanceUID.", "source": source_identifier_for_matching, "study_uid": study_uid, "source_id": source_id}
+                return {"status": "error", "message": "Failed to get SeriesUID.", "source": source_identifier_for_matching, "study_uid": study_uid, "source_id": source_id}
 
             log = log.bind(series_uid=first_series_uid)
-            log.debug("Fetching metadata for first instance of first series...")
-
-            dicom_metadata_list = await ghc_backend.search_instances(
-                 study_instance_uid=study_uid, series_instance_uid=first_series_uid, limit=1
-            )
-
+            dicom_metadata_list = await ghc_backend.search_instances(study_instance_uid=study_uid, series_instance_uid=first_series_uid, limit=1)
             if not dicom_metadata_list:
-                 log.warning("Instance metadata not found (or 404). Skipping study processing.", series_uid=first_series_uid)
                  db.close()
-                 # Already logged as processed in poller, just return success
-                 return {"status": "success", "message": "Instance metadata not found (likely deleted/empty series).", "source": source_identifier_for_matching, "study_uid": study_uid, "series_uid":first_series_uid, "source_id": source_id}
-
-            dicom_metadata = dicom_metadata_list[0] # Get the first instance's metadata
+                 return {"status": "success", "message": "Instance metadata not found.", "source": source_identifier_for_matching, "study_uid": study_uid, "series_uid":first_series_uid, "source_id": source_id}
+            
+            dicom_metadata = dicom_metadata_list[0]
             instance_uid_str = dicom_metadata.get("00080018", {}).get("Value", ["Unknown"])[0]
-            log = log.bind(instance_uid=instance_uid_str) # Add actual instance UID
-            log.debug("Successfully retrieved instance metadata.")
+            log = log.bind(instance_uid=instance_uid_str)
+        except Exception as fetch_exc: 
+            raise fetch_exc
 
-        except Exception as fetch_exc:
-             log.error("Error fetching metadata from Google Healthcare", error=str(fetch_exc), exc_info=True)
-             # Don't rollback processed log here, let retry handle it or fail permanently
-             raise fetch_exc # Let celery handle retry
-
-        log.debug("Converting JSON metadata to pydicom Dataset...")
         try:
             original_ds = pydicom.dataset.Dataset.from_json(dicom_metadata)
-            file_meta = pydicom.dataset.FileMetaDataset()
-            file_meta.FileMetaInformationVersion = b'\x00\x01'
-            sop_class_uid_data = original_ds.get("SOPClassUID")
-            sop_class_uid_val = getattr(sop_class_uid_data, 'value', ['1.2.840.10008.5.1.4.1.1.2'])[0]
-            file_meta.MediaStorageSOPClassUID = sop_class_uid_val
-            file_meta.MediaStorageSOPInstanceUID = instance_uid_str # Use actual UID
-            file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
-            file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
-            file_meta.ImplementationVersionName = f"pydicom {pydicom.__version__}"
-            original_ds.file_meta = file_meta
-        except Exception as e:
-            log.error("Failed to convert retrieved GHC JSON metadata to Dataset", error=str(e), exc_info=True)
-            # Don't rollback processed log, this is a processing error for this instance
+            fm = pydicom.dataset.FileMetaDataset()
+            fm.FileMetaInformationVersion=b'\x00\x01'
+            fm.MediaStorageSOPClassUID=getattr(original_ds.get("SOPClassUID"),'value',['1.2.840.10008.5.1.4.1.1.2'])[0]
+            fm.MediaStorageSOPInstanceUID=instance_uid_str
+            fm.TransferSyntaxUID=pydicom.uid.ImplicitVRLittleEndian
+            fm.ImplementationClassUID=pydicom.uid.PYDICOM_IMPLEMENTATION_UID
+            fm.ImplementationVersionName=f"pydicom {pydicom.__version__}"
+            original_ds.file_meta = fm
+        except Exception as e: 
             db.close()
-            return {"status": "error", "message": f"Failed to parse retrieved metadata: {e}", "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+            return {"status":"error","message":f"Failed to parse metadata: {e}","source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
+        
+        if original_ds is None: 
+            db.close()
+            return {"status":"error","message":"Dataset creation failed.","source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
 
-        if original_ds is None:
-             log.error("Dataset object is None after conversion block, cannot proceed.")
-             db.close()
-             return {"status": "error", "message": "Dataset creation failed unexpectedly.", "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
-
-        log.debug("Querying active rulesets...")
         active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
-        if not active_rulesets:
-             log.info("No active rulesets found. No action needed.")
-             final_status = "success"
-             final_message = "No active rulesets found"
-             db.close()
-             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
-
-        log.debug("Calling core processing logic...")
-        try:
-            modified_ds, applied_rules_info, unique_destination_configs = process_dicom_instance(
-                original_ds=original_ds,
-                active_rulesets=active_rulesets,
-                source_identifier=source_identifier_for_matching
-            )
-        except Exception as proc_exc:
-             log.error("Error during core processing logic", error=str(proc_exc), exc_info=True)
-             db.close()
-             # Don't rollback processed log, just report processing error
-             return {"status": "error", "message": f"Error during rule processing: {proc_exc}", "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
-
-        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=[r['name'] for r in applied_rules_info])
-
-        if not applied_rules_info:
-             log.info("No applicable rules matched this source. No actions taken.")
-             final_status = "success"
-             final_message = f"No matching rules found for source '{source_identifier_for_matching}'"
-             db.close()
-             return {"status": final_status, "message": final_message, "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
-
-        log = log.bind(unique_destination_count=len(unique_destination_configs))
-
-        if not unique_destination_configs:
-            log.info("Rules matched, but no destinations configured.")
-            final_status = "success"
-            final_message = "Rules matched, modifications applied (if any), but no destinations configured"
+        if not active_rulesets: 
             db.close()
-            return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
+            return {"status":"success","message":"No active rulesets.","source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
+
+        try: 
+            modified_ds, applied_rules_info, unique_destination_identifier_dicts = process_dicom_instance(original_ds,active_rulesets,source_identifier_for_matching)
+        except Exception as proc_exc: 
+            db.close()
+            return {"status":"error","message":f"Rule processing error: {proc_exc}","source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
+
+        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=applied_rules_info)
+        if not applied_rules_info: 
+            db.close()
+            return {"status":"success","message":f"No matching rules for '{source_identifier_for_matching}'.","source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
+        
+        log = log.bind(unique_destination_count=len(unique_destination_identifier_dicts))
+        if not unique_destination_identifier_dicts: 
+            db.close()
+            return {"status":"success","message":"Rules matched, no destinations.","applied_rules":applied_rules_info,"source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
 
         dataset_to_send = modified_ds if modified_ds is not None else original_ds
-        log.info("Processing unique destinations...")
         all_destinations_succeeded = True
-        # --- DESTINATION LOOP (same as process_dicomweb_metadata_task) ---
-        for i, dest_config in enumerate(unique_destination_configs):
-            dest_log = log.bind(destination_index=i+1, destination_config=dest_config)
-            dest_type = dest_config.get('type','?')
-            dest_id_parts = [f"Dest_{i+1}", dest_type]
-            if dest_type == 'cstore': dest_id_parts.append(dest_config.get('ae_title','?'))
-            elif dest_type == 'filesystem': dest_id_parts.append(dest_config.get('path','?'))
-            dest_id = "_".join(part for part in dest_id_parts if part != '?')
-            dest_log = dest_log.bind(destination_id=dest_id)
-
-            dest_log.debug("Attempting destination")
-            try:
-                storage_backend = get_storage_backend(dest_config)
-                # Re-use actual instance UID if available, otherwise fallback
-                filename_context = f"{instance_uid_str or study_uid}.dcm"
-
-                # For GHC metadata task, we don't have an original file path
-                store_result = await storage_backend.store( # Use await if store method is async
-                    dataset_to_send,
-                    original_filepath=None,
-                    filename_context=filename_context,
-                    source_identifier=source_identifier_for_matching
-                )
-
-                # Handle async store result if needed
-                dest_log.info("Destination completed successfully.", store_result=store_result)
-                success_status[dest_id] = {"status": "success", "result": store_result}
-            except StorageBackendError as e:
-                dest_log.error("Failed to store to destination", error=str(e), exc_info=False)
+        
+        destination_tasks = []
+        destination_full_configs_for_tasks = []
+        for i, dest_identifier_dict in enumerate(unique_destination_identifier_dicts):
+            dest_id = dest_identifier_dict.get("id")
+            dest_name = dest_identifier_dict.get("name", "Unknown")
+            tdl = log.bind(dest_idx=i+1, dest_id=dest_id, dest_name=dest_name) # temp dest logger
+            
+            if dest_id is None: 
+                tdl.error("Dest ID missing.")
                 all_destinations_succeeded = False
-                success_status[dest_id] = {"status": "error", "message": str(e)}
-                if isinstance(e, RETRYABLE_EXCEPTIONS): raise
-            except Exception as e:
-                 dest_log.error("Unexpected error storing to destination", error=str(e), exc_info=True)
-                 all_destinations_succeeded = False
-                 success_status[dest_id] = {"status": "error", "message": f"Unexpected error: {e}"}
-        # --- END DESTINATION LOOP ---
+                success_status[f"Dest_{i+1}_Malformed"]={"status":"error","message":"Missing ID"}
+                continue
+            
+            db_model = crud.crud_storage_backend_config.get(db,id=dest_id)
+            if not db_model: 
+                tdl.error("DB config not found.")
+                all_destinations_succeeded = False
+                success_status[f"Dest_{i+1}_{dest_name}"]={"status":"error","message":f"DB config ID {dest_id} not found"}
+                continue
+            if not db_model.is_enabled: 
+                tdl.info("Dest disabled in DB.")
+                success_status[f"Dest_{i+1}_{db_model.name}"]={"status":"skipped_disabled","message":"Disabled."}
+                continue
 
-        if all_destinations_succeeded:
-            final_status = "success"
-            final_message = f"Processed GHC metadata and dispatched successfully to {len(unique_destination_configs)} destination(s)."
-            # Note: Processed count increment is not done here, only in poller after dispatch.
-        else:
-            failed_count = sum(1 for status in success_status.values() if status['status'] == 'error')
-            log.warning("Some destinations failed for GHC metadata task", failed_count=failed_count, total_destinations=len(unique_destination_configs))
-            final_status = "partial_failure"
-            final_message = f"Processing complete for GHC metadata, but {failed_count} destination(s) failed dispatch."
+            cfg_dict = {}
+            try:
+                raw_type = db_model.backend_type
+                resolved_type:Optional[str]=None
+                if isinstance(raw_type,str): 
+                    resolved_type=raw_type
+                elif hasattr(raw_type,'value') and isinstance(getattr(raw_type,'value',None),str): 
+                    resolved_type=raw_type.value
+                else: 
+                    tdl.error("Invalid DB backend_type.", raw=raw_type)
+                    all_destinations_succeeded=False
+                    success_status[db_model.name]={"status":"error","message":"Invalid DB type."}
+                    continue
+                
+                if resolved_type is None: 
+                    tdl.error("Failed resolve backend_type.")
+                    all_destinations_succeeded=False
+                    success_status[db_model.name]={"status":"error","message":"Resolve type error."}
+                    continue
+                
+                cfg_dict['type']=resolved_type
+                if isinstance(db_model.config,dict): 
+                    cfg_dict.update(db_model.config)
+                    cfg_dict['name']=db_model.name # Name needed for GHC backend init maybe?
+                else: 
+                    tdl.error("DB config field not dict.",type=type(db_model.config).__name__)
+                    all_destinations_succeeded=False
+                    success_status[db_model.name]={"status":"error","message":"DB config not dict."}
+                    continue
+                
+                destination_full_configs_for_tasks.append(cfg_dict)
+            except Exception as cb_err: 
+                tdl.error("Failed build storage config.", error=str(cb_err),exc_info=True)
+                all_destinations_succeeded=False
+                success_status[db_model.name]={"status":"error","message":f"Build error: {cb_err}"}
+                continue
 
+        for full_cfg in destination_full_configs_for_tasks:
+            be = get_storage_backend(full_cfg)
+            fname_ctx = f"{instance_uid_str or study_uid}.dcm"
+            destination_tasks.append(be.store(dataset_to_send,None,fname_ctx,source_identifier_for_matching))
+        
+        task_results = []
+        if destination_tasks: 
+            task_results = await asyncio.gather(*destination_tasks, return_exceptions=True)
+        elif not all_destinations_succeeded: 
+            log.warning("No dest tasks due to prior errors.")
+        else: 
+            log.info("No active/valid dest tasks for GHC metadata.")
+
+        for i, res_or_exc in enumerate(task_results):
+            cur_cfg = destination_full_configs_for_tasks[i]
+            name_log = cur_cfg.get("name",f"Dest_{i+1}")
+            dl = log.bind(dest_idx=i+1, dest_name=name_log, dest_type=cur_cfg.get('type')) # dest logger
+            
+            if isinstance(res_or_exc, Exception):
+                 err=res_or_exc
+                 dl.error("Failed to store",error=str(err),exc_info=isinstance(err,StorageBackendError))
+                 all_destinations_succeeded=False
+                 success_status[name_log]={"status":"error","message":str(err)}
+                 if any(isinstance(err,et) for et in RETRYABLE_EXCEPTIONS): 
+                     raise err
+            else:
+                 res=res_or_exc
+                 if res=="duplicate": 
+                     success_status[name_log]={"status":"duplicate","result":res}
+                 else: 
+                     success_status[name_log]={"status":"success","result":res}
+        
+        if all_destinations_succeeded and not unique_destination_identifier_dicts and not destination_tasks and not success_status:
+            final_status="success"
+            final_message="Processed GHC metadata. All dests skipped."
+        if all_destinations_succeeded and destination_tasks:
+            final_status="success"
+            final_message=f"Processed GHC metadata and dispatched to {len(destination_tasks)} dests."
+        elif not all_destinations_succeeded:
+            fc = sum(1 for s in success_status.values() if s['status']=='error')
+            final_status="partial_failure"
+            final_message=f"Processing GHC metadata, {fc} dest(s) failed."
+        
         db.close()
-        return {"status": final_status, "message": final_message, "applied_rules": [r['name'] for r in applied_rules_info], "destinations": success_status, "source": source_identifier_for_matching, "study_uid": study_uid, "instance_uid": instance_uid_str, "source_id": source_id}
-
+        serializable_status = {k: ({"status":v["status"],"result":str(v["result"])} if isinstance(v.get("result"),Path) else {"status":v["status"],"result":f"<{type(v.get('result')).__name__}>"} if not isinstance(v.get("result"),(dict,str,int,float,list,bool,type(None))) else v) for k,v in success_status.items()}
+        return {"status":final_status,"message":final_message,"applied_rules":applied_rules_info,"destinations":serializable_status,"source":source_identifier_for_matching,"study_uid":study_uid,"instance_uid":instance_uid_str,"source_id":source_id}
     except Exception as exc:
-        log.error("Unhandled exception during GHC metadata task execution", error=str(exc), error_type=type(exc).__name__, exc_info=True)
         if db and db.is_active:
-            try: db.rollback() # Rollback potentially failed processed log commit if error occurred after
-            except Exception as rb_e: logger.error("Error rolling back DB session in GHC metadata main exception handler", rollback_error=str(rb_e), task_id=task_id)
-            finally: db.close()
-        if isinstance(exc, RETRYABLE_EXCEPTIONS):
-             log.info("Re-raising retryable exception", error_type=type(exc).__name__)
-             raise
-        else:
-            final_status = "error"
-            final_message = f"Fatal error during GHC metadata processing: {exc!r}"
-            return {"status": final_status, "message": final_message, "source_id": source_id, "study_uid": study_uid, "instance_uid": instance_uid_str} # Include instance_uid if known
+            try: 
+                db.rollback()
+            except Exception as rb_e: 
+                logger.error("DB rollback error.", task_id=task_id, rb_error=str(rb_e))
+            finally: 
+                db.close()
+        if any(isinstance(exc,et) for et in RETRYABLE_EXCEPTIONS): 
+            raise
+        else: 
+            return {"status":"error","message":f"Fatal error: {exc!r}","source_id":source_id,"study_uid":study_uid,"instance_uid":instance_uid_str}
     finally:
-        if db and db.is_active:
-            logger.warning("Closing database session in GHC metadata finally block (may indicate early exit or unclosed session).", task_id=task_id)
+        if db and db.is_active: 
             db.close()
-        log.info("Finished GHC metadata task processing.", final_status=final_status, final_message=final_message)
+        log.info("Finished GHC task.", final_status=final_status)
+
+@shared_task(bind=True, name="process_stow_instance_task",
+             acks_late=True,
+             max_retries=settings.CELERY_TASK_MAX_RETRIES,
+             default_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
+             autoretry_for=RETRYABLE_EXCEPTIONS,
+             retry_backoff=True, retry_backoff_max=600, retry_jitter=True)
+def process_stow_instance_task(self, temp_filepath_str: str, source_ip: Optional[str] = None):
+    task_id = self.request.id
+    temp_filepath = Path(temp_filepath_str)
+    source_identifier_for_matching = f"STOW_RS_FROM_{source_ip or 'UnknownIP'}"
+    log = logger.bind(task_id=task_id, task_name=self.name, temp_filepath=temp_filepath_str, source_ip=source_ip, source_identifier=source_identifier_for_matching, source_type=ProcessedStudySourceType.STOW_RS.value)
+
+    db: Optional[Session] = None
+    original_ds: Optional[pydicom.Dataset] = None
+    final_status = "unknown"
+    final_message = "Task did not complete."
+    success_status = {}
+    instance_uid_str = "Unknown"
+    applied_rules_info: List[str] = []
+
+    try:
+        db = SessionLocal()
+        try:
+            original_ds = pydicom.dcmread(str(temp_filepath), force=True)
+            instance_uid_str = getattr(original_ds, 'SOPInstanceUID', 'Unknown')
+            log = log.bind(instance_uid=instance_uid_str)
+        except InvalidDicomError as e: 
+            return {"status":"error","message":f"Invalid DICOM: {e}","filepath":temp_filepath_str,"source":source_identifier_for_matching,"instance_uid":instance_uid_str}
+        except Exception as read_exc: 
+            raise read_exc
+
+        active_rulesets: List[models.RuleSet] = crud.ruleset.get_active_ordered(db)
+        if not active_rulesets:
+             final_status="success"
+             final_message="No active rulesets"
+             db.close()
+             if temp_filepath.exists(): 
+                 try: 
+                     os.remove(temp_filepath) 
+                 except OSError as e: 
+                     log.error("Failed to remove temp (no rules).",e=str(e))
+             return {"status":final_status,"message":final_message,"source":source_identifier_for_matching,"instance_uid":instance_uid_str}
+        
+        try: 
+            modified_ds, applied_rules_info, unique_destination_identifier_dicts = process_dicom_instance(original_ds,active_rulesets,source_identifier_for_matching)
+        except Exception as proc_exc:
+             db.close()
+             if temp_filepath.exists(): 
+                 try: 
+                     os.remove(temp_filepath) 
+                 except OSError as e: 
+                     log.error("Failed to remove temp (proc error).",e=str(e))
+             return {"status":"error","message":f"Rule processing error: {proc_exc}","source":source_identifier_for_matching,"instance_uid":instance_uid_str}
+
+        log = log.bind(applied_rules_count=len(applied_rules_info), applied_rules=applied_rules_info)
+        if not applied_rules_info:
+             final_status="success"
+             final_message="No matching rules."
+             db.close()
+             if temp_filepath.exists(): 
+                 try: 
+                     os.remove(temp_filepath) 
+                 except OSError as e: 
+                     log.error("Failed to remove temp (no match).",e=str(e))
+             return {"status":final_status,"message":final_message,"source":source_identifier_for_matching,"instance_uid":instance_uid_str}
+
+        log = log.bind(unique_destination_count=len(unique_destination_identifier_dicts))
+        if not unique_destination_identifier_dicts:
+            final_status="success"
+            final_message="Rules matched, no destinations."
+            db.close()
+            if temp_filepath.exists(): 
+                try: 
+                    os.remove(temp_filepath) 
+                except OSError as e: 
+                    log.error("Failed to remove temp (no dest).",e=str(e))
+            return {"status":final_status,"message":final_message,"applied_rules":applied_rules_info,"source":source_identifier_for_matching,"instance_uid":instance_uid_str}
+
+        dataset_to_send = modified_ds if modified_ds is not None else original_ds
+        all_destinations_succeeded = True
+        for i, dest_identifier_dict in enumerate(unique_destination_identifier_dicts):
+            dest_id = dest_identifier_dict.get("id")
+            dest_name = dest_identifier_dict.get("name", "Unknown")
+            dl = log.bind(dest_idx=i+1, dest_id=dest_id, dest_name=dest_name) # dest logger
+            
+            if dest_id is None: 
+                dl.error("Dest ID missing.")
+                all_destinations_succeeded = False
+                success_status[f"D_{i+1}_Malformed"] = {"status":"error","message":"Missing ID"}
+                continue
+            
+            db_model = crud.crud_storage_backend_config.get(db,id=dest_id)
+            if not db_model: 
+                dl.error("DB config not found.")
+                all_destinations_succeeded = False
+                success_status[f"D_{i+1}_{dest_name}"] = {"status":"error","message":f"DB config ID {dest_id} not found"}
+                continue
+            if not db_model.is_enabled: 
+                dl.info("Dest disabled.")
+                success_status[f"D_{i+1}_{db_model.name}"] = {"status":"skipped_disabled","message":"Disabled."}
+                continue
+
+            cfg_dict = {}
+            try:
+                raw_type = db_model.backend_type
+                resolved_type:Optional[str]=None
+                if isinstance(raw_type,str): 
+                    resolved_type = raw_type
+                elif hasattr(raw_type,'value') and isinstance(getattr(raw_type,'value',None),str): 
+                    resolved_type = raw_type.value
+                else: 
+                    dl.error("Invalid DB backend_type.", raw=raw_type)
+                    all_destinations_succeeded = False
+                    success_status[db_model.name] = {"status":"error","message":"Invalid DB type."}
+                    continue
+                
+                if resolved_type is None: 
+                    dl.error("Failed resolve backend_type.")
+                    all_destinations_succeeded = False
+                    success_status[db_model.name] = {"status":"error","message":"Resolve type error."}
+                    continue
+                
+                cfg_dict['type'] = resolved_type
+                if isinstance(db_model.config,dict): 
+                    cfg_dict.update(db_model.config)
+                    # Add name if GHC? Other backends might need it too?
+                    if resolved_type == "google_healthcare":
+                         cfg_dict['name'] = db_model.name
+                else: 
+                    dl.error("DB config field not dict.",type=type(db_model.config).__name__)
+                    all_destinations_succeeded = False
+                    success_status[db_model.name] = {"status":"error","message":"DB config not dict."}
+                    continue
+            except Exception as cb_err: 
+                dl.error("Failed build storage cfg.", error=str(cb_err),exc_info=True)
+                all_destinations_succeeded = False
+                success_status[db_model.name] = {"status":"error","message":f"Build error: {cb_err}"}
+                continue
+            
+            dl = dl.bind(actual_destination_type=cfg_dict.get('type','?'))
+            dl.debug(f"Attempting destination type: {cfg_dict.get('type')}")
+
+            try:
+                be = get_storage_backend(cfg_dict)
+                fname_ctx = f"{instance_uid_str}.dcm"
+                store_res: Any = None
+                
+                if cfg_dict.get('type') == 'google_healthcare':
+                    if asyncio.iscoroutinefunction(be.store):
+                        try: 
+                            store_res = asyncio.run(be.store(dataset_to_send,temp_filepath,fname_ctx,source_identifier_for_matching))
+                        except RuntimeError as e: 
+                            raise StorageBackendError(f"Async GHC store error: {e}") from e
+                    else: 
+                        store_res = be.store(dataset_to_send,temp_filepath,fname_ctx,source_identifier_for_matching)
+                else: 
+                    store_res = be.store(dataset_to_send,temp_filepath,fname_ctx,source_identifier_for_matching)
+                
+                if store_res == "duplicate": 
+                    success_status[db_model.name] = {"status":"duplicate","result":store_res}
+                else: 
+                    success_status[db_model.name] = {"status":"success","result":store_res}
+            except StorageBackendError as e:
+                dl.error("Failed to store STOW instance", error=str(e),exc_info=False)
+                all_destinations_succeeded = False
+                success_status[db_model.name] = {"status":"error","message":str(e)}
+                if any(isinstance(e,et) for et in RETRYABLE_EXCEPTIONS): 
+                    raise
+            except Exception as e:
+                 dl.error("Unexpected error storing STOW instance",error=str(e),exc_info=True)
+                 all_destinations_succeeded = False
+                 success_status[db_model.name] = {"status":"error","message":f"Unexpected: {e}"}
+
+        if all_destinations_succeeded: 
+            final_status="success"
+            final_message=f"Processed STOW instance to {len(unique_destination_identifier_dicts)} dests."
+        else: 
+            fc=sum(1 for s in success_status.values() if s['status']=='error')
+            final_status="partial_failure"
+            final_message=f"Processing STOW, {fc} dests failed."
+        
+        db.close()
+        serializable_status = {
+            k: (
+                {"status": v["status"], "result": str(v["result"])}
+                if isinstance(v.get("result"), Path)
+                else {
+                    "status": v["status"],
+                    "result": f"<{type(v.get('result')).__name__}>"
+                }
+                if not isinstance(
+                    v.get("result"),
+                    (dict, str, int, float, list, bool, type(None))
+                )
+                else v
+            )
+            for k, v in success_status.items()
+        }
+
+        return {
+            "status": final_status,
+            "message": final_message,
+            "applied_rules": applied_rules_info,
+            "destinations": serializable_success_status, # Use the clearly built dict
+            "source": source_identifier_for_matching,
+            "instance_uid": instance_uid_str
+            # Any other relevant fields specific to the task (e.g., source_id, study_uid)
+        }
+    except Exception as exc:
+        if db and db.is_active:
+            try: 
+                db.rollback()
+            except Exception as rb_e: 
+                logger.error("DB rollback error.", task_id=task_id, rb_error=str(rb_e))
+            finally: 
+                db.close()
+        if any(isinstance(exc,et) for et in RETRYABLE_EXCEPTIONS): 
+            raise
+        else: 
+            return {"status":"error","message":f"Fatal error: {exc!r}","source":source_identifier_for_matching,"instance_uid":instance_uid_str}
+    finally:
+        if temp_filepath.exists():
+            try: 
+                os.remove(temp_filepath)
+            except OSError as e: 
+                logger.critical("FAILED TO REMOVE temp STOW file",temp_filepath=str(temp_filepath),error=str(e),task_id=task_id)
+        if db and db.is_active: 
+            db.close()
+        log.info("Finished STOW task.", final_status=final_status)

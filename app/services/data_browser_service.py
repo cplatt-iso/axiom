@@ -19,7 +19,7 @@ from app.schemas.data_browser import (
     QueryLevel
 )
 from app.core.config import settings
-from app.services import dicomweb_client
+from app.services import dicomweb_client # Keep this import style
 from app.worker.dimse_qr_poller import _resolve_dynamic_date_filter
 from app.services.network.dimse.scu_service import (
     find_studies,
@@ -28,12 +28,14 @@ from app.services.network.dimse.scu_service import (
     DimseCommandError,
     TlsConfigError
 )
+# --- CORRECTED IMPORT - Import functions directly ---
 from app.services.google_healthcare_service import (
-    search_for_studies as ghc_search_studies,
-    search_for_series as ghc_search_series,
-    search_for_instances as ghc_search_instances,
+    search_for_studies, # Use correct name
+    search_for_series, # Use correct name
+    search_for_instances, # Use correct name
     GoogleHealthcareQueryError
 )
+# --- END CORRECTION ---
 from pynetdicom.sop_class import (
     StudyRootQueryRetrieveInformationModelFind,
     PatientRootQueryRetrieveInformationModelFind
@@ -64,12 +66,18 @@ def _build_find_identifier(query_params: List[DataBrowserQueryParam], query_leve
     identifier.QueryRetrieveLevel = query_level.value
     log = logger.bind(query_level=query_level.value) if hasattr(logger, 'bind') else logger
     if query_level == QueryLevel.STUDY:
-        default_return_keys = ["PatientID", "PatientName", "StudyInstanceUID", "StudyDate", "StudyTime", "AccessionNumber", "ModalitiesInStudy", "ReferringPhysicianName", "PatientBirthDate", "StudyDescription", "NumberOfStudyRelatedSeries", "NumberOfStudyRelatedInstances"]
+        default_return_keys = [
+            "PatientID", "PatientName", "StudyInstanceUID", "StudyDate", "StudyTime",
+            "AccessionNumber", "ModalitiesInStudy", "ReferringPhysicianName",
+            "PatientBirthDate", "StudyDescription", "NumberOfStudyRelatedSeries",
+            "NumberOfStudyRelatedInstances", "InstitutionName"
+        ]
     elif query_level == QueryLevel.SERIES:
-         default_return_keys = ["SeriesInstanceUID", "SeriesNumber", "Modality", "SeriesDescription", "NumberOfSeriesRelatedInstances", "StudyInstanceUID"]
+         default_return_keys = ["SeriesInstanceUID", "SeriesNumber", "Modality", "SeriesDescription", "NumberOfSeriesRelatedInstances", "StudyInstanceUID", "InstitutionName"]
     elif query_level == QueryLevel.INSTANCE:
-         default_return_keys = ["SOPInstanceUID", "InstanceNumber", "SOPClassUID", "StudyInstanceUID", "SeriesInstanceUID"]
+         default_return_keys = ["SOPInstanceUID", "InstanceNumber", "SOPClassUID", "StudyInstanceUID", "SeriesInstanceUID", "InstitutionName"]
     else: default_return_keys = []
+
     filter_keys_used = set()
     for param in query_params:
         value_to_set = str(param.value) if param.value is not None else ""
@@ -87,12 +95,15 @@ def _build_find_identifier(query_params: List[DataBrowserQueryParam], query_leve
             filter_keys_used.add(keyword)
             log.debug("C-FIND Filter Added", keyword=keyword, value=value_to_set)
         except Exception as e: log.warning("C-FIND: Error setting filter attribute", field=param.field, value=value_to_set, error=str(e))
+
     for key in default_return_keys:
         if key not in filter_keys_used:
             try: setattr(identifier, key, "")
             except Exception as e: log.warning("C-FIND: Could not set return key", key=key, error=str(e))
+
     log.debug("Constructed C-FIND Identifier", identifier_str=str(identifier))
     return identifier
+
 
 def _build_qido_params(query_params: List[DataBrowserQueryParam]) -> Dict[str, str]:
     qido_dict: Dict[str, str] = {}
@@ -183,12 +194,16 @@ async def _execute_qido_query(
 ) -> List[Dict[str, Any]]:
     log = logger.bind(source_name=source_config.source_name, source_id=source_config.id, base_url=source_config.base_url, query_level=query_level.value) if hasattr(logger, 'bind') else logger
     log.info("Attempting DICOMweb QIDO query")
+
+    # Note: Removed include_fields map and parameter from the call below
+
     try:
         qido_results = await asyncio.to_thread(
              dicomweb_client.query_qido,
              config=source_config,
              level=query_level.value,
              custom_params=query_params,
+             # include_fields=include_fields, # REMOVED THIS ARGUMENT
              prioritize_custom_params=prioritize_custom_params
         )
         log.info("QIDO query successful.", result_count=len(qido_results))
@@ -202,6 +217,9 @@ async def _execute_qido_query(
          if e.status_code and 400 <= e.status_code < 500: raise InvalidParameterError(f"QIDO Error ({e.status_code}): {e}", source_type="dicomweb", source_id=source_config.id) from e
          elif e.status_code and e.status_code >= 500: raise RemoteQueryError(f"QIDO Remote Error ({e.status_code}): {e}", source_type="dicomweb", source_id=source_config.id) from e
          else: raise RemoteConnectionError(f"QIDO Connection Error: {e}", source_type="dicomweb", source_id=source_config.id) from e
+    except TypeError as te: # Catch the specific TypeError
+         log.error("Type error calling query_qido (likely unexpected argument)", error=str(te), exc_info=True)
+         raise InvalidParameterError(f"Internal configuration error calling QIDO function: {te}", source_type="dicomweb", source_id=source_config.id) from te
     except Exception as e:
          log.error("Unexpected error during QIDO query", error=str(e), exc_info=True)
          raise QueryServiceError(f"QIDO Error: {e}", source_type="dicomweb", source_id=source_config.id) from e
@@ -215,39 +233,51 @@ async def _execute_google_healthcare_query(
     log = logger.bind(source_name=source_config.name, source_id=source_config.id, query_level=query_level.value) if hasattr(logger, 'bind') else logger
     log.info("Attempting Google Healthcare QIDO query")
 
+    default_fields_map = {
+         QueryLevel.STUDY: ["00100010", "00100020", "0020000D", "00080020", "00080030", "00080050", "00080061", "00080090", "00100030", "00081030", "00201206", "00201208", "00080080"],
+         QueryLevel.SERIES: ["0020000E", "00080060", "00200011", "0008103E", "00201209"],
+         QueryLevel.INSTANCE: ["00080018", "00080016", "00200013"]
+    }
+    include_fields = default_fields_map.get(query_level, [])
+
     try:
+        # --- Use correct function names ---
         if query_level == QueryLevel.STUDY:
-            raw_results = await ghc_search_studies(
+            raw_results = await search_for_studies( # Corrected name
                 gcp_project_id=source_config.gcp_project_id,
                 gcp_location=source_config.gcp_location,
                 gcp_dataset_id=source_config.gcp_dataset_id,
                 gcp_dicom_store_id=source_config.gcp_dicom_store_id,
-                query_params=query_params
+                query_params=query_params,
+                fields=include_fields
             )
         elif query_level == QueryLevel.SERIES:
             study_uid_filter = query_params.get("StudyInstanceUID") or query_params.get("0020000D")
-            raw_results = await ghc_search_series(
+            raw_results = await search_for_series( # Corrected name
                 gcp_project_id=source_config.gcp_project_id,
                 gcp_location=source_config.gcp_location,
                 gcp_dataset_id=source_config.gcp_dataset_id,
                 gcp_dicom_store_id=source_config.gcp_dicom_store_id,
                 study_instance_uid=study_uid_filter,
-                query_params=query_params
+                query_params=query_params,
+                fields=include_fields
             )
         elif query_level == QueryLevel.INSTANCE:
             study_uid_filter = query_params.get("StudyInstanceUID") or query_params.get("0020000D")
             series_uid_filter = query_params.get("SeriesInstanceUID") or query_params.get("0020000E")
             if not study_uid_filter or not series_uid_filter:
                  raise InvalidParameterError("StudyInstanceUID and SeriesInstanceUID filters required for INSTANCE level query on Google Healthcare source.", source_type="google_healthcare", source_id=source_config.id)
-            raw_results = await ghc_search_instances(
+            raw_results = await search_for_instances( # Corrected name
                 gcp_project_id=source_config.gcp_project_id,
                 gcp_location=source_config.gcp_location,
                 gcp_dataset_id=source_config.gcp_dataset_id,
                 gcp_dicom_store_id=source_config.gcp_dicom_store_id,
                 study_instance_uid=study_uid_filter,
                 series_instance_uid=series_uid_filter,
-                query_params=query_params
+                query_params=query_params,
+                fields=include_fields
             )
+        # --- End correction ---
         else:
              raise InvalidParameterError(f"Unsupported query level '{query_level.value}' for Google Healthcare.", source_type="google_healthcare", source_id=source_config.id)
 
@@ -359,6 +389,10 @@ async def execute_query(
     log.debug("Formatting results for response", raw_result_count=len(results_list))
     for result_dict in results_list:
         try:
+            # Add source info before validation if not already present
+            if "source_id" not in result_dict: result_dict["source_id"] = source_id
+            if "source_name" not in result_dict: result_dict["source_name"] = source_name
+            if "source_type" not in result_dict: result_dict["source_type"] = source_type
             formatted_item = StudyResultItem.model_validate(result_dict)
             formatted_results.append(formatted_item)
         except Exception as validation_err:

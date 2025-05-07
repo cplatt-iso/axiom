@@ -77,6 +77,19 @@ class Settings(BaseSettings):
     RABBITMQ_VHOST: str = "/"
     CELERY_BROKER_URL: Optional[str] = None
 
+    OPENAI_API_KEY: Optional[SecretStr] = None
+
+    # --- Vertex AI Gemini Settings ---
+    VERTEX_AI_PROJECT: Optional[str] = None # Your GCP Project ID
+    VERTEX_AI_LOCATION: Optional[str] = "us-central1" # Default, but make configurable
+    VERTEX_AI_MODEL_NAME: str = "gemini-2.5-flash-preview-04-17" # Or gemini-1.0-pro, etc.
+    VERTEX_AI_CREDENTIALS_SECRET_ID: Optional[str] = None # Optional: GCP Secret Manager ID for Service Account JSON key
+    VERTEX_AI_CREDENTIALS_JSON_PATH: Optional[str] = None # Optional: Path to local Service Account JSON key file (less secure, useful for local dev)
+
+    # --- AI Invocation Tracking ---
+    AI_INVOCATION_COUNTER_ENABLED: bool = True
+    AI_INVOCATION_COUNTER_KEY_PREFIX: str = "axiom:ai:invocations"
+
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
@@ -135,7 +148,6 @@ class Settings(BaseSettings):
         combined = set(static_sources_in_code); combined.update(parsed_sources)
         return sorted(list(combined))
 
-    OPENAI_API_KEY: Optional[SecretStr] = None
 
     def model_post_init(self, __context: Any) -> None:
         if self.CELERY_BROKER_URL is None:
@@ -145,7 +157,18 @@ class Settings(BaseSettings):
                 host, port, vhost = self.RABBITMQ_HOST, self.RABBITMQ_PORT, "" if self.RABBITMQ_VHOST == "/" else f"/{self.RABBITMQ_VHOST.lstrip('/')}"
                 self.CELERY_BROKER_URL = f"amqp://{user}:{pw}@{host}:{port}{vhost}"
             except Exception as e: logger.error(f"Error building Celery Broker URL: {e}")
-
+        if self.VERTEX_AI_PROJECT:
+            logger.info(f"Vertex AI Project: {self.VERTEX_AI_PROJECT}")
+            logger.info(f"Vertex AI Location: {self.VERTEX_AI_LOCATION}")
+            logger.info(f"Vertex AI Model: {self.VERTEX_AI_MODEL_NAME}")
+            if self.VERTEX_AI_CREDENTIALS_SECRET_ID:
+                logger.info(f"Vertex AI Credentials: Using Secret Manager ID {self.VERTEX_AI_CREDENTIALS_SECRET_ID}")
+            elif self.VERTEX_AI_CREDENTIALS_JSON_PATH:
+                 logger.info(f"Vertex AI Credentials: Using JSON key path {self.VERTEX_AI_CREDENTIALS_JSON_PATH}")
+            else:
+                logger.info("Vertex AI Credentials: Using Application Default Credentials (ADC). Ensure ADC are configured.")
+        else:
+            logger.warning("Vertex AI Project (VERTEX_AI_PROJECT) not set. Gemini features will be unavailable.")
         if self.REDIS_URL is None:
              try: self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
              except Exception as e: logger.error(f"Error building Redis URL: {e}")
@@ -178,4 +201,6 @@ logger.info(f"Known Input Sources (Static + Env): {settings.KNOWN_INPUT_SOURCES}
 logger.info(f"OpenAI API Key Loaded: {'Yes' if settings.OPENAI_API_KEY else 'No'}")
 logger.info(f"DICOMweb Max Sources: {settings.DICOMWEB_POLLER_MAX_SOURCES}") # Log the existing one
 logger.info(f"DIMSE Q/R Max Sources: {settings.DIMSE_QR_POLLER_MAX_SOURCES}") # Log the new one
+logger.info(f"Vertex AI Configured: {'Yes' if settings.VERTEX_AI_PROJECT else 'No'}")
+logger.info(f"AI Invocation Counting Enabled: {settings.AI_INVOCATION_COUNTER_ENABLED}")
 logger.info("---------------------------------------")

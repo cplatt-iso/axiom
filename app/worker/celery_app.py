@@ -151,6 +151,17 @@ def log_task_outcome(sender=None, task_id=None, task=None, args=None, kwargs=Non
         )
 
 # --- Initialize Celery App ---
+try:
+    from app.services import ai_assist_service
+    structlog.get_logger("celery.startup").info("Explicitly imported ai_assist_service for early init.")
+    # You could add checks here too, if needed:
+    # structlog.get_logger("celery.startup").info(f"Gemini model after import: {ai_assist_service.gemini_model}")
+except ImportError as ai_import_err:
+     structlog.get_logger("celery.startup").error("Failed to explicitly import ai_assist_service during worker startup.", error=str(ai_import_err), exc_info=True)
+except Exception as ai_init_err:
+     # Catch potential errors during the module's top-level execution
+     structlog.get_logger("celery.startup").error("Error occurred during ai_assist_service initialization at worker startup.", error=str(ai_init_err), exc_info=True)
+
 
 app = Celery(
     "dicom_processor_tasks",

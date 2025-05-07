@@ -1,4 +1,4 @@
-# app/db/models/rule.py
+# filename: backend/app/db/models/rule.py
 import enum
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -8,10 +8,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB # Use JSONB for better performance/indexing
 
 # --- ADDED: Import Schedule for type hinting ---
 from .schedule import Schedule
+# --- END ADDED ---
+# --- ADDED: Import StorageBackendConfig for type hinting ---
+from .storage_backend_config import StorageBackendConfig
 # --- END ADDED ---
 
 from app.db.base import Base, rule_destination_association
@@ -33,12 +36,14 @@ class RuleSet(Base):
         nullable=False
     )
 
+    # Timestamps - managed by Base
+
     rules: Mapped[List["Rule"]] = relationship(
         "Rule",
         back_populates="ruleset",
         cascade="all, delete-orphan",
-        order_by="Rule.priority",
-        lazy="selectin",
+        order_by="Rule.priority", # Ensure rules are ordered by priority when loaded
+        lazy="selectin", # Use selectin loading for rules when loading a ruleset
     )
 
     def __repr__(self):
@@ -55,64 +60,75 @@ class Rule(Base):
 
     ruleset_id: Mapped[int] = mapped_column(ForeignKey('rule_sets.id', ondelete="CASCADE"), index=True)
 
-    match_criteria: Mapped[Dict[str, Any]] = mapped_column(
-        JSONB,
+    match_criteria: Mapped[List[Dict[str, Any]]] = mapped_column( # Store as list of dicts
+        JSONB, # Use JSONB
         nullable=False,
-        default={},
-        comment="Criteria object (structure defined/validated by Pydantic schema)"
+        default=[], # Default to empty list
+        comment="Criteria list (structure defined/validated by Pydantic schema)"
     )
 
     association_criteria: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
-        JSONB,
+        JSONB, # Use JSONB
         nullable=True,
-        default=None,
+        default=None, # Default to null
         comment="Optional list of criteria based on association details (Calling AE, IP)."
     )
 
     tag_modifications: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSONB,
+        JSONB, # Use JSONB
         nullable=False,
-        default=[],
+        default=[], # Default to empty list
         comment="List of modification action objects (validated by Pydantic)"
     )
 
     applicable_sources: Mapped[Optional[List[str]]] = mapped_column(
-        JSONB,
+        JSONB, # Use JSONB
         nullable=True,
-        index=True,
+        default=None, # Default to null
+        index=True, # Index if filtering by source is common
         comment="List of source identifiers. Applies to all if null/empty."
     )
 
+    # --- ADDED: AI Standardization Column ---
+    ai_standardization_tags: Mapped[Optional[List[str]]] = mapped_column(
+        JSONB, # Store list of strings as JSONB
+        nullable=True,
+        default=None, # Default to null (meaning disabled for this rule)
+        comment="List of DICOM tags (keywords or 'GGGG,EEEE') to standardize using AI."
+    )
+    # --- END ADDED ---
+
+    # Timestamps - managed by Base
+
+    # Relationships
     ruleset: Mapped["RuleSet"] = relationship(
         "RuleSet",
         back_populates="rules",
-        lazy="joined"
+        lazy="joined" # Typically want ruleset info when loading a rule
     )
 
     destinations: Mapped[List["StorageBackendConfig"]] = relationship(
         "StorageBackendConfig",
         secondary=rule_destination_association,
         back_populates="rules",
-        lazy="selectin"
+        lazy="selectin" # Use selectin for loading destinations efficiently
     )
 
-    # --- ADDED: Schedule Foreign Key and Relationship ---
+    # Schedule Relationship (existing, ensure type hint is correct)
     schedule_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("schedules.id", ondelete="SET NULL"), # Set null if schedule deleted
+        ForeignKey("schedules.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
         comment="Optional ID of the Schedule controlling when this rule is active."
     )
     schedule: Mapped[Optional["Schedule"]] = relationship(
         "Schedule",
-        back_populates="rules",
-        lazy="selectin" # Eagerly load schedule details if needed when rule is fetched
+        back_populates="rules", # Assumes Schedule model has 'rules' backref
+        lazy="selectin" # Eagerly load schedule details if needed
     )
-    # --- END ADDED ---
-
 
     def __repr__(self):
-        # --- UPDATED repr ---
+        # Updated repr to include the new field
+        ai_tags_repr = f", ai_tags={self.ai_standardization_tags}" if self.ai_standardization_tags else ""
         return (f"<Rule(id={self.id}, name='{self.name}', ruleset_id={self.ruleset_id}, "
-                f"schedule_id={self.schedule_id})>")
-        # --- END UPDATED ---
+                f"schedule_id={self.schedule_id}{ai_tags_repr})>")

@@ -1,4 +1,4 @@
-# app/schemas/rule.py
+# filename: backend/app/schemas/rule.py
 
 from typing import List, Optional, Dict, Any, Union, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict, ValidationInfo
@@ -49,13 +49,32 @@ def _validate_tag_format_or_keyword(v: str) -> str:
     if not isinstance(v, str):
         raise ValueError("Tag must be a string")
     v = v.strip()
-    if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
-        return v.upper()
-    if re.match(r"^\(?\s*[0-9a-fA-F]{4}\s*,\s*[0-9a-fA-F]{4}\s*\)?$", v):
-        return v
+    # Allow specific non-DICOM parameters only for Association Criteria
+    # Check if it's intended for Association Match first (handled elsewhere)
+    # if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
+    #     raise ValueError(f"'{v.upper()}' is only valid in AssociationMatchCriterion.")
+
+    # Check for GGGG,EEEE format
+    if re.match(r"^\(?\s*([0-9a-fA-F]{4})\s*,\s*([0-9a-fA-F]{4})\s*\)?$", v):
+        # Extract and format consistently if needed, e.g., strip parens/spaces
+        match = re.match(r"^\(?\s*([0-9a-fA-F]{4})\s*,\s*([0-9a-fA-F]{4})\s*\)?$", v)
+        if match:
+             return f"{match.group(1).upper()},{match.group(2).upper()}" # Return consistent format
+        else: # Should not happen based on regex, but safety check
+             raise ValueError("Invalid GGGG,EEEE format") # Should be unreachable
+
+    # Check for DICOM Keyword format (alphanumeric)
     if re.match(r"^[a-zA-Z0-9]+$", v):
-        return v
-    raise ValueError("Tag must be in 'GGGG,EEEE' format, a valid DICOM keyword, or one of 'SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'")
+        # Here you *could* add validation against pydicom's dictionary if strictness is needed
+        # from pydicom.datadict import tag_for_keyword
+        # try:
+        #     if tag_for_keyword(v) is None: raise ValueError() # Check if it's a known keyword
+        # except ValueError:
+        #      raise ValueError(f"Tag '{v}' is not a recognized DICOM keyword.")
+        return v # Assume valid keyword if format matches
+
+    raise ValueError("Tag must be in 'GGGG,EEEE' format or a valid DICOM keyword")
+
 
 def _validate_vr_format(v: Optional[str]) -> Optional[str]:
     if v is not None:
@@ -74,9 +93,18 @@ class AssociationMatchCriterion(BaseModel):
 
     @model_validator(mode='after')
     def check_value_for_op(self) -> 'AssociationMatchCriterion':
-        if self.parameter == 'SOURCE_IP' and self.op == MatchOperation.IP_ADDRESS_IN_SUBNET:
-            if not isinstance(self.value, str) or '/' not in self.value:
-                raise ValueError("Value for 'ip_in_subnet' must be a CIDR string (e.g., '192.168.1.0/24').")
+        ip_subnet_ops = {MatchOperation.IP_ADDRESS_IN_SUBNET}
+        ip_string_ops = {MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH}
+
+        if self.parameter == 'SOURCE_IP':
+            if self.op in ip_subnet_ops:
+                if not isinstance(self.value, str) or '/' not in self.value:
+                    raise ValueError(f"Value for '{self.op.value}' must be a CIDR string (e.g., '192.168.1.0/24').")
+            elif self.op in ip_string_ops:
+                 if not isinstance(self.value, str):
+                      raise ValueError(f"Value for '{self.op.value}' must be an IP address string.")
+            # Add validation for other ops if needed for SOURCE_IP
+        # Add validation for CALLING_AE_TITLE/CALLED_AE_TITLE if specific formats are required
         return self
 
 class MatchCriterion(BaseModel):
@@ -91,8 +119,8 @@ class MatchCriterion(BaseModel):
         v_upper = v_strip.upper()
         if v_upper in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
             raise ValueError(f"'{v_upper}' cannot be used in standard MatchCriterion, use AssociationMatchCriterion instead.")
+        # Use the refined validator
         return _validate_tag_format_or_keyword(v_strip)
-
 
     @model_validator(mode='after')
     def check_value_requirements(self) -> 'MatchCriterion':
@@ -107,13 +135,18 @@ class MatchCriterion(BaseModel):
             MatchOperation.CONTAINS, MatchOperation.STARTS_WITH, MatchOperation.ENDS_WITH,
             MatchOperation.REGEX, MatchOperation.IN, MatchOperation.NOT_IN
         }
-
+        value_not_allowed_ops = {MatchOperation.EXISTS, MatchOperation.NOT_EXISTS}
         ip_ops = {MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET}
+
         if op in ip_ops:
              raise ValueError(f"Operation '{op.value}' is only valid for Association parameter 'SOURCE_IP'.")
 
         if op in value_required_ops and value is None:
              raise ValueError(f"Value is required for operation '{op.value}' on tag '{tag}'")
+
+        if op in value_not_allowed_ops and value is not None:
+             logger.warning(f"Value provided for operation '{op.value}' on tag '{tag}' but will be ignored.")
+             self.value = None # Ensure value is None for these ops
 
         if op in [MatchOperation.IN, MatchOperation.NOT_IN] and not isinstance(value, list):
              raise ValueError(f"Value must be a list for operation '{op.value}' on tag '{tag}'")
@@ -223,6 +256,7 @@ TagModification = Annotated[
     Field(discriminator="action")
 ]
 
+# --- Base Schema for Rules ---
 class RuleBase(BaseModel):
     name: str = Field(..., max_length=100)
     description: Optional[str] = None
@@ -233,6 +267,12 @@ class RuleBase(BaseModel):
     tag_modifications: List[TagModification] = Field(default_factory=list)
     applicable_sources: Optional[List[str]] = Field(None)
     schedule_id: Optional[int] = Field(None)
+    # --- ADDED: AI Standardization Field ---
+    ai_standardization_tags: Optional[List[str]] = Field(
+        None, # Default to None (no AI standardization)
+        description="Optional list of DICOM tags (keywords or 'GGGG,EEEE') whose values should be standardized using AI."
+    )
+    # --- END ADDED ---
 
     @field_validator('applicable_sources')
     @classmethod
@@ -244,6 +284,31 @@ class RuleBase(BaseModel):
                 raise ValueError("Each item in applicable_sources must be a non-empty string")
         return v
 
+    # --- ADDED: Validator for AI Standardization Tags ---
+    @field_validator('ai_standardization_tags')
+    @classmethod
+    def validate_ai_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None # Allow null/None
+        if not isinstance(v, list):
+            raise ValueError("ai_standardization_tags must be a list of strings or null")
+        validated_tags = []
+        for tag_str in v:
+            try:
+                # Reuse the existing tag validator
+                validated_tags.append(_validate_tag_format_or_keyword(tag_str))
+            except ValueError as e:
+                # Improve error message context
+                raise ValueError(f"Invalid tag '{tag_str}' in ai_standardization_tags: {e}") from e
+        # Return the list of validated tags (potentially with consistent formatting)
+        # Remove duplicates? Optional, might be desired.
+        unique_tags = list(dict.fromkeys(validated_tags))
+        if len(unique_tags) != len(validated_tags):
+             logger.warning(f"Duplicate tags found in ai_standardization_tags: {validated_tags}. Using unique list: {unique_tags}")
+        return unique_tags # Return unique list
+    # --- END ADDED ---
+
+
     @model_validator(mode='after')
     def check_association_ops(self) -> 'RuleBase':
          if self.association_criteria:
@@ -253,10 +318,12 @@ class RuleBase(BaseModel):
                        raise ValueError(f"Operation '{criterion.op.value}' is only valid for parameter 'SOURCE_IP'.")
          return self
 
+# --- Schema for Creating Rules ---
 class RuleCreate(RuleBase):
     ruleset_id: int
     destination_ids: Optional[List[int]] = Field(None)
 
+# --- Schema for Updating Rules ---
 class RuleUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
     description: Optional[str] = None
@@ -268,10 +335,19 @@ class RuleUpdate(BaseModel):
     applicable_sources: Optional[List[str]] = Field(None)
     schedule_id: Optional[int] = Field(None)
     destination_ids: Optional[List[int]] = Field(None)
+    # --- ADDED: AI Standardization Field ---
+    ai_standardization_tags: Optional[List[str]] = Field(None)
+    # --- END ADDED ---
 
+    # Re-apply validators from Base for update fields if they exist
     _validate_sources_update = field_validator('applicable_sources')(lambda v: RuleBase.validate_sources_not_empty_strings(v) if v is not None else None)
-    _validate_assoc_ops_update = model_validator(mode='after')(RuleBase.check_association_ops)
+    # --- ADDED: Validator reference for AI tags on update ---
+    _validate_ai_tags_update = field_validator('ai_standardization_tags')(lambda v: RuleBase.validate_ai_tags(v) if v is not None else None)
+    # --- END ADDED ---
+    _validate_assoc_ops_update = model_validator(mode='after')(RuleBase.check_association_ops) # This checks assoc_criteria if present
 
+
+# --- Schema for Reading Rules from DB (Base) ---
 class RuleInDBBase(RuleBase):
     id: int
     ruleset_id: int
@@ -279,11 +355,16 @@ class RuleInDBBase(RuleBase):
     updated_at: Optional[datetime] = None
     destinations: List[StorageBackendConfigRead] = []
     schedule: Optional[ScheduleRead] = None
+    # --- ADDED: AI Standardization Field (already inherited from RuleBase) ---
+    # ai_standardization_tags: Optional[List[str]] = None # Included via RuleBase inheritance
+    # --- END ADDED ---
     model_config = ConfigDict(from_attributes=True)
 
+# --- Schema for Reading a Single Rule ---
 class Rule(RuleInDBBase):
     pass
 
+# --- Schemas for Rule Sets ---
 class RuleSetBase(BaseModel):
     name: str = Field(..., max_length=100)
     description: Optional[str] = None
@@ -305,7 +386,7 @@ class RuleSetInDBBase(RuleSetBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    rules: List[Rule] = []
+    rules: List[Rule] = [] # Reads populated rules
     model_config = ConfigDict(from_attributes=True)
 
 class RuleSet(RuleSetInDBBase):
@@ -321,6 +402,7 @@ class RuleSetSummary(BaseModel):
     rule_count: int = Field(...)
     model_config = ConfigDict(from_attributes=True)
 
+# --- Schemas for JSON API Processing ---
 class JsonProcessRequest(BaseModel):
     dicom_json: Dict[str, Any] = Field(...)
     ruleset_id: Optional[int] = Field(None)
