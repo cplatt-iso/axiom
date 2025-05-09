@@ -85,10 +85,17 @@ class Settings(BaseSettings):
     VERTEX_AI_MODEL_NAME: str = "gemini-2.5-flash-preview-04-17" # Or gemini-1.0-pro, etc.
     VERTEX_AI_CREDENTIALS_SECRET_ID: Optional[str] = None # Optional: GCP Secret Manager ID for Service Account JSON key
     VERTEX_AI_CREDENTIALS_JSON_PATH: Optional[str] = None # Optional: Path to local Service Account JSON key file (less secure, useful for local dev)
+    VERTEX_AI_MAX_OUTPUT_TOKENS_VOCAB: int = 150
+    VERTEX_AI_MAX_OUTPUT_TOKENS_BODYPART: int = 150
+    VERTEX_AI_TEMPERATURE_VOCAB: float = 0.2
+    VERTEX_AI_TOP_P_VOCAB: float = 0.8
+    VERTEX_AI_TOP_K_VOCAB: int = 40
 
     # --- AI Invocation Tracking ---
     AI_INVOCATION_COUNTER_ENABLED: bool = True
     AI_INVOCATION_COUNTER_KEY_PREFIX: str = "axiom:ai:invocations"
+    AI_THREAD_POOL_WORKERS: int = 2
+    AI_SYNC_WRAPPER_TIMEOUT: int = 30
 
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -204,3 +211,4 @@ logger.info(f"DIMSE Q/R Max Sources: {settings.DIMSE_QR_POLLER_MAX_SOURCES}") # 
 logger.info(f"Vertex AI Configured: {'Yes' if settings.VERTEX_AI_PROJECT else 'No'}")
 logger.info(f"AI Invocation Counting Enabled: {settings.AI_INVOCATION_COUNTER_ENABLED}")
 logger.info("---------------------------------------")
+ 

@@ -1,5 +1,6 @@
 # app/services/storage_backends/base_backend.py
 
+import enum
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -16,6 +17,13 @@ class StorageBackendError(Exception):
         full_message = f"{message}{f' (Status Code: {status_code})' if status_code else ''}"
         super().__init__(full_message)
     # --- END ADDED ---
+
+class StorageBackendType(str, enum.Enum):
+    FILESYSTEM = "filesystem"
+    GCS = "gcs"
+    CSTORE = "cstore"
+    GOOGLE_HEALTHCARE = "google_healthcare"
+    STOW_RS = "stow_rs"
 
 class BaseStorageBackend(ABC):
     """Abstract base class for storage backends."""

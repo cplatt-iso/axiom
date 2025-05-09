@@ -1,507 +1,593 @@
 # filename: backend/app/services/ai_assist_service.py
-import logging
+import asyncio
+import concurrent.futures
 import json
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
+import enum
 
-# --- Configuration and Utilities ---
-from app.core.config import settings
-# Import gcp_utils carefully, maybe defer? For now, keep standard import
+import structlog
+logger = structlog.get_logger(__name__)
+
+from app.core.config import settings # For all configurable parameters
+
+# GCP Utils Import
 try:
-    from app.core import gcp_utils # Import the module
-    from app.core.gcp_utils import ( # Import specific exceptions if needed for handling
-        SecretManagerError,
-        SecretNotFoundError,
-        PermissionDeniedError
-    )
+    from app.core import gcp_utils
+    from app.core.gcp_utils import SecretManagerError, SecretNotFoundError, PermissionDeniedError
     GCP_UTILS_IMPORT_SUCCESS = True
 except ImportError as gcp_import_err:
-     # Log immediately if gcp_utils fails, as it might be needed by Vertex AI init
-     logging.getLogger("ai_assist_service_startup").error(
-         f"Failed to import app.core.gcp_utils: {gcp_import_err}", exc_info=True
-         )
+     logger.error("Failed to import app.core.gcp_utils", error_details=str(gcp_import_err), exc_info=True)
      GCP_UTILS_IMPORT_SUCCESS = False
-     class SecretManagerError(Exception): pass
-     class SecretNotFoundError(SecretManagerError): pass
-     class PermissionDeniedError(SecretManagerError): pass
+     # Define dummy exceptions if import fails, so type hints and except blocks don't break
+     class SecretManagerError(Exception): pass # type: ignore
+     class SecretNotFoundError(SecretManagerError): pass # type: ignore
+     class PermissionDeniedError(SecretManagerError): pass # type: ignore
 
+# ThreadPoolExecutor for AI calls
+# This executor is used by the synchronous wrappers to run async AI functions.
+thread_pool_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=settings.AI_THREAD_POOL_WORKERS
+)
 
-# --- OpenAI Client (Existing) ---
+# OpenAI Client
 try:
-    from openai import OpenAI, AsyncOpenAI, APIError, RateLimitError, APIConnectionError
+    from openai import AsyncOpenAI, APIError, RateLimitError, APIConnectionError
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-    class OpenAI: pass
-    class AsyncOpenAI: pass
-    class APIError(Exception): pass
-    class RateLimitError(APIError): pass
-    class APIConnectionError(APIError): pass
-    # Use the logger defined later
-# --- End OpenAI Client ---
+    class AsyncOpenAI: pass # type: ignore
+    class APIError(Exception): pass # type: ignore
+    class RateLimitError(APIError): pass # type: ignore
+    class APIConnectionError(APIError): pass # type: ignore
+if not OPENAI_AVAILABLE:
+    logger.warning("OpenAI library not found. OpenAI features unavailable.")
 
-# --- Vertex AI Client ---
-# Log before attempting Vertex AI imports
-logging.getLogger("ai_assist_service_startup").info("Attempting Vertex AI library imports...")
+# Vertex AI Client
+logger.info("Attempting Vertex AI library imports...")
 try:
-    import vertexai # type: ignore
-    from vertexai.generative_models import GenerativeModel, Part, FinishReason # type: ignore
-    import vertexai.preview.generative_models as generative_models # type: ignore
-    from google.oauth2 import service_account # type: ignore
-    from google.auth import default as google_auth_default # type: ignore
-    from google.auth.exceptions import DefaultCredentialsError # type: ignore
-    from google.api_core import exceptions as google_api_exceptions # type: ignore
+    import vertexai
+    from vertexai.generative_models import GenerativeModel, Part, FinishReason
+    import vertexai.preview.generative_models as generative_models_preview
+    from google.oauth2 import service_account
+    from google.auth import default as google_auth_default
+    from google.auth.exceptions import DefaultCredentialsError
+    from google.api_core import exceptions as google_api_exceptions
     VERTEX_AI_AVAILABLE = True
-    logging.getLogger("ai_assist_service_startup").info("Vertex AI library imports successful.")
+    logger.info("Vertex AI library imports successful.")
 except ImportError as vertex_import_err:
     VERTEX_AI_AVAILABLE = False
-    logging.getLogger("ai_assist_service_startup").warning(
-        f"Failed to import Vertex AI libraries: {vertex_import_err}. Vertex AI features unavailable.", exc_info=True
-        )
-    # Define dummy classes if Vertex AI library is not installed/imported
-    class GenerativeModel: pass
-    class Part: pass
-    class FinishReason: pass
-    class generative_models: pass
-    class service_account: pass
-    class google_auth_default: pass
-    class DefaultCredentialsError(Exception): pass
-    class google_api_exceptions: pass
-# --- End Vertex AI Client ---
+    logger.warning("Failed to import Vertex AI libraries. Vertex AI features unavailable.", error_details=str(vertex_import_err))
+    # Define dummy classes/enums if import fails
+    class GenerativeModel: pass # type: ignore
+    class Part: pass # type: ignore
+    class FinishReason(enum.Enum): STOP=0; MAX_TOKENS=1; SAFETY=2; RECITATION=3; OTHER=4; UNSPECIFIED=5 # type: ignore
+    class generative_models_preview: # type: ignore
+         HarmCategory = enum.Enum('HarmCategory', ['HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_DANGEROUS_CONTENT', 'HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_SEXUALLY_EXPLICIT']) # type: ignore
+         HarmBlockThreshold = enum.Enum('HarmBlockThreshold', ['BLOCK_MEDIUM_AND_ABOVE', 'BLOCK_LOW_AND_ABOVE', 'BLOCK_ONLY_HIGH', 'BLOCK_NONE']) # type: ignore
+    class service_account: pass # type: ignore
+    class google_auth_default: pass # type: ignore
+    class DefaultCredentialsError(Exception): pass # type: ignore
+    class google_api_exceptions: pass # type: ignore
 
-# --- Redis Client ---
+# Synchronous Redis Client (for counter, if enabled)
 try:
-    import redis.asyncio as redis # type: ignore
-    REDIS_AVAILABLE = True
+    import redis # Sync redis client
+    REDIS_SYNC_CLIENT_AVAILABLE = True
 except ImportError:
-    REDIS_AVAILABLE = False
-    # Define dummy class if redis library is not installed
+    REDIS_SYNC_CLIENT_AVAILABLE = False
     class redis: # type: ignore
-        @staticmethod
-        async def from_url(*args, **kwargs): return None
-        def __getattr__(self, name): return lambda *args, **kwargs: None # Mock methods
-    # Use the logger defined later
-# --- End Redis Client ---
+        class Redis: # type: ignore
+            @staticmethod
+            def from_url(*args, **kwargs): return None
+            def __getattr__(self, name): return lambda *args, **kwargs: None # type: ignore
+if not REDIS_SYNC_CLIENT_AVAILABLE:
+    logger.warning("Synchronous redis library not found. AI invocation counting will be unavailable.")
 
-
-# --- Schemas (Existing) ---
 from app.schemas.ai_assist import RuleGenRequest, RuleGenResponse, RuleGenSuggestion
-# Import rule schemas carefully, avoid circular deps if possible
 from app.schemas.rule import MatchOperation, ModifyAction
 
-# --- Logging ---
-# Set up logger *after* potential imports
-try:
-    import structlog # type: ignore
-    logger = structlog.get_logger(__name__)
-except ImportError:
-    logger = logging.getLogger(__name__)
-
-# Log missing optional dependencies (using the final logger)
-if not OPENAI_AVAILABLE:
-    logger.warning("OpenAI library was not found during import. OpenAI features will be unavailable.")
-# VERTEX_AI_AVAILABLE logged during its import block
-if not REDIS_AVAILABLE:
-    logger.warning("redis library was not found during import. AI invocation counting will be unavailable.")
-
-# --- Initialize OpenAI Client (Existing) ---
 openai_client: Optional[AsyncOpenAI] = None
 if OPENAI_AVAILABLE and settings.OPENAI_API_KEY:
     try:
-        api_key = settings.OPENAI_API_KEY.get_secret_value()
-        openai_client = AsyncOpenAI(api_key=api_key)
-        logger.info("OpenAI client initialized successfully.")
+        # Ensure OPENAI_API_KEY is accessed correctly (it's a Pydantic SecretStr)
+        api_key_value = settings.OPENAI_API_KEY.get_secret_value() if settings.OPENAI_API_KEY else None
+        if api_key_value:
+            openai_client = AsyncOpenAI(api_key=api_key_value)
+            logger.info("OpenAI client initialized.")
+        else:
+            logger.warning("OpenAI API Key is configured but empty. OpenAI features disabled.")
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
-        openai_client = None
-elif OPENAI_AVAILABLE and not settings.OPENAI_API_KEY:
-     logger.warning("OpenAI library is installed, but OPENAI_API_KEY is not configured. OpenAI features disabled.")
-# --- End Initialize OpenAI Client ---
+        logger.error("Failed to initialize OpenAI client.", error_details=str(e), exc_info=True)
+elif OPENAI_AVAILABLE:
+     logger.warning("OpenAI API Key not configured. OpenAI features disabled.")
 
 
-# --- ADDED: Log state BEFORE the Vertex AI Init block ---
-try:
-    # Check VERTEX_AI_AVAILABLE status AFTER its try/except block potentially ran
-    logger.info(
-        "PRE_VERTEX_AI_INIT_CHECK",
-        vertex_ai_available_flag=VERTEX_AI_AVAILABLE,
-        vertex_ai_project_setting=settings.VERTEX_AI_PROJECT,
-        vertex_ai_project_setting_type=str(type(settings.VERTEX_AI_PROJECT))
-    )
-except NameError:
-     # This shouldn't happen if the import block above executed, even if it failed
-     logger.error("PRE_VERTEX_AI_INIT_CHECK: VERTEX_AI_AVAILABLE variable doesn't seem to exist?")
-except Exception as e:
-     logger.error(f"PRE_VERTEX_AI_INIT_CHECK: Error accessing settings: {e}", exc_info=True)
-# --- End Log state ---
-
-
-# --- Initialize Vertex AI Client with Detailed Logging ---
-gemini_model: Optional[GenerativeModel] = None
-# THE CRITICAL IF STATEMENT:
-if VERTEX_AI_AVAILABLE and settings.VERTEX_AI_PROJECT:
-    logger.info("VERTEX_AI_INIT: Starting Initialization...") # First log INSIDE the block
+VERTEX_AI_INITIALIZED_SUCCESSFULLY: bool = False
+if globals().get('VERTEX_AI_AVAILABLE', False) and settings.VERTEX_AI_PROJECT:
+    logger.info("VERTEX_AI_INIT: Starting Initialization...")
     credentials = None
+    project_id = settings.VERTEX_AI_PROJECT
+    location = settings.VERTEX_AI_LOCATION
+
     try:
-        # 1. Try Secret Manager first
-        if settings.VERTEX_AI_CREDENTIALS_SECRET_ID:
-            logger.info(f"VERTEX_AI_INIT: Attempting Secret Manager creds (Secret ID: {settings.VERTEX_AI_CREDENTIALS_SECRET_ID})...")
+        # 1. Try Secret Manager for credentials JSON
+        if settings.VERTEX_AI_CREDENTIALS_SECRET_ID and GCP_UTILS_IMPORT_SUCCESS and getattr(gcp_utils, 'GCP_SECRET_MANAGER_AVAILABLE', False):
+            logger.info(f"VERTEX_AI_INIT: Attempting to load credentials from Secret Manager: {settings.VERTEX_AI_CREDENTIALS_SECRET_ID} in project {settings.VERTEX_AI_CONFIG_PROJECT_ID or 'default'}")
             try:
-                # Check if gcp_utils was imported successfully before calling
-                # Use getattr to safely check for attributes if import might partially fail
-                if getattr(gcp_utils, 'GCP_UTILS_IMPORT_SUCCESS', False) and getattr(gcp_utils, 'GCP_SECRET_MANAGER_AVAILABLE', False):
-                    secret_json_str = gcp_utils.get_secret(
-                        secret_id=settings.VERTEX_AI_CREDENTIALS_SECRET_ID,
-                        project_id=settings.VERTEX_AI_PROJECT # Pass project_id for clarity
-                    )
+                secret_json_str = gcp_utils.access_secret_version(
+                    project_id=settings.VERTEX_AI_CONFIG_PROJECT_ID or project_id, # Project where secret resides
+                    secret_id=settings.VERTEX_AI_CREDENTIALS_SECRET_ID,
+                    version_id="latest"
+                )
+                if secret_json_str:
                     secret_info = json.loads(secret_json_str)
                     credentials = service_account.Credentials.from_service_account_info(secret_info)
-                    logger.info("VERTEX_AI_INIT: Secret Manager creds loaded successfully.")
+                    logger.info("VERTEX_AI_INIT: Successfully loaded credentials from Secret Manager.")
                 else:
-                    logger.error("VERTEX_AI_INIT: Cannot load Secret Manager creds because gcp_utils import failed or client unavailable.")
-            except SecretManagerError as sm_err: # Catch specific errors from our util
-                logger.error(f"VERTEX_AI_INIT: Failed Secret Manager cred loading via gcp_utils: {sm_err}", exc_info=True)
-            except json.JSONDecodeError as json_err:
-                 logger.error(f"VERTEX_AI_INIT: Failed to parse JSON from Secret Manager secret '{settings.VERTEX_AI_CREDENTIALS_SECRET_ID}': {json_err}", exc_info=True)
-            except Exception as e:
-                 logger.error(f"VERTEX_AI_INIT: Unexpected error loading credentials via Secret Manager: {e}", exc_info=True)
+                    logger.warning("VERTEX_AI_INIT: Secret content from Secret Manager was empty.")
+            except SecretNotFoundError:
+                logger.warning("VERTEX_AI_INIT: Credentials secret not found in Secret Manager.")
+            except PermissionDeniedError:
+                logger.error("VERTEX_AI_INIT: Permission denied accessing credentials secret in Secret Manager.")
+            except SecretManagerError as sm_err:
+                logger.error("VERTEX_AI_INIT: Error loading credentials from Secret Manager.", error_details=str(sm_err))
+            except json.JSONDecodeError:
+                logger.error("VERTEX_AI_INIT: Failed to parse credentials JSON from Secret Manager.")
 
-        else:
-            logger.info("VERTEX_AI_INIT: Secret Manager Secret ID not configured.")
-
-        # 2. Try local file path if Secret Manager didn't work or wasn't specified
+        # 2. Try File Path for credentials JSON (if not loaded from Secret Manager)
         if not credentials and settings.VERTEX_AI_CREDENTIALS_JSON_PATH:
-            key_path = settings.VERTEX_AI_CREDENTIALS_JSON_PATH
-            logger.info(f"VERTEX_AI_INIT: Attempting file creds (Path: {key_path})...")
-            if os.path.exists(key_path):
-                 try:
-                      credentials = service_account.Credentials.from_service_account_file(key_path)
-                      logger.info("VERTEX_AI_INIT: File creds loaded successfully.")
-                 except Exception as e:
-                      logger.error(f"VERTEX_AI_INIT: Failed to load credentials from local file '{key_path}': {e}", exc_info=True)
-                      credentials = None # Ensure creds are None on failure
-            else:
-                 logger.error(f"VERTEX_AI_INIT: Credentials file specified but not found: {key_path}")
-                 credentials = None
-        elif not credentials and settings.VERTEX_AI_CREDENTIALS_SECRET_ID:
-             # Log if Secret Manager was configured but failed, and we are skipping file path
-             logger.info("VERTEX_AI_INIT: Skipping file path check as Secret Manager creds were attempted (or failed).")
-        elif not credentials:
-             logger.info("VERTEX_AI_INIT: File path not configured.")
+            logger.info(f"VERTEX_AI_INIT: Attempting to load credentials from JSON file path: {settings.VERTEX_AI_CREDENTIALS_JSON_PATH}")
+            try:
+                if os.path.exists(settings.VERTEX_AI_CREDENTIALS_JSON_PATH):
+                    credentials = service_account.Credentials.from_service_account_file(settings.VERTEX_AI_CREDENTIALS_JSON_PATH)
+                    logger.info("VERTEX_AI_INIT: Successfully loaded credentials from JSON file.")
+                else:
+                    logger.warning(f"VERTEX_AI_INIT: Credentials JSON file not found at path: {settings.VERTEX_AI_CREDENTIALS_JSON_PATH}")
+            except Exception as file_err:
+                logger.error("VERTEX_AI_INIT: Error loading credentials from JSON file.", error_details=str(file_err))
 
-
-        # 3. Fallback to Application Default Credentials (ADC)
+        # 3. Try Application Default Credentials (ADC) (if not loaded from above methods)
         if not credentials:
-            logger.info("VERTEX_AI_INIT: Attempting ADC creds...")
+            logger.info("VERTEX_AI_INIT: Attempting to use Application Default Credentials (ADC).")
             try:
-                 # Specify scopes needed by Vertex AI? Usually cloud-platform is sufficient.
-                 credentials, detected_project = google_auth_default(
-                     scopes=["https://www.googleapis.com/auth/cloud-platform"]
-                 )
-                 logger.info(f"VERTEX_AI_INIT: ADC creds loaded successfully. Detected project: {detected_project}")
-                 # Optionally check if detected_project matches settings.VERTEX_AI_PROJECT
-                 if detected_project and detected_project != settings.VERTEX_AI_PROJECT:
-                      logger.warning(f"VERTEX_AI_INIT: ADC detected project '{detected_project}' differs from settings project '{settings.VERTEX_AI_PROJECT}'. Using settings project.")
+                # For ADC, project is usually inferred or can be set via gcloud config
+                # Scopes might be needed depending on the environment
+                credentials, inferred_project_id = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                logger.info(f"VERTEX_AI_INIT: Successfully obtained ADC. Inferred project: {inferred_project_id}")
+                if not project_id and inferred_project_id: # If main project_id wasn't set, use inferred one
+                    project_id = inferred_project_id
+                    logger.info(f"VERTEX_AI_INIT: Using inferred project ID from ADC: {project_id}")
             except DefaultCredentialsError as adc_err:
-                 logger.error(f"VERTEX_AI_INIT: Failed to get ADC: {adc_err}. Ensure ADC are configured correctly.", exc_info=False) # Less verbose for common ADC errors
-                 credentials = None
-            except Exception as adc_err:
-                 logger.error(f"VERTEX_AI_INIT: Unexpected error getting ADC: {adc_err}", exc_info=True)
-                 credentials = None
+                logger.error("VERTEX_AI_INIT: Failed to obtain Application Default Credentials.", error_details=str(adc_err))
+            except Exception as e: # Catch any other exception during google_auth_default
+                logger.error("VERTEX_AI_INIT: Unexpected error obtaining Application Default Credentials.", error_details=str(e), exc_info=True)
 
-        # Initialize Vertex AI if we have credentials
-        if credentials:
-            logger.info("VERTEX_AI_INIT: Credentials obtained. Attempting vertexai.init()...", project=settings.VERTEX_AI_PROJECT, location=settings.VERTEX_AI_LOCATION)
-            try:
-                vertexai.init(
-                    project=settings.VERTEX_AI_PROJECT,
-                    location=settings.VERTEX_AI_LOCATION,
-                    credentials=credentials
-                )
-                logger.info("VERTEX_AI_INIT: vertexai.init() successful. Loading model...", model_name=settings.VERTEX_AI_MODEL_NAME)
+        if not project_id:
+            logger.error("VERTEX_AI_INIT: Vertex AI Project ID is not set and could not be inferred. Initialization failed.")
+            VERTEX_AI_INITIALIZED_SUCCESSFULLY = False
+        elif credentials:
+            vertexai.init(project=project_id, location=location, credentials=credentials)
+            logger.info(f"VERTEX_AI_INIT: vertexai.init() successful for project '{project_id}' and location '{location}' with provided credentials.")
+            VERTEX_AI_INITIALIZED_SUCCESSFULLY = True
+        else: # ADC might work without explicit credentials object if env is set up (e.g. GCE metadata server)
+            logger.info("VERTEX_AI_INIT: No explicit credentials provided or loaded, relying on environment for ADC for vertexai.init().")
+            vertexai.init(project=project_id, location=location) # Let SDK try to find creds
+            logger.info(f"VERTEX_AI_INIT: vertexai.init() successful for project '{project_id}' and location '{location}' (likely via environment ADC).")
+            VERTEX_AI_INITIALIZED_SUCCESSFULLY = True
 
-                gemini_model = GenerativeModel(settings.VERTEX_AI_MODEL_NAME)
-                logger.info(f"VERTEX_AI_INIT: GenerativeModel loaded successfully: {gemini_model}") # Log the model object itself
-
-            except Exception as init_err:
-                logger.error(f"VERTEX_AI_INIT: Failed during vertexai.init() or GenerativeModel() loading: {init_err}", exc_info=True)
-                gemini_model = None # Reset to None on error
-        else:
-            logger.error("VERTEX_AI_INIT: Could not obtain valid credentials. Vertex AI client NOT initialized.")
-            gemini_model = None # Ensure it's None if no creds
-
-    except Exception as e: # Catch-all for unexpected errors in the whole block
-        logger.error(f"VERTEX_AI_INIT: Unexpected error during outer Vertex AI initialization block: {e}", exc_info=True)
-        gemini_model = None # Ensure None on unexpected failure
-
-# Check the condition variables *after* the block attempt
-elif not VERTEX_AI_AVAILABLE:
-     logger.warning("VERTEX_AI_INIT: Did not run - VERTEX_AI_AVAILABLE flag is False (Import likely failed).")
-elif not settings.VERTEX_AI_PROJECT:
-     logger.warning("VERTEX_AI_INIT: Did not run - VERTEX_AI_PROJECT setting is missing or empty.")
-# --- End Initialize Vertex AI Client ---
+    except Exception as e_outer:
+        logger.error("VERTEX_AI_INIT: Unhandled error during Vertex AI initialization sequence.", error_details=str(e_outer), exc_info=True)
+        VERTEX_AI_INITIALIZED_SUCCESSFULLY = False
+else:
+    if not globals().get('VERTEX_AI_AVAILABLE', False):
+        logger.info("Vertex AI libraries not available. Vertex AI features disabled.")
+    if not settings.VERTEX_AI_PROJECT:
+        logger.info("Vertex AI Project not configured (VERTEX_AI_PROJECT setting). Vertex AI features disabled.")
 
 
-# --- Initialize Redis Client (Keep Existing) ---
-redis_client: Optional[redis.Redis] = None # type: ignore
-if REDIS_AVAILABLE and settings.REDIS_URL and settings.AI_INVOCATION_COUNTER_ENABLED:
-    logger.info("Attempting to initialize Redis client for AI invocation counting...")
-    try:
-        redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
-        logger.info(f"Redis client initialized successfully from URL: {settings.REDIS_URL}")
-    except Exception as e:
-        logger.error(f"Failed to initialize Redis client from URL '{settings.REDIS_URL}': {e}", exc_info=True)
-        redis_client = None
-elif REDIS_AVAILABLE and not settings.REDIS_URL:
-    logger.warning("Redis library is installed, but REDIS_URL not configured. AI invocation counting disabled.")
-elif REDIS_AVAILABLE and not settings.AI_INVOCATION_COUNTER_ENABLED:
-     logger.info("AI invocation counting is disabled in settings.")
-# --- End Initialize Redis Client ---
+SYSTEM_PROMPT_RULE_GEN = f"""
+You are an expert DICOM and clinical informatics assistant.
+Your task is to generate a single JSON object representing a DICOM processing rule based on a natural language request.
+The JSON object must conform to the following structure:
+{{
+  "name": "Descriptive Rule Name",
+  "description": "Detailed explanation of what the rule does.",
+  "match_criteria": {{
+    "condition": "AND" / "OR", // How multiple tag/association criteria are combined
+    "tag_criteria": [ // Optional: criteria based on DICOM tag values
+      {{
+        "tag_group": "0010", // DICOM Tag Group (hex)
+        "tag_element": "0010", // DICOM Tag Element (hex)
+        "value": "PATIENT_NAME", // Value to match. For numeric types, ensure it's a string.
+        "op": "EQUALS" // MatchOperation, see below
+      }}
+    ],
+    "association_criteria": [ // Optional: criteria based on source/destination of DICOM instance
+        {{
+            "association_type": "SOURCE_AE_TITLE", // Or DESTINATION_AE_TITLE, SOURCE_IP, DESTINATION_IP
+            "value": "MY_PACS_AE",
+            "op": "EQUALS"
+        }}
+    ]
+  }},
+  "modifications": [ // Optional: actions to modify DICOM tags
+    {{
+      "action": "SET", // ModifyAction, see below
+      "tag_group": "0008",
+      "tag_element": "0070",
+      "value": "MegaCorp" // New value for the tag
+    }},
+    {{
+      "action": "REMOVE",
+      "tag_group": "0010",
+      "tag_element": "0020" // Tag to remove (PatientID)
+    }}
+  ],
+  "destinations": [ // Optional: names of pre-configured destination systems
+    "ArchiveSystemX", "ResearchRepoY"
+  ],
+  "priority": 100, // Integer, lower numbers run first
+  "is_enabled": true // boolean
+}}
 
+Available MatchOperation ("op") values for "tag_criteria" and "association_criteria":
+{json.dumps([op.value for op in MatchOperation], indent=2)}
 
-# --- Existing Rule Generation Logic (OpenAI) (Keep Existing) ---
-# ... (SYSTEM_PROMPT and generate_rule_suggestion function remain the same) ...
-SYSTEM_PROMPT = """
-You are an expert assistant helping users configure DICOM routing and processing rules for the Axiom Flow system.
-Your goal is to translate a user's natural language description of a rule into a structured JSON format that Axiom Flow can understand.
+Available ModifyAction ("action") values for "modifications":
+{json.dumps([action.value for action in ModifyAction], indent=2)}
 
-The user will provide a description of what they want the rule to do. You need to generate a JSON object containing the following possible keys: "match_criteria", "association_criteria", "tag_modifications", "applicable_sources".
-
-1.  **match_criteria**: A list of objects, each specifying a condition based on DICOM tags.
-    - Each object must have "tag" (e.g., "0008,0060" or "Modality"), "op" (one of the MatchOperation values below), and optionally "value".
-    - Example: `{"tag": "Modality", "op": "eq", "value": "CT"}`
-    - Available MatchOperation ("op") values: {MatchOperation.__members__.keys()}
-
-2.  **association_criteria**: A list of objects, each specifying a condition based on DICOM association details.
-    - Each object must have "parameter" (one of 'SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE'), "op", and "value".
-    - Example: `{"parameter": "CALLING_AE_TITLE", "op": "eq", "value": "CT_SCANNER"}`
-    - IP specific ops ("ip_eq", "ip_startswith", "ip_in_subnet") are only valid for the "SOURCE_IP" parameter.
-
-3.  **tag_modifications**: A list of objects, each specifying an action to modify DICOM tags.
-    - Each object must have an "action" key (one of the ModifyAction values below).
-    - Other keys depend on the action (e.g., "tag", "value", "vr", "source_tag", "destination_tag", "pattern", "replacement", "crosswalk_map_id").
-    - Always include the "action" field.
-    - For "set", "copy", "move", specify "vr" (Value Representation, e.g., "PN", "DA", "LO") if known, otherwise the system might guess.
-    - Examples:
-        - `{"action": "set", "tag": "StudyDescription", "value": "Modified Study", "vr": "LO"}`
-        - `{"action": "delete", "tag": "PatientComments"}`
-        - `{"action": "copy", "source_tag": "AccessionNumber", "destination_tag": "0077,1010", "destination_vr": "SH"}`
-        - `{"action": "regex_replace", "tag": "PatientName", "pattern": "\\^", "replacement": " "}`
-        - `{"action": "crosswalk", "crosswalk_map_id": 1}`
-    - Available ModifyAction ("action") values: {ModifyAction.__members__.keys()}
-
-4.  **applicable_sources**: A list of strings identifying which input sources this rule should apply to. If omitted or null, it applies to all.
-    - Example: `["CT_SCANNER_AE", "MRI_SCANNER_AE"]`
-
-**Output Format:** Respond ONLY with a single JSON object containing the suggested keys ("match_criteria", "association_criteria", "tag_modifications", "applicable_sources"). Do not include any other text, explanations, or markdown formatting outside the JSON structure. If the user's request is ambiguous or cannot be translated, return a JSON object with an "error" key explaining the issue. Example error: `{"error": "Could not determine the specific DICOM tag for 'patient identifier'."}`. Use null for sections that are not applicable based on the prompt.
+Key Considerations:
+1.  "name" and "description" should be human-readable and informative.
+2.  "match_criteria" is mandatory. It must have "condition" and at least one of "tag_criteria" or "association_criteria".
+3.  All DICOM tag groups and elements must be 4-character hexadecimal strings.
+4.  "value" in "tag_criteria" should be a string, even for numeric DICOM tags.
+5.  If "modifications" are present, each item must have "action", "tag_group", and "tag_element". "value" is required for actions like "SET", "ADD", "PREPEND", "APPEND".
+6.  "destinations" is an array of strings. These strings must correspond to names of pre-configured destination systems.
+7.  "priority" is an integer. Lower numbers indicate higher priority. A common default is 100.
+8.  "is_enabled" is a boolean, typically true for new rules.
+9.  If the request implies matching a specific DICOM tag (e.g., "Patient ID is '12345'"), use the correct hexadecimal tag group and element (e.g., PatientID is (0010,0020)).
+10. If the request implies routing or sending to a specific system, list its name in the "destinations" array.
+11. If the request implies changing a tag value, use "SET" action. If adding a new value to a multi-valued tag, use "ADD".
+12. If the request is vague about a specific tag, try to infer the most common one (e.g., "institution" likely means InstitutionName (0008,0080)).
+13. For matching non-existence of a tag, use "NOT_EXISTS". For existence, use "EXISTS".
+14. For string comparisons, "CONTAINS", "STARTS_WITH", "ENDS_WITH" are useful. "REGEX" for complex patterns.
+15. Respond ONLY with the JSON object. No explanations, greetings, or other text.
 """
 
 async def generate_rule_suggestion(request: RuleGenRequest) -> RuleGenResponse:
-    """
-    Uses OpenAI's chat completion to generate rule suggestions based on a natural language prompt.
-    (Requires OpenAI client to be configured)
-    """
     if not OPENAI_AVAILABLE or not openai_client:
-        logger.error("OpenAI client is not available or not configured for rule generation.")
-        return RuleGenResponse(error="AI service (OpenAI) is not available or not configured.")
+        logger.warning("OpenAI client not available or not initialized for rule generation.")
+        return RuleGenResponse(error="OpenAI features are not available or not configured.")
 
-    logger.info(f"Generating rule suggestion via OpenAI for prompt: '{request.prompt[:50]}...'")
+    log = logger.bind(request_text=request.request_text, model_name=settings.OPENAI_MODEL_NAME_RULE_GEN)
+    log.info("Generating DICOM rule suggestion.")
 
     try:
         completion = await openai_client.chat.completions.create(
-            model="gpt-3.5-turbo", # Consider making model configurable
+            model=settings.OPENAI_MODEL_NAME_RULE_GEN,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": request.prompt}
+                {"role": "system", "content": SYSTEM_PROMPT_RULE_GEN},
+                {"role": "user", "content": request.request_text}
             ],
-            temperature=0.2,
-            max_tokens=500,
-            response_format={"type": "json_object"},
+            temperature=settings.OPENAI_TEMPERATURE_RULE_GEN,
+            max_tokens=settings.OPENAI_MAX_TOKENS_RULE_GEN,
+            response_format={"type": "json_object"}
         )
-        ai_response_content = completion.choices[0].message.content
-        logger.debug(f"Raw OpenAI response content: {ai_response_content}")
-        if not ai_response_content:
-             logger.warning("OpenAI response content was empty.")
-             return RuleGenResponse(error="OpenAI returned an empty response.")
 
-        # Parse and Validate (Existing Logic)
+        if not completion.choices or not completion.choices[0].message.content:
+            log.warning("OpenAI response was empty or malformed.")
+            return RuleGenResponse(error="Failed to generate rule: OpenAI response was empty.")
+
+        generated_json_str = completion.choices[0].message.content
+        log.debug("Raw JSON response from OpenAI.", raw_json=generated_json_str)
+
         try:
-            suggestion_dict = json.loads(ai_response_content)
-            if not isinstance(suggestion_dict, dict): raise ValueError("OpenAI response was not a JSON object.")
-            if "error" in suggestion_dict:
-                logger.warning(f"OpenAI returned an error message: {suggestion_dict['error']}")
-                return RuleGenResponse(error=suggestion_dict["error"])
-            suggestion = RuleGenSuggestion(
-                match_criteria=suggestion_dict.get("match_criteria"),
-                association_criteria=suggestion_dict.get("association_criteria"),
-                tag_modifications=suggestion_dict.get("tag_modifications"),
-                applicable_sources=suggestion_dict.get("applicable_sources"),
-            )
-            logger.info("Successfully generated and parsed OpenAI rule suggestion.")
-            return RuleGenResponse(suggestion=suggestion, explanation="Suggestion generated based on your prompt.")
-        except (json.JSONDecodeError, ValueError) as parse_err:
-            logger.error(f"Failed to parse/validate OpenAI response: {parse_err}. Response: {ai_response_content[:500]}", exc_info=True)
-            return RuleGenResponse(error=f"AI response structure invalid: {parse_err}")
-        except Exception as parse_err:
-            logger.error(f"Unexpected error parsing OpenAI response: {parse_err}", exc_info=True)
-            return RuleGenResponse(error=f"Error parsing AI response: {parse_err}")
+            generated_rule_dict = json.loads(generated_json_str)
+            # Basic validation can be done here if needed before creating RuleGenSuggestion
+            # For now, assume the model adheres to the prompt structure for JSON
+            suggestion = RuleGenSuggestion(**generated_rule_dict)
+            log.info("Successfully generated and parsed rule suggestion.")
+            return RuleGenResponse(suggestion=suggestion)
+        except json.JSONDecodeError as json_err:
+            log.error("Failed to parse JSON from OpenAI response.", json_error=str(json_err), raw_response=generated_json_str)
+            return RuleGenResponse(error=f"Failed to parse generated rule: {str(json_err)}. Raw: {generated_json_str[:200]}...")
+        except Exception as pydantic_err: # Catch Pydantic validation errors
+            log.error("Failed to validate generated rule against Pydantic schema.", pydantic_error=str(pydantic_err), raw_response=generated_json_str)
+            return RuleGenResponse(error=f"Generated rule failed validation: {str(pydantic_err)}. Raw: {generated_json_str[:200]}...")
 
-    except APIConnectionError as e:
-        logger.error(f"OpenAI API connection error: {e}")
-        return RuleGenResponse(error=f"Could not connect to OpenAI service: {e}")
-    except RateLimitError as e:
-        logger.error(f"OpenAI API rate limit exceeded: {e}")
-        return RuleGenResponse(error=f"OpenAI service rate limit exceeded. Please try again later. {e}")
-    except APIError as e:
-        logger.error(f"OpenAI API error: Status={e.status_code}, Message={e.message}", exc_info=True)
-        return RuleGenResponse(error=f"OpenAI service returned an error: {e.message} (Status: {e.status_code})")
+    except RateLimitError:
+        log.error("OpenAI API rate limit exceeded.")
+        return RuleGenResponse(error="OpenAI API rate limit exceeded. Please try again later.")
+    except APIConnectionError:
+        log.error("Failed to connect to OpenAI API.")
+        return RuleGenResponse(error="Failed to connect to OpenAI API. Check network connectivity.")
+    except APIError as api_err: # Catch other OpenAI API errors
+        log.error("OpenAI API error.", api_error_details=str(api_err))
+        return RuleGenResponse(error=f"OpenAI API error: {str(api_err)}")
     except Exception as e:
-        logger.error(f"Unexpected error during OpenAI rule generation: {e}", exc_info=True)
-        return RuleGenResponse(error=f"An unexpected error occurred during AI rule generation: {e}")
-# --- End Existing Rule Generation Logic ---
+        log.error("An unexpected error occurred during rule generation.", error_details=str(e), exc_info=True)
+        return RuleGenResponse(error=f"An unexpected error occurred: {str(e)}")
 
 
-# --- NEW: Vocabulary Standardization Logic (Gemini) (Keep Existing) ---
+DEFAULT_SAFETY_SETTINGS = {}
+if VERTEX_AI_AVAILABLE:
+    DEFAULT_SAFETY_SETTINGS = {
+        generative_models_preview.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models_preview.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        generative_models_preview.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models_preview.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        generative_models_preview.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models_preview.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        generative_models_preview.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models_preview.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    }
 
-# Define safety settings for Gemini - adjust as needed
-DEFAULT_SAFETY_SETTINGS = {
-    generative_models.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    generative_models.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    generative_models.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    generative_models.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-}
-
-# Define generation config - adjust as needed
 DEFAULT_GENERATION_CONFIG = {
-    "max_output_tokens": 100, # Keep it short for vocab terms
-    "temperature": 0.2,     # Low temp for consistency
-    "top_p": 0.8,           # Nucleus sampling
-    "top_k": 40,            # Top-k sampling
+    "max_output_tokens": settings.VERTEX_AI_MAX_OUTPUT_TOKENS_VOCAB,
+    "temperature": settings.VERTEX_AI_TEMPERATURE_VOCAB,
+    "top_p": settings.VERTEX_AI_TOP_P_VOCAB,
+    "top_k": settings.VERTEX_AI_TOP_K_VOCAB,
 }
 
-# Dictionary to map context to prompts - can be expanded
 STANDARDIZATION_PROMPTS = {
-    "StudyDescription": """
-Given the following DICOM Study Description, provide a standardized clinical term or phrase suitable for indexing and querying.
-Focus on the primary modality and body part or procedure. Respond ONLY with the standardized term. Do not add explanations.
-Input Study Description: "{input_value}"
-Standardized Term:""",
+    "StudyDescription": """Given the following DICOM Study Description, provide a standardized clinical term or phrase suitable for indexing and querying. Focus on the primary modality and body part or procedure. Respond ONLY with the standardized term. Do not add explanations. Input Study Description: "{input_value}" Standardized Term:""",
+    "ProtocolName": """Given the following DICOM Protocol Name, provide a standardized clinical term or phrase suitable for indexing and querying. Focus on the primary modality and body part or procedure described in the protocol. Respond ONLY with the standardized term. Do not add explanations. Input Protocol Name: "{input_value}" Standardized Term:""",
+    "BodyPartExamined": """You are an expert medical terminology AI. Your task is to standardize a given DICOM Body Part Examined term by determining the apprpriate DICOM PS3.16 context mapping for BODY PART EXAMINED.  Output it limited to 16 characters, must be all caps, and contain no spaces or underscores.
+Return ONLY the single, most concise, common, standardized clinical anatomical term.
+Do NOT include any explanations, prefixes like "Standardized Term:", or any text other than the standardized term itself.
 
-    "ProtocolName": """
-Given the following DICOM Protocol Name, provide a standardized clinical term or phrase suitable for indexing and querying.
-Focus on the primary modality and body part or procedure described in the protocol. Respond ONLY with the standardized term. Do not add explanations.
-Input Protocol Name: "{input_value}"
-Standardized Term:""",
+Examples:
+Input: "LUNG"
+Output: "LUNG"
 
-    "Default": """
-Standardize the following text input into a common term suitable for categorization. Respond ONLY with the standardized term.
+Input: "FEMUR TIBIA PATELLA"
+Output: "KNEE"
+
+Input: "KUB"
+Output: "ABDOMEN"
+
+Input: "SOFT TISSUE NECK"
+Output: "NECK"
+
+Input: "RIGHT KNEE"
+Output: "KNEE"
+
+Input: "ABDOMINAL REGION"
+Output: "ABDOMEN"
+
+Input: "LEFT FEMORAL ARTERY"
+Output: "LFEMORALA"
+
+Input: "FEMORAL ARTERY"
+Output: "FEMORALA"
+
+Input: "ABDPEL"
+Output: "ABDOMENPELVIS"
+
 Input: "{input_value}"
-Standardized Term:"""
+Output:""",
+    "Default": """Standardize the following text input into a common term suitable for categorization. Respond ONLY with the standardized term. Input: "{input_value}" Standardized Term:"""
 }
 
-async def _increment_invocation_count(model_type: str, function_name: str):
-    """Increments the AI invocation counter in Redis if enabled and available."""
-    if redis_client and settings.AI_INVOCATION_COUNTER_ENABLED:
+def _increment_invocation_count_sync(model_type: str, function_name: str):
+    """Synchronously increments the AI invocation counter in Redis."""
+    if not REDIS_SYNC_CLIENT_AVAILABLE:
+        logger.debug("Sync Redis client library not available, skipping AI count increment.")
+        return
+    if not settings.AI_INVOCATION_COUNTER_ENABLED:
+        logger.debug("AI invocation counter is disabled via settings, skipping increment.")
+        return
+    if not settings.REDIS_URL:
+        logger.warning("Redis URL not configured, cannot increment AI count.")
+        return
+
+    # Instantiate Redis client per call for thread safety when called via asyncio.to_thread
+    redis_client_instance = None
+    log = logger.bind(counter_model_type=model_type, counter_function_name=function_name)
+    try:
+        redis_client_instance = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True, socket_timeout=2, socket_connect_timeout=2) # type: ignore
+        counter_key = f"{settings.AI_INVOCATION_COUNTER_KEY_PREFIX}"
+        field_key = f"{model_type}:{function_name}"
+        redis_client_instance.hincrby(counter_key, field_key, 1)
+        log.debug("Incremented AI invocation count (sync, per-call client).", counter_field=field_key)
+    except redis.exceptions.TimeoutError as redis_timeout_err: # type: ignore
+        log.warning("Redis timeout during AI count increment (sync, per-call client).", error_details=str(redis_timeout_err))
+    except redis.exceptions.ConnectionError as redis_conn_err: # type: ignore
+        log.warning("Redis connection error during AI count increment (sync, per-call client).", error_details=str(redis_conn_err))
+    except Exception as redis_err:
+        log.warning("Failed to increment AI count in Redis (sync, per-call client).", error_details=str(redis_err), exc_info=settings.LOG_LEVEL == "DEBUG")
+    finally:
+        if redis_client_instance:
+            try:
+                redis_client_instance.close()
+            except Exception as close_err:
+                log.warning("Error closing temporary Redis client for AI counter.", error_details=str(close_err))
+
+
+async def _standardize_vocabulary_gemini_async(
+    input_value: str, context: str = "Default",
+    generation_config_override: Optional[Dict[str, Any]] = None,
+    safety_settings_override: Optional[Dict[Any, Any]] = None
+) -> Optional[str]:
+
+    if not VERTEX_AI_INITIALIZED_SUCCESSFULLY:
+        logger.error("Vertex AI not initialized. Cannot standardize vocabulary using Gemini.")
+        return None
+    if not input_value or not isinstance(input_value, str) or not input_value.strip():
+        logger.warning("Invalid or empty input for async standardization.", received_input=input_value, received_type=type(input_value).__name__)
+        return None # Return None, let caller decide if original value should be used
+
+    # Create a new GenerativeModel instance for each async call.
+    # This is safer for concurrency if the underlying client has issues with reuse across event loop contexts.
+    try:
+        local_gemini_model = GenerativeModel(settings.VERTEX_AI_MODEL_NAME)
+    except Exception as model_create_err:
+        logger.error("Failed to create GenerativeModel for async Gemini call.", model_name=settings.VERTEX_AI_MODEL_NAME, error_details=str(model_create_err), exc_info=True)
+        return None
+
+    prompt_template = STANDARDIZATION_PROMPTS.get(context, STANDARDIZATION_PROMPTS["Default"])
+    prompt = prompt_template.format(input_value=input_value)
+    
+    log = logger.bind(
+        ai_model_used=settings.VERTEX_AI_MODEL_NAME,
+        ai_context=context,
+        ai_input_value_snippet=input_value[:80] + ("..." if len(input_value) > 80 else "")
+    )
+    # Avoid logging full prompt if it's too verbose or contains sensitive data by default
+    # log.debug("Full prompt for Gemini call.", full_prompt_for_debug=prompt) 
+    log.info("Attempting async vocabulary standardization with Gemini (per-call model).")
+
+    if settings.AI_INVOCATION_COUNTER_ENABLED:
         try:
-            # Use a hash for grouping counts by model/function
-            counter_key = f"{settings.AI_INVOCATION_COUNTER_KEY_PREFIX}"
-            field_key = f"{model_type}:{function_name}"
-            await redis_client.hincrby(counter_key, field_key, 1)
-            logger.debug(f"Incremented AI invocation count for {field_key}")
-        except Exception as redis_err:
-            # Don't let counter failure break the main logic
-            logger.warning(f"Failed to increment AI invocation count in Redis for {field_key}: {redis_err}", exc_info=True)
+            # Call the modified synchronous incrementer in a separate thread
+            await asyncio.to_thread(_increment_invocation_count_sync, "gemini", f"standardize_{context.lower()}")
+        except Exception as e_redis_inc:
+            log.warning("Submitting Redis sync increment call via to_thread failed.", error_details=str(e_redis_inc), exc_info=True)
+            
+    current_gen_config = {**DEFAULT_GENERATION_CONFIG, **(generation_config_override or {})}
+    if context == "BodyPartExamined": # Ensure specific overrides for BodyPartExamined
+        current_gen_config["temperature"] = 0.0 
+        current_gen_config["max_output_tokens"] = settings.VERTEX_AI_MAX_OUTPUT_TOKENS_BODYPART # Use specific token limit if defined
+    log.debug("Using generation config for Gemini call.", gen_config_for_call=current_gen_config)
+    
+    current_safety_settings = safety_settings_override or DEFAULT_SAFETY_SETTINGS if VERTEX_AI_AVAILABLE else {}
 
+    try:
+        response = await local_gemini_model.generate_content_async(
+            [prompt], # Pass prompt as a list for multi-turn, or single item list for single turn
+            generation_config=current_gen_config,
+            safety_settings=current_safety_settings,
+            stream=False,
+        )
+        
+        raw_response_text_content = "N/A" # Default if no valid text found
+        if response.candidates and hasattr(response.candidates[0], 'content') and response.candidates[0].content and \
+           hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
+            # Concatenate text from all parts, if any
+            raw_response_text_content = "".join([getattr(part, 'text', '') for part in response.candidates[0].content.parts if hasattr(part, 'text')])
 
-async def standardize_vocabulary_gemini(
-    input_value: str,
-    context: str = "Default", # e.g., "StudyDescription", "ProtocolName"
+        finish_reason_val = getattr(getattr(response.candidates[0], 'finish_reason', None), 'name', 'N/A') if response.candidates else 'N/A'
+        log.debug("Raw Gemini response received (per-call model).",
+                  finish_reason_candidate_0=finish_reason_val,
+                  raw_text_candidate_0_snippet=raw_response_text_content[:100])
+
+        if not response.candidates:
+            log.warning("Gemini (per-call model) returned no candidates.")
+            return None
+        
+        candidate = response.candidates[0]
+        finish_reason_enum_val = getattr(candidate, 'finish_reason', None)
+
+        if finish_reason_enum_val == FinishReason.MAX_TOKENS:
+            log.warning("Gemini (per-call model) hit MAX_TOKENS limit.",
+                        max_tokens_set=current_gen_config.get("max_output_tokens"),
+                        received_partial_text=raw_response_text_content)
+            # Return None, indicating failure, caller should use original value or handle error
+            return None 
+        
+        if finish_reason_enum_val != FinishReason.STOP:
+             log.warning("Gemini (per-call model) generation stopped for a non-STOP reason.",
+                         reason=getattr(finish_reason_enum_val, 'name', 'UNKNOWN'))
+             # Potentially return None or handle based on specific non-STOP reasons if needed
+        
+        # Check safety ratings
+        if hasattr(candidate, 'safety_ratings'):
+             for rating in candidate.safety_ratings:
+                  if hasattr(rating, 'blocked') and rating.blocked:
+                       log.warning("Gemini (per-call model) response blocked by safety filter.",
+                                   category=getattr(getattr(rating, 'category', None), 'name', 'UNKNOWN_CATEGORY'),
+                                   probability=getattr(getattr(rating, 'probability', None), 'name', 'UNKNOWN_PROBABILITY'))
+                       return None # Blocked content, return None
+        
+        standardized_text = raw_response_text_content.strip()
+        if not standardized_text:
+            log.warning("Gemini (per-call model) returned an empty string after stripping, though finish_reason was STOP.",
+                        original_raw_response=raw_response_text_content)
+            return None # Effectively an empty/failed response
+            
+        log.info("Successfully standardized term with Gemini (per-call model).", standardized_term=standardized_text)
+        return standardized_text
+        
+    except google_api_exceptions.ResourceExhausted as e_resource: # type: ignore
+        log.error("Gemini API call failed due to resource exhaustion (e.g., quota).", error_details=str(e_resource), exc_info=True)
+        return None
+    except google_api_exceptions.InvalidArgument as e_invalid_arg: # type: ignore
+        log.error("Gemini API call failed due to invalid argument (check prompt, config).", error_details=str(e_invalid_arg), exc_info=True)
+        return None
+    except google_api_exceptions.GoogleAPICallError as e_gcall: # type: ignore
+        log.error("A Google API call error occurred during async Gemini call (per-call model).", error_details=str(e_gcall), exc_info=True)
+        return None
+    except RuntimeError as e_runtime: # e.g. issues with event loop if not managed correctly
+        log.error("RuntimeError during async Gemini call (per-call model).", error_details=str(e_runtime), exc_info=True)
+        return None
+    except Exception as e:
+        log.error("Unexpected error during async Gemini call (per-call model).", error_details=str(e), exc_info=True)
+        return None
+
+def standardize_vocabulary_gemini_sync(
+    input_value: str, context: str = "Default",
     generation_config: Optional[Dict[str, Any]] = None,
     safety_settings: Optional[Dict[Any, Any]] = None
 ) -> Optional[str]:
     """
-    Uses the configured Vertex AI Gemini model to standardize a given text value.
-
-    Args:
-        input_value: The string value to standardize (e.g., from a DICOM tag).
-        context: Provides context for the standardization task (used to select prompt).
-        generation_config: Optional override for Gemini generation parameters.
-        safety_settings: Optional override for Gemini safety settings.
-
-    Returns:
-        The standardized string, or None if standardization fails or AI is unavailable.
+    Synchronous wrapper to call the async Gemini standardization function.
+    This is intended to be called from synchronous Celery tasks.
+    Returns the standardized string, or None if standardization failed or was not possible.
     """
-    global gemini_model # Ensure we are checking the potentially updated global var
-    if not gemini_model:
-        logger.error("Vertex AI Gemini model is not available or not configured for vocabulary standardization.")
-        return None
+    log = logger.bind(
+        sync_wrapper_call_gemini=True,
+        ai_context=context,
+        ai_input_value_snippet=input_value[:80] + ("..." if len(input_value) > 80 else "")
+    )
 
-    if not input_value or not isinstance(input_value, str):
-        logger.warning("Invalid input value provided for standardization.")
-        return None
+    if not VERTEX_AI_INITIALIZED_SUCCESSFULLY:
+        log.error("Vertex AI not initialized. Sync wrapper for Gemini cannot proceed.")
+        return None # Or input_value if you want to return original on infra failure
+    
+    if not input_value or not isinstance(input_value, str) or not input_value.strip():
+        log.debug("Empty or invalid value passed to AI standardization sync wrapper, skipping.", received_value=input_value)
+        return None # Or input_value
 
-    # Select prompt based on context
-    prompt_template = STANDARDIZATION_PROMPTS.get(context, STANDARDIZATION_PROMPTS["Default"])
-    prompt = prompt_template.format(input_value=input_value)
+    log.info("Executing sync wrapper for Gemini standardization (via thread pool, per-call async model).")
 
-    log = logger.bind(model=settings.VERTEX_AI_MODEL_NAME, context=context, input_value_snippet=input_value[:50])
-    log.info("Attempting vocabulary standardization via Gemini.")
-
-    try:
-        # Increment counter before the call
-        await _increment_invocation_count("gemini", f"standardize_{context.lower()}")
-
-        # Call Gemini API asynchronously
-        response = await gemini_model.generate_content_async(
-            [prompt],
-            generation_config=generation_config or DEFAULT_GENERATION_CONFIG,
-            safety_settings=safety_settings or DEFAULT_SAFETY_SETTINGS,
-            stream=False, # We want the full response at once
-        )
-
-        # Process the response
-        log.debug(f"Raw Gemini response: {response}")
-
-        # Check for finish reason and safety ratings (important!)
-        if not response.candidates:
-             log.warning("Gemini response contained no candidates.")
-             return None
-
-        candidate = response.candidates[0] # Assuming only one candidate usually
-
-        if candidate.finish_reason != FinishReason.STOP:
-             log.warning(f"Gemini generation stopped prematurely. Reason: {candidate.finish_reason.name}")
-             # Optionally check candidate.finish_message for details
-
-        # Check safety ratings - if blocked, we get no content part
-        if candidate.safety_ratings:
-             for rating in candidate.safety_ratings:
-                  # Check if rating.blocked exists and is True
-                  if hasattr(rating, 'blocked') and rating.blocked:
-                       log.warning(f"Gemini response blocked due to safety concerns. Category: {rating.category.name}, Probability: {rating.probability.name}")
-                       return None # Or handle differently
-
-        if not candidate.content or not candidate.content.parts:
-            log.warning("Gemini response candidate has no content parts.")
+    def run_async_in_thread_capture_loop():
+        # Each thread executing asyncio.run will get/create its own event loop.
+        try:
+            # Important: asyncio.run creates a new event loop, runs the coro, and closes the loop.
+            return asyncio.run(
+                _standardize_vocabulary_gemini_async(
+                    input_value, context, generation_config, safety_settings
+                )
+            )
+        except RuntimeError as e:
+            # This might catch "Event loop is closed" if _standardize_vocabulary_gemini_async
+            # itself tries to interact with a loop in an unexpected way after asyncio.run finishes/fails.
+            log.error("RuntimeError in thread's asyncio.run for Gemini (per-call model).", error_details=str(e), exc_info=True)
+            return None
+        except Exception as e:
+            log.error("Unexpected exception in thread's async Gemini call execution (per-call model).", error_details=str(e), exc_info=True)
             return None
 
-        # Extract text, expecting only one part based on our simple prompt
-        if len(candidate.content.parts) > 1:
-             log.warning(f"Gemini response contained multiple parts ({len(candidate.content.parts)}), using only the first.")
-
-        standardized_text = candidate.content.parts[0].text.strip()
-
-        if not standardized_text:
-             log.warning("Gemini returned an empty standardized term.")
-             return None # Treat empty as failure
-
-        log.info(f"Successfully standardized term: '{standardized_text}'")
-        return standardized_text
-
-    except google_api_exceptions.GoogleAPICallError as api_err:
-        log.error(f"Vertex AI API call error during standardization: {api_err}", exc_info=True)
-        return None
+    try:
+        future = thread_pool_executor.submit(run_async_in_thread_capture_loop)
+        timeout_seconds = settings.AI_SYNC_WRAPPER_TIMEOUT
+        
+        # future.result() will block until the function completes or timeout occurs
+        result = future.result(timeout=timeout_seconds)
+        
+        log.info("Sync wrapper for Gemini (thread pool, per-call model) completed.", result_is_none=(result is None), timeout_used=timeout_seconds)
+        return result # This will be the string from _standardize_vocabulary_gemini_async or None
+    except concurrent.futures.TimeoutError:
+        log.error("Sync wrapper for Gemini timed out (per-call model).", timeout_value=timeout_seconds)
+        # Optionally, try to cancel the future if it's still running, though cancellation is best-effort
+        future.cancel()
+        return None # Or input_value
     except Exception as e:
-        log.error(f"Unexpected error during Gemini vocabulary standardization: {e}", exc_info=True)
-        return None
-# --- End Vocabulary Standardization Logic ---
+        # This catches errors from thread_pool_executor.submit or future.result() itself
+        log.error("Error submitting/getting result from thread pool for Gemini (per-call model).", error_details=str(e), exc_info=True)
+        return None # Or input_value
+
+# Consider adding a shutdown for the thread_pool_executor if your app has a graceful shutdown hook
+# import atexit
+# def shutdown_thread_pool():
+#    logger.info("Shutting down AI thread pool executor...")
+#    thread_pool_executor.shutdown(wait=True)
+#    logger.info("AI thread pool executor shut down.")
+# atexit.register(shutdown_thread_pool)

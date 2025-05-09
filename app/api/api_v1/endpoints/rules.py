@@ -1,44 +1,52 @@
 # app/api/api_v1/endpoints/rules.py
 
 from typing import List, Optional, Any, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body # Added Body
 from sqlalchemy.orm import Session
 import pydicom
 from pydicom.errors import InvalidDicomError
-# Use structlog if available, otherwise fallback
-try:
-    import structlog # type: ignore
-    logger = structlog.get_logger(__name__)
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+# Use structlog consistently
+import structlog # type: ignore
+logger = structlog.get_logger(__name__)
 from copy import deepcopy
 from pydantic import TypeAdapter
-import json # Import json for potential string parsing
+import json # For potential string parsing if needed, but from_json handles dicts
 
 from app.db import models
 from app.api import deps
-from app import crud, schemas
-from app.schemas import JsonProcessRequest, JsonProcessResponse
-
-# --- Import helpers, handle potential ImportErrors ---
+from app import crud, schemas # Import top-level schemas
+# Import specific schemas used in this endpoint
+from app.schemas.rule import ( 
+    RuleSet, RuleSetCreate, RuleSetUpdate, Rule, RuleCreate, RuleUpdate, 
+    MatchCriterion, AssociationMatchCriterion, TagModification, RuleSetExecutionMode)
+                        
+# --- CORRECTED: Import helpers from their new locations ---
 try:
-    from app.worker.processing_logic import check_match, apply_modifications, parse_dicom_tag
-    from app.db.models.rule import RuleSetExecutionMode
-    PROCESSING_LOGIC_AVAILABLE = True
-except ImportError as e:
-    logger.error(f"Could not import helpers from app.worker.processing_logic or models: {e}. JSON processing endpoint may fail or be disabled.")
-    # Define dummy functions if import fails
-    def check_match(*args, **kwargs): raise NotImplementedError("Rule matching logic not available")
-    def apply_modifications(*args, **kwargs): raise NotImplementedError("Tag modification logic not available")
-    RuleSetExecutionMode = None # type: ignore
-    PROCESSING_LOGIC_AVAILABLE = False
+    from app.worker.utils.dicom_utils import parse_dicom_tag
+    from app.worker.rule_evaluator import check_tag_criteria # Renamed from check_match
+    from app.worker.standard_modification_handler import apply_standard_modifications # Renamed from apply_modifications
+    WORKER_HELPERS_AVAILABLE = True
+except ImportError as import_err:
+    logger.error(
+        "Failed to import refactored worker helpers (parse_dicom_tag, check_tag_criteria, apply_standard_modifications). "
+        "JSON processing endpoint will likely fail.", 
+        error_details=str(import_err), exc_info=True
+    )
+    WORKER_HELPERS_AVAILABLE = False
+    # Define dummy functions if import fails to allow server startup, but endpoint will fail
+    def parse_dicom_tag(*args, **kwargs): raise NotImplementedError("Worker helper parse_dicom_tag not imported.")
+    def check_tag_criteria(*args, **kwargs): raise NotImplementedError("Worker helper check_tag_criteria not imported.")
+    def apply_standard_modifications(*args, **kwargs): raise NotImplementedError("Worker helper apply_standard_modifications not imported.")
+# --- END CORRECTION ---
+
+# Import RuleSetExecutionMode enum if needed (it is used below)
+# from app.db.models.rule import RuleSetExecutionMode # Import from models if defined there, or schemas if defined there
 
 router = APIRouter()
 
 # <------------------------------------------------------->
 # <---         RuleSet and Rule CRUD Endpoints         --->
-# <---      (UNCHANGED - Keep existing CRUD code)      --->
+# <---      (UNCHANGED - Keeping existing CRUD code)   --->
 # <------------------------------------------------------->
 
 # --- RuleSet Endpoints ---
@@ -46,7 +54,9 @@ router = APIRouter()
 def create_ruleset_endpoint(*, db: Session = Depends(deps.get_db), ruleset_in: schemas.RuleSetCreate, current_user: models.User = Depends(deps.get_current_active_user),) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_name=ruleset_in.name)
     log.info("Attempting to create ruleset")
-    try: created_ruleset = crud.ruleset.create(db=db, ruleset=ruleset_in)
+    try: 
+        # Assuming crud.ruleset exists based on your crud/__init__.py
+        created_ruleset = crud.ruleset.create(db=db, ruleset=ruleset_in) 
     except ValueError as e:
         log.warning("RuleSet creation conflict", error=str(e))
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
@@ -57,7 +67,7 @@ def create_ruleset_endpoint(*, db: Session = Depends(deps.get_db), ruleset_in: s
 def read_rulesets_endpoint( db: Session = Depends(deps.get_db), skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, skip=skip, limit=limit)
     log.debug("Reading rulesets")
-    rulesets = crud.ruleset.get_multi(db=db, skip=skip, limit=limit)
+    rulesets = crud.ruleset.get_multi(db=db, skip=skip, limit=limit) # Assuming crud.ruleset access
     log.debug("Retrieved rulesets", count=len(rulesets))
     return rulesets
 
@@ -65,7 +75,7 @@ def read_rulesets_endpoint( db: Session = Depends(deps.get_db), skip: int = Quer
 def read_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
     log.debug("Reading ruleset")
-    db_ruleset = crud.ruleset.get(db=db, ruleset_id=ruleset_id)
+    db_ruleset = crud.ruleset.get(db=db, ruleset_id=ruleset_id) # Assuming crud.ruleset access
     if db_ruleset is None:
         log.warning("RuleSet not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
@@ -76,13 +86,13 @@ def read_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), 
 def update_ruleset_endpoint( *, db: Session = Depends(deps.get_db), ruleset_id: int, ruleset_in: schemas.RuleSetUpdate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
     log.info("Attempting to update ruleset")
-    db_ruleset = db.query(models.RuleSet).filter(models.RuleSet.id == ruleset_id).first()
-    if db_ruleset is None:
-        log.warning("Update failed: RuleSet not found")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
+    # No need to query first, crud.update should handle not found
     try:
-        updated_ruleset = crud.ruleset.update(db=db, ruleset_id=ruleset_id, ruleset_update=ruleset_in)
-    except ValueError as e:
+        updated_ruleset = crud.ruleset.update(db=db, ruleset_id=ruleset_id, ruleset_update=ruleset_in) # Assuming crud.ruleset access
+        if updated_ruleset is None: # crud.update might return None if not found
+             log.warning("Update failed: RuleSet not found by CRUD operation.")
+             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
+    except ValueError as e: # crud.update might raise ValueError for conflicts (like duplicate name)
         log.warning("Update conflict for ruleset", error=str(e))
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     log.info("RuleSet updated successfully")
@@ -92,8 +102,8 @@ def update_ruleset_endpoint( *, db: Session = Depends(deps.get_db), ruleset_id: 
 def delete_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> None:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
     log.info("Attempting to delete ruleset")
-    deleted = crud.ruleset.delete(db=db, ruleset_id=ruleset_id)
-    if not deleted:
+    deleted_ruleset = crud.ruleset.delete(db=db, ruleset_id=ruleset_id) # Assuming crud.ruleset access
+    if deleted_ruleset is None: # crud.delete might return None if not found
         log.warning("Delete failed: RuleSet not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RuleSet not found")
     log.info("RuleSet deleted successfully")
@@ -105,12 +115,16 @@ def create_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_in: schema
     log = logger.bind(user_email=current_user.email, rule_name=rule_in.name, ruleset_id=rule_in.ruleset_id)
     log.info("Attempting to create rule")
     try:
-        created_rule = crud.rule.create(db=db, rule=rule_in)
-    except ValueError as e:
+        created_rule = crud.rule.create(db=db, rule=rule_in) # Assuming crud.rule access
+    except ValueError as e: # Catch specific errors from CRUD layer
         log.warning("Rule creation failed", error=str(e))
-        status_code = status.HTTP_400_BAD_REQUEST
-        if "RuleSet with id" in str(e): status_code = status.HTTP_404_NOT_FOUND
-        elif "destination IDs not found" in str(e): status_code = status.HTTP_400_BAD_REQUEST
+        # Determine appropriate status code based on error message (crude but effective)
+        if "RuleSet with id" in str(e) and "not found" in str(e): 
+            status_code = status.HTTP_404_NOT_FOUND
+        elif "destination IDs not found" in str(e) or "Schedule ID not found" in str(e): 
+            status_code = status.HTTP_400_BAD_REQUEST # Bad foreign key reference
+        else:
+            status_code = status.HTTP_400_BAD_REQUEST # Default bad request
         raise HTTPException(status_code=status_code, detail=str(e))
     log.info("Rule created successfully", rule_id=created_rule.id)
     return created_rule
@@ -120,22 +134,25 @@ def read_rules_endpoint( db: Session = Depends(deps.get_db), ruleset_id: Optiona
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id, skip=skip, limit=limit)
     log.debug("Reading rules")
     if ruleset_id is not None:
-         db_ruleset = db.query(models.RuleSet).filter(models.RuleSet.id == ruleset_id).first()
+         # Verify ruleset exists first
+         db_ruleset = crud.ruleset.get(db=db, ruleset_id=ruleset_id) # Assuming crud.ruleset access
          if not db_ruleset:
-             log.warning("Attempt to read rules for non-existent RuleSet ID")
+             log.warning("Attempt to read rules for non-existent RuleSet ID", target_ruleset_id=ruleset_id)
              raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"RuleSet with id {ruleset_id} not found.")
-         rules = crud.rule.get_multi_by_ruleset(db=db, ruleset_id=ruleset_id, skip=skip, limit=limit)
+         rules = crud.rule.get_multi_by_ruleset(db=db, ruleset_id=ruleset_id, skip=skip, limit=limit) # Assuming crud.rule access
          log.debug("Retrieved rules for ruleset", count=len(rules))
          return rules
     else:
+         # Allow fetching all rules? Or enforce filtering? Current code requires ruleset_id.
+         # Let's keep the requirement for now as per original logic provided.
          log.warning("Attempted to read rules without specifying ruleset_id.")
-         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filtering by ruleset_id is required.")
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filtering by ruleset_id is required for fetching rules via this endpoint.")
 
 @router.get( "/rules/{rule_id}", response_model=schemas.Rule, summary="Retrieve a specific Rule by ID", tags=["Rules"],)
 def read_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, rule_id=rule_id)
     log.debug("Reading rule")
-    db_rule = crud.rule.get(db=db, rule_id=rule_id)
+    db_rule = crud.rule.get(db=db, rule_id=rule_id) # Assuming crud.rule access
     if db_rule is None:
         log.warning("Rule not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
@@ -146,13 +163,13 @@ def read_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), curren
 def update_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_id: int, rule_in: schemas.RuleUpdate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, rule_id=rule_id)
     log.info("Attempting to update rule")
-    db_rule = crud.rule.get(db=db, rule_id=rule_id)
-    if db_rule is None:
-        log.warning("Update failed: Rule not found")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
+    # Let crud.rule.update handle checking existence
     try:
-        updated_rule = crud.rule.update(db=db, rule_id=rule_id, rule_update=rule_in)
-    except ValueError as e:
+        updated_rule = crud.rule.update(db=db, rule_id=rule_id, rule_update=rule_in) # Assuming crud.rule access
+        if updated_rule is None: # If CRUD returns None on not found
+            log.warning("Update failed: Rule not found by CRUD operation.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
+    except ValueError as e: # Catch specific validation errors from CRUD
         log.warning("Rule update failed", error=str(e))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     log.info("Rule updated successfully")
@@ -162,8 +179,8 @@ def update_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_id: int, r
 def delete_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> None:
     log = logger.bind(user_email=current_user.email, rule_id=rule_id)
     log.info("Attempting to delete rule")
-    deleted = crud.rule.delete(db=db, rule_id=rule_id)
-    if not deleted:
+    deleted_rule = crud.rule.delete(db=db, rule_id=rule_id) # Assuming crud.rule access
+    if deleted_rule is None: # If CRUD returns None on not found
         log.warning("Delete failed: Rule not found")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found")
     log.info("Rule deleted successfully")
@@ -179,20 +196,22 @@ def delete_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), curr
 )
 def process_dicom_json(
     *,
-    db: Session = Depends(deps.get_db),
-    request_data: schemas.JsonProcessRequest,
-    current_user: models.User = Depends(deps.get_current_active_user),
+    db: Session = Depends(deps.get_db), # Get DB session via dependency
+    request_data: schemas.JsonProcessRequest = Body(...), # Use Body for request payload
+    current_user: models.User = Depends(deps.get_current_active_user), # Authentication
 ) -> Any:
     """
-    Accepts a DICOM header in JSON format, applies configured rules,
-    and returns the morphed JSON header. Destinations are ignored.
+    Accepts a DICOM header in JSON format, applies configured rules (ignoring schedule),
+    and returns the potentially morphed JSON header. Destinations are ignored.
+    Requires worker helper functions to be available.
     """
     log = logger.bind(user_email=current_user.email, request_source_identifier=request_data.source_identifier, request_ruleset_id=request_data.ruleset_id)
     log.info("Received JSON processing request")
 
-    if not PROCESSING_LOGIC_AVAILABLE:
-        log.error("Cannot process JSON request because processing logic failed to import.")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Rule processing logic not available.")
+    # Check if worker helpers were imported successfully
+    if not WORKER_HELPERS_AVAILABLE:
+        log.error("Cannot process JSON request because essential worker helper functions failed to import.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal configuration error: Processing functions unavailable.")
 
     original_json = request_data.dicom_json
     errors: List[str] = []
@@ -202,33 +221,30 @@ def process_dicom_json(
     morphed_ds: Optional[pydicom.Dataset] = None
     ds: Optional[pydicom.Dataset] = None
 
-    # Define a default source identifier for JSON API calls
-    # This is needed for apply_modifications, especially crosswalk
-    json_api_source_identifier = request_data.source_identifier or "JSON_API_Source" # Use provided or default
+    json_api_source_identifier = request_data.source_identifier or "JSON_API_Source" 
     log = log.bind(effective_source_identifier=json_api_source_identifier)
 
     # 1. Convert JSON to pydicom Dataset
     try:
         ds = pydicom.dataset.Dataset.from_json(original_json)
-        # Ensure file_meta exists (needed by some logic/output formats)
         if not hasattr(ds, 'file_meta'):
+             # Add minimal file_meta (same logic as before)
              file_meta = pydicom.dataset.FileMetaDataset()
-             file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian # Default
+             file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian 
              sop_class_uid_tag = '00080016'; sop_instance_uid_tag = '00080018'
-             if sop_class_uid_tag in ds and ds[sop_class_uid_tag].value: file_meta.MediaStorageSOPClassUID = ds[sop_class_uid_tag].value[0] # Assume single value
-             else: warnings.append("SOPClassUID missing from JSON."); file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2" # Default CT
-             if sop_instance_uid_tag in ds and ds[sop_instance_uid_tag].value: file_meta.MediaStorageSOPInstanceUID = ds[sop_instance_uid_tag].value[0] # Assume single value
-             else: warnings.append("SOPInstanceUID missing from JSON."); file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid() # Generate one if missing
-             file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
-             file_meta.ImplementationVersionName = f"pydicom {pydicom.__version__}"
+             if sop_class_uid_tag in ds and hasattr(ds[sop_class_uid_tag], 'value') and ds[sop_class_uid_tag].value: file_meta.MediaStorageSOPClassUID = ds[sop_class_uid_tag].value[0] 
+             else: warnings.append("SOPClassUID missing/empty in JSON."); file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2" 
+             if sop_instance_uid_tag in ds and hasattr(ds[sop_instance_uid_tag], 'value') and ds[sop_instance_uid_tag].value: file_meta.MediaStorageSOPInstanceUID = ds[sop_instance_uid_tag].value[0] 
+             else: warnings.append("SOPInstanceUID missing/empty in JSON."); file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid() 
+             file_meta.ImplementationClassUID = settings.PYDICOM_IMPLEMENTATION_UID # Use setting
+             file_meta.ImplementationVersionName = settings.IMPLEMENTATION_VERSION_NAME # Use setting
              ds.file_meta = file_meta
              log.debug("Added default file_meta to dataset created from JSON.")
-        morphed_ds = deepcopy(ds) # Start with a copy to modify
+        morphed_ds = deepcopy(ds) 
         log.debug("Successfully converted input JSON to pydicom Dataset.")
     except Exception as e:
-        log.error("Error converting input JSON to pydicom Dataset", error=str(e), exc_info=True)
+        log.error("Error converting input JSON to pydicom Dataset", error_details=str(e), exc_info=True)
         errors.append(f"Invalid input JSON format or structure: {e}")
-        # Return early if conversion fails
         return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
 
     # 2. Fetch Rules
@@ -236,31 +252,32 @@ def process_dicom_json(
     try:
         if request_data.ruleset_id:
             log.debug("Fetching specific RuleSet", requested_ruleset_id=request_data.ruleset_id)
-            ruleset = crud.ruleset.get(db=db, ruleset_id=request_data.ruleset_id) # get should load relationships
+            ruleset = crud.ruleset.get(db=db, ruleset_id=request_data.ruleset_id) 
             if ruleset:
-                if ruleset.is_active: rulesets_to_evaluate.append(ruleset)
-                else: warnings.append(f"Specified RuleSet ID {request_data.ruleset_id} is inactive.")
+                # Ignore ruleset.is_active for this endpoint - allow testing inactive rulesets if specified by ID
+                rulesets_to_evaluate.append(ruleset)
+                if not ruleset.is_active: warnings.append(f"Processing with specified RuleSet ID {request_data.ruleset_id} which is normally inactive.")
             else: errors.append(f"Specified RuleSet ID {request_data.ruleset_id} not found.")
         else:
             log.debug("Fetching active, ordered RuleSets...")
-            rulesets_to_evaluate = crud.ruleset.get_active_ordered(db=db) # get_active_ordered should load relationships
-        if not rulesets_to_evaluate and not errors and request_data.ruleset_id is None:
-            warnings.append("No active rulesets found for processing.")
+            rulesets_to_evaluate = crud.ruleset.get_active_ordered(db=db) 
+        if not rulesets_to_evaluate and not errors: # Only warn if no rulesets found AND no prior errors
+            warnings.append("No applicable rulesets found for processing (specify an ID to test inactive ones).")
     except Exception as db_exc:
-        log.error("Database error fetching rulesets", error=str(db_exc), exc_info=True)
+        log.error("Database error fetching rulesets", error_details=str(db_exc), exc_info=True)
         errors.append(f"Database error fetching rules: {db_exc}")
-        # Return early if DB fails
         return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
 
     # 3. Apply Rules
-    if not errors: # Only proceed if no critical errors so far
+    if not errors: 
         any_rule_matched_and_applied = False
-        modifications_made = False
+        modifications_made_in_total = False
         log.debug("Starting evaluation of rulesets", ruleset_count=len(rulesets_to_evaluate))
         for ruleset_obj in rulesets_to_evaluate:
             ruleset_log = log.bind(ruleset_id=ruleset_obj.id, ruleset_name=ruleset_obj.name)
             try:
                 ruleset_log.debug("--- Evaluating RuleSet ---")
+                # Ensure rules relationship is loaded (should be by get/get_active_ordered)
                 rules_list = getattr(ruleset_obj, 'rules', [])
                 if not rules_list: ruleset_log.debug("RuleSet has no rules."); continue
 
@@ -269,49 +286,54 @@ def process_dicom_json(
                 for rule_obj in rules_list:
                     rule_log = ruleset_log.bind(rule_id=rule_obj.id, rule_name=rule_obj.name)
                     try:
-                        rule_log.debug("Processing Rule", rule_is_active=rule_obj.is_active)
-                        if not rule_obj.is_active: rule_log.debug("Rule is inactive."); continue
-
+                        # Ignore rule_obj.is_active and schedule for this endpoint - allow testing inactive/unscheduled rules
+                        rule_log.debug("Processing Rule for JSON endpoint (is_active/schedule ignored)")
+                        
                         # Check source match
                         rule_sources = rule_obj.applicable_sources
                         source_match = not rule_sources or (isinstance(rule_sources, list) and json_api_source_identifier in rule_sources)
-                        if not source_match: rule_log.debug("Skipping rule - does not apply to source", rule_sources=rule_sources); continue
+                        if not source_match: 
+                            rule_log.debug("Skipping rule - does not apply to source", rule_sources=rule_sources, api_source=json_api_source_identifier); 
+                            continue
 
-                        # Validate/parse criteria & modifications (using TypeAdapter for robustness)
+                        # Validate/parse criteria & modifications
                         try:
-                             match_criteria_models = TypeAdapter(List[schemas.MatchCriterion]).validate_python(rule_obj.match_criteria or [])
-                             # JSON endpoint doesn't use association criteria, but parse anyway if present for validation
-                             assoc_criteria_models = TypeAdapter(List[schemas.AssociationMatchCriterion]).validate_python(rule_obj.association_criteria or [])
-                             tag_mod_adapter = TypeAdapter(List[schemas.TagModification])
-                             mod_schemas = tag_mod_adapter.validate_python(rule_obj.tag_modifications or [])
+                             match_criteria_models = TypeAdapter(List[MatchCriterion]).validate_python(rule_obj.match_criteria or [])
+                             # Ignore association criteria for JSON API
+                             mod_schemas = TypeAdapter(List[TagModification]).validate_python(rule_obj.tag_modifications or [])
                         except Exception as val_err:
-                             rule_log.error("Rule skipped due to invalid criteria/modification format", validation_error=str(val_err), exc_info=False)
+                             rule_log.error("Rule skipped due to invalid criteria/modification format", validation_error=str(val_err))
                              errors.append(f"Invalid definition for Rule ID {rule_obj.id}: {val_err}")
-                             continue # Skip this rule if definition is invalid
+                             continue 
 
-                        # Perform matching (only tag criteria relevant for JSON API)
+                        # Perform matching (using check_tag_criteria)
                         rule_log.debug("Checking match criteria", criteria_count=len(match_criteria_models))
-                        is_match = check_match(ds, match_criteria_models)
+                        is_match = check_tag_criteria(morphed_ds, match_criteria_models) # Check against potentially modified DS from previous rule in set
                         rule_log.debug("Match result", is_match=is_match)
 
                         if is_match:
                             rule_log.info("Rule MATCHED.")
                             any_rule_matched_and_applied = True
                             matched_rule_in_this_set = True
-                            applied_rule_ids.append(rule_obj.id)
+                            if rule_obj.id not in applied_rule_ids: applied_rule_ids.append(rule_obj.id) # Add only once
                             if applied_ruleset_id is None: applied_ruleset_id = ruleset_obj.id
 
                             # Apply modifications (if any)
                             if mod_schemas:
                                 rule_log.debug("Applying modifications...", modification_count=len(mod_schemas))
                                 try:
-                                    # --- CORRECTED CALL ---
-                                    # Pass the default source identifier
-                                    apply_modifications(morphed_ds, mod_schemas, json_api_source_identifier)
+                                    # --- CORRECTED CALL - Pass db session ---
+                                    modifications_made_by_this_rule = apply_standard_modifications(
+                                        morphed_ds, 
+                                        mod_schemas, 
+                                        json_api_source_identifier,
+                                        db # Pass the db session
+                                    )
+                                    if modifications_made_by_this_rule:
+                                        modifications_made_in_total = True
                                     # --- END CORRECTION ---
-                                    modifications_made = True
                                 except Exception as mod_apply_err:
-                                     rule_log.error("Failed to apply tag_modifications", error=str(mod_apply_err), exc_info=True)
+                                     rule_log.error("Failed to apply tag_modifications", error_details=str(mod_apply_err), exc_info=True)
                                      errors.append(f"Error applying modifications for Rule ID {rule_obj.id}: {mod_apply_err}")
                             else:
                                 rule_log.debug("Rule matched but has no modifications defined.")
@@ -320,44 +342,43 @@ def process_dicom_json(
                             ruleset_mode = ruleset_obj.execution_mode
                             if ruleset_mode == RuleSetExecutionMode.FIRST_MATCH:
                                 ruleset_log.debug("FIRST_MATCH mode triggered. Stopping rule processing for this RuleSet.")
-                                break # Stop processing rules in THIS ruleset
+                                break 
 
                     except Exception as single_rule_exc:
-                         rule_log.error("!!! Exception processing SINGLE RULE !!!", error=str(single_rule_exc), exc_info=True)
+                         rule_log.error("Exception processing SINGLE RULE for JSON API", error_details=str(single_rule_exc), exc_info=True)
                          errors.append(f"Internal error processing rule ID {rule_obj.id}")
 
-                # Handle FIRST_MATCH mode for the outer loop (stop processing further rulesets)
+                # Handle FIRST_MATCH mode for the outer loop
                 if matched_rule_in_this_set and ruleset_obj.execution_mode == RuleSetExecutionMode.FIRST_MATCH:
                     log.debug("Breaking ruleset loop due to FIRST_MATCH mode.", matched_ruleset_id=ruleset_obj.id)
                     break
 
             except Exception as ruleset_exc:
-                 ruleset_log.error("!!! Exception processing RULESET !!!", error=str(ruleset_exc), exc_info=True)
+                 ruleset_log.error("Exception processing RULESET for JSON API", error_details=str(ruleset_exc), exc_info=True)
                  errors.append(f"Internal error processing ruleset ID {ruleset_obj.id}")
-        log.debug("Finished evaluating rulesets.")
+        log.debug("Finished evaluating rulesets for JSON API.")
 
     # 4. Convert Morphed Dataset back to JSON
     morphed_json: Dict[str, Any] = {}
     try:
-        # Convert the dataset that was potentially modified
-        dataset_to_convert = morphed_ds if modifications_made else ds
-        if dataset_to_convert:
-             morphed_json = dataset_to_convert.to_json_dict()
+        # Use the dataset that was modified throughout the loop
+        if morphed_ds:
+             morphed_json = morphed_ds.to_json_dict()
              log.debug("Converted final dataset back to JSON")
         else:
-             # Should not happen if initial conversion succeeded
+             # This case means the initial conversion failed, error already logged
              log.warning("No dataset available (original or morphed) to convert back to JSON.")
-             morphed_json = original_json # Fallback to original if something went wrong
+             morphed_json = {} # Keep it empty if initial conversion failed
     except Exception as e:
-        log.error("Error converting final dataset back to JSON", error=str(e), exc_info=True)
+        log.error("Error converting final dataset back to JSON", error_details=str(e), exc_info=True)
         errors.append(f"Error serializing result: {e}")
-        morphed_json = {} # Return empty dict on serialization error
+        morphed_json = {} 
 
     # 5. Return Response
     response = schemas.JsonProcessResponse(
         original_json=original_json,
         morphed_json=morphed_json,
-        source_identifier=json_api_source_identifier, # Return the identifier used
+        source_identifier=json_api_source_identifier, 
         applied_ruleset_id=applied_ruleset_id,
         applied_rule_ids=applied_rule_ids,
         errors=errors,
