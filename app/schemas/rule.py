@@ -8,9 +8,9 @@ from datetime import datetime
 import re
 from .storage_backend_config import StorageBackendConfigRead
 from .schedule import ScheduleRead
-import logging
+import structlog
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class RuleSetExecutionMode(str, enum.Enum):
     FIRST_MATCH = "FIRST_MATCH"
@@ -49,32 +49,22 @@ def _validate_tag_format_or_keyword(v: str) -> str:
     if not isinstance(v, str):
         raise ValueError("Tag must be a string")
     v = v.strip()
-    # Allow specific non-DICOM parameters only for Association Criteria
-    # Check if it's intended for Association Match first (handled elsewhere)
-    # if v.upper() in ['SOURCE_IP', 'CALLING_AE_TITLE', 'CALLED_AE_TITLE']:
-    #     raise ValueError(f"'{v.upper()}' is only valid in AssociationMatchCriterion.")
-
     # Check for GGGG,EEEE format
-    if re.match(r"^\(?\s*([0-9a-fA-F]{4})\s*,\s*([0-9a-fA-F]{4})\s*\)?$", v):
-        # Extract and format consistently if needed, e.g., strip parens/spaces
-        match = re.match(r"^\(?\s*([0-9a-fA-F]{4})\s*,\s*([0-9a-fA-F]{4})\s*\)?$", v)
-        if match:
-             return f"{match.group(1).upper()},{match.group(2).upper()}" # Return consistent format
-        else: # Should not happen based on regex, but safety check
-             raise ValueError("Invalid GGGG,EEEE format") # Should be unreachable
+    match_ggeeee = re.match(r"^\(?\s*([0-9a-fA-F]{4})\s*,\s*([0-9a-fA-F]{4})\s*\)?$", v)
+    if match_ggeeee:
+        return f"{match_ggeeee.group(1).upper()},{match_ggeeee.group(2).upper()}"
 
     # Check for DICOM Keyword format (alphanumeric)
     if re.match(r"^[a-zA-Z0-9]+$", v):
-        # Here you *could* add validation against pydicom's dictionary if strictness is needed
+        # Optional: Validate against pydicom's dictionary for strictness
         # from pydicom.datadict import tag_for_keyword
         # try:
-        #     if tag_for_keyword(v) is None: raise ValueError() # Check if it's a known keyword
+        #     if tag_for_keyword(v) is None: raise ValueError()
         # except ValueError:
         #      raise ValueError(f"Tag '{v}' is not a recognized DICOM keyword.")
-        return v # Assume valid keyword if format matches
+        return v
 
     raise ValueError("Tag must be in 'GGGG,EEEE' format or a valid DICOM keyword")
-
 
 def _validate_vr_format(v: Optional[str]) -> Optional[str]:
     if v is not None:
@@ -267,12 +257,11 @@ class RuleBase(BaseModel):
     tag_modifications: List[TagModification] = Field(default_factory=list)
     applicable_sources: Optional[List[str]] = Field(None)
     schedule_id: Optional[int] = Field(None)
-    # --- ADDED: AI Standardization Field ---
-    ai_standardization_tags: Optional[List[str]] = Field(
-        None, # Default to None (no AI standardization)
-        description="Optional list of DICOM tags (keywords or 'GGGG,EEEE') whose values should be standardized using AI."
-    )
-    # --- END ADDED ---
+
+    ai_prompt_config_ids: Optional[List[int]] = Field(
+        default=None, # Explicitly default to None
+        description="Optional list of AIPromptConfig IDs to use for AI vocabulary standardization."
+    )    
 
     @field_validator('applicable_sources')
     @classmethod
@@ -284,29 +273,22 @@ class RuleBase(BaseModel):
                 raise ValueError("Each item in applicable_sources must be a non-empty string")
         return v
 
-    # --- ADDED: Validator for AI Standardization Tags ---
-    @field_validator('ai_standardization_tags')
+    @field_validator('ai_prompt_config_ids')
     @classmethod
-    def validate_ai_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+    def validate_ai_prompt_config_ids(cls, v: Optional[List[int]]) -> Optional[List[int]]:
         if v is None:
-            return None # Allow null/None
+            return None
         if not isinstance(v, list):
-            raise ValueError("ai_standardization_tags must be a list of strings or null")
-        validated_tags = []
-        for tag_str in v:
-            try:
-                # Reuse the existing tag validator
-                validated_tags.append(_validate_tag_format_or_keyword(tag_str))
-            except ValueError as e:
-                # Improve error message context
-                raise ValueError(f"Invalid tag '{tag_str}' in ai_standardization_tags: {e}") from e
-        # Return the list of validated tags (potentially with consistent formatting)
-        # Remove duplicates? Optional, might be desired.
-        unique_tags = list(dict.fromkeys(validated_tags))
-        if len(unique_tags) != len(validated_tags):
-             logger.warning(f"Duplicate tags found in ai_standardization_tags: {validated_tags}. Using unique list: {unique_tags}")
-        return unique_tags # Return unique list
-    # --- END ADDED ---
+            raise ValueError("ai_prompt_config_ids must be a list of integers or null.")
+        if not all(isinstance(item, int) for item in v):
+            raise ValueError("Each item in ai_prompt_config_ids must be an integer.")
+        # Optionally, check for duplicates and log/remove
+        unique_ids = list(dict.fromkeys(v))
+        if len(unique_ids) != len(v):
+            logger.warning("Duplicate IDs found in ai_prompt_config_ids, using unique list.",
+                           original_ids=v, unique_ids=unique_ids)
+            return unique_ids
+        return v
 
 
     @model_validator(mode='after')
@@ -335,29 +317,66 @@ class RuleUpdate(BaseModel):
     applicable_sources: Optional[List[str]] = Field(None)
     schedule_id: Optional[int] = Field(None)
     destination_ids: Optional[List[int]] = Field(None)
-    # --- ADDED: AI Standardization Field ---
-    ai_standardization_tags: Optional[List[str]] = Field(None)
-    # --- END ADDED ---
+    # --- FIELD CHANGE: ai_standardization_tags TO ai_prompt_config_ids ---
+    # REMOVE:
+    # ai_standardization_tags: Optional[List[str]] = Field(None)
+    # ADD:
+    ai_prompt_config_ids: Optional[List[int]] = Field(
+        default=None, # For updates, default means "no change to this field" unless provided
+        description="Optional list of AIPromptConfig IDs. Set to empty list to clear, or null to leave unchanged if field not provided."
+    )
+    # --- END FIELD CHANGE ---
 
-    # Re-apply validators from Base for update fields if they exist
-    _validate_sources_update = field_validator('applicable_sources')(lambda v: RuleBase.validate_sources_not_empty_strings(v) if v is not None else None)
-    # --- ADDED: Validator reference for AI tags on update ---
-    _validate_ai_tags_update = field_validator('ai_standardization_tags')(lambda v: RuleBase.validate_ai_tags(v) if v is not None else None)
-    # --- END ADDED ---
-    _validate_assoc_ops_update = model_validator(mode='after')(RuleBase.check_association_ops) # This checks assoc_criteria if present
-
+    # --- VALIDATOR CHANGE: Update validator references ---
+    _validate_sources_update = field_validator('applicable_sources', check_fields=False)(
+        lambda v: RuleBase.validate_sources_not_empty_strings(v) if v is not None else None
+    )
+    # REMOVE:
+    # _validate_ai_tags_update = field_validator('ai_standardization_tags', check_fields=False)(
+    #    lambda v: RuleBase.validate_ai_tags(v) if v is not None else None
+    # )
+    # ADD:
+    _validate_ai_prompt_config_ids_update = field_validator('ai_prompt_config_ids', check_fields=False)(
+        lambda v: RuleBase.validate_ai_prompt_config_ids(v) if v is not None else None
+    ) # check_fields=False makes it only run if the field is provided
+    # --- END VALIDATOR CHANGE ---
+    
+    # This model_validator might need adjustment based on how Pydantic V2 handles partial updates
+    # For now, assuming RuleBase.check_association_ops is safe if association_criteria is None.
+    # If RuleBase.check_association_ops expects association_criteria to always be a list (even empty),
+    # this might need a condition. However, the current RuleBase allows it to be Optional[List...]].
+    @model_validator(mode='after') # Use model_validator from Pydantic
+    def _check_association_ops_update(self) -> 'RuleUpdate':
+        # This re-runs the logic from RuleBase.check_association_ops
+        # It's a bit awkward to call it directly.
+        # A better way might be to define the logic in a staticmethod and call it from both.
+        # For now, let's assume it works by accessing self.association_criteria which could be None.
+        if self.association_criteria is not None: # Only check if association_criteria is being updated
+            for criterion in self.association_criteria:
+                ip_ops = {MatchOperation.IP_ADDRESS_EQUALS, MatchOperation.IP_ADDRESS_STARTS_WITH, MatchOperation.IP_ADDRESS_IN_SUBNET}
+                if criterion.parameter != 'SOURCE_IP' and criterion.op in ip_ops:
+                    raise ValueError(f"Operation '{criterion.op.value}' is only valid for parameter 'SOURCE_IP'.")
+        return self
+    
+    # Also, similar to AIPromptConfigUpdate, ensure at least one field is provided for update
+    @model_validator(mode='after')
+    def ensure_at_least_one_field_for_update(self) -> 'RuleUpdate':
+        if not self.model_fields_set:
+            raise ValueError("At least one field must be provided for rule update.")
+        return self
 
 # --- Schema for Reading Rules from DB (Base) ---
 class RuleInDBBase(RuleBase):
     id: int
     ruleset_id: int
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None # Should be datetime, not Optional[datetime] = None if nullable=False in DB
     destinations: List[StorageBackendConfigRead] = []
     schedule: Optional[ScheduleRead] = None
-    # --- ADDED: AI Standardization Field (already inherited from RuleBase) ---
-    # ai_standardization_tags: Optional[List[str]] = None # Included via RuleBase inheritance
-    # --- END ADDED ---
+    # --- FIELD CHANGE: ai_standardization_tags is GONE, ai_prompt_config_ids is INHERITED ---
+    # ai_standardization_tags: Optional[List[str]] = None # REMOVE THIS LINE (it's gone from RuleBase)
+    # ai_prompt_config_ids: Optional[List[int]] is inherited from RuleBase
+    # --- END FIELD CHANGE ---
     model_config = ConfigDict(from_attributes=True)
 
 # --- Schema for Reading a Single Rule ---

@@ -16,3 +16,4 @@ from .storage_backend_config import StorageBackendConfig
 from .crosswalk import CrosswalkDataSource, CrosswalkMap, CrosswalkDbType, CrosswalkSyncStatus
 from .schedule import Schedule
 from .google_healthcare_source import GoogleHealthcareSource
+from .ai_prompt_config import AIPromptConfig

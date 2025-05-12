@@ -33,7 +33,7 @@ google-auth==2.40.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.2
 google-auth[aiohttp]
-google-cloud-aiplatform==1.91.0
+google-cloud-aiplatform==1.92.0
 google-cloud-bigquery==3.31.0
 google-cloud-core==2.4.3
 google-cloud-resource-manager==1.14.2

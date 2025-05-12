@@ -5,6 +5,7 @@ import json
 import os
 from typing import Optional, Dict, Any, Tuple
 import enum
+from app.schemas.ai_prompt_config import AIPromptConfigRead
 
 import structlog
 logger = structlog.get_logger(__name__)
@@ -40,6 +41,10 @@ except ImportError:
     class APIError(Exception): pass # type: ignore
     class RateLimitError(APIError): pass # type: ignore
     class APIConnectionError(APIError): pass # type: ignore
+    class ChatCompletionMessage: pass # type: ignore
+    class Choice: pass # type: ignore
+    class CompletionUsage: pass # type: ignore
+
 if not OPENAI_AVAILABLE:
     logger.warning("OpenAI library not found. OpenAI features unavailable.")
 
@@ -47,6 +52,7 @@ if not OPENAI_AVAILABLE:
 logger.info("Attempting Vertex AI library imports...")
 try:
     import vertexai
+    # Note: UsageMetadata is NOT imported here directly
     from vertexai.generative_models import GenerativeModel, Part, FinishReason
     import vertexai.preview.generative_models as generative_models_preview
     from google.oauth2 import service_account
@@ -62,6 +68,7 @@ except ImportError as vertex_import_err:
     class GenerativeModel: pass # type: ignore
     class Part: pass # type: ignore
     class FinishReason(enum.Enum): STOP=0; MAX_TOKENS=1; SAFETY=2; RECITATION=3; OTHER=4; UNSPECIFIED=5 # type: ignore
+    # NO mock UsageMetadata class here
     class generative_models_preview: # type: ignore
          HarmCategory = enum.Enum('HarmCategory', ['HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_DANGEROUS_CONTENT', 'HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_SEXUALLY_EXPLICIT']) # type: ignore
          HarmBlockThreshold = enum.Enum('HarmBlockThreshold', ['BLOCK_MEDIUM_AND_ABOVE', 'BLOCK_LOW_AND_ABOVE', 'BLOCK_ONLY_HIGH', 'BLOCK_NONE']) # type: ignore
@@ -275,6 +282,18 @@ async def generate_rule_suggestion(request: RuleGenRequest) -> RuleGenResponse:
             response_format={"type": "json_object"}
         )
 
+        # Extract token usage for logging
+        prompt_tokens, completion_tokens, total_tokens = "N/A", "N/A", "N/A"
+        if completion and hasattr(completion, 'usage') and completion.usage:
+            prompt_tokens = getattr(completion.usage, 'prompt_tokens', 'N/A')
+            completion_tokens = getattr(completion.usage, 'completion_tokens', 'N/A')
+            total_tokens = getattr(completion.usage, 'total_tokens', 'N/A')
+        
+        log.debug("OpenAI API call complete.",
+                  openai_prompt_tokens=prompt_tokens,
+                  openai_completion_tokens=completion_tokens,
+                  openai_total_tokens=total_tokens)
+
         if not completion.choices or not completion.choices[0].message.content:
             log.warning("OpenAI response was empty or malformed.")
             return RuleGenResponse(error="Failed to generate rule: OpenAI response was empty.")
@@ -284,10 +303,11 @@ async def generate_rule_suggestion(request: RuleGenRequest) -> RuleGenResponse:
 
         try:
             generated_rule_dict = json.loads(generated_json_str)
-            # Basic validation can be done here if needed before creating RuleGenSuggestion
-            # For now, assume the model adheres to the prompt structure for JSON
             suggestion = RuleGenSuggestion(**generated_rule_dict)
-            log.info("Successfully generated and parsed rule suggestion.")
+            log.info("Successfully generated and parsed rule suggestion.",
+                     openai_prompt_tokens=prompt_tokens,
+                     openai_completion_tokens=completion_tokens,
+                     openai_total_tokens=total_tokens)
             return RuleGenResponse(suggestion=suggestion)
         except json.JSONDecodeError as json_err:
             log.error("Failed to parse JSON from OpenAI response.", json_error=str(json_err), raw_response=generated_json_str)
@@ -318,53 +338,6 @@ if VERTEX_AI_AVAILABLE:
         generative_models_preview.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models_preview.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
         generative_models_preview.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models_preview.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
     }
-
-DEFAULT_GENERATION_CONFIG = {
-    "max_output_tokens": settings.VERTEX_AI_MAX_OUTPUT_TOKENS_VOCAB,
-    "temperature": settings.VERTEX_AI_TEMPERATURE_VOCAB,
-    "top_p": settings.VERTEX_AI_TOP_P_VOCAB,
-    "top_k": settings.VERTEX_AI_TOP_K_VOCAB,
-}
-
-STANDARDIZATION_PROMPTS = {
-    "StudyDescription": """Given the following DICOM Study Description, provide a standardized clinical term or phrase suitable for indexing and querying. Focus on the primary modality and body part or procedure. Respond ONLY with the standardized term. Do not add explanations. Input Study Description: "{input_value}" Standardized Term:""",
-    "ProtocolName": """Given the following DICOM Protocol Name, provide a standardized clinical term or phrase suitable for indexing and querying. Focus on the primary modality and body part or procedure described in the protocol. Respond ONLY with the standardized term. Do not add explanations. Input Protocol Name: "{input_value}" Standardized Term:""",
-    "BodyPartExamined": """You are an expert medical terminology AI. Your task is to standardize a given DICOM Body Part Examined term by determining the apprpriate DICOM PS3.16 context mapping for BODY PART EXAMINED.  Output it limited to 16 characters, must be all caps, and contain no spaces or underscores.
-Return ONLY the single, most concise, common, standardized clinical anatomical term.
-Do NOT include any explanations, prefixes like "Standardized Term:", or any text other than the standardized term itself.
-
-Examples:
-Input: "LUNG"
-Output: "LUNG"
-
-Input: "FEMUR TIBIA PATELLA"
-Output: "KNEE"
-
-Input: "KUB"
-Output: "ABDOMEN"
-
-Input: "SOFT TISSUE NECK"
-Output: "NECK"
-
-Input: "RIGHT KNEE"
-Output: "KNEE"
-
-Input: "ABDOMINAL REGION"
-Output: "ABDOMEN"
-
-Input: "LEFT FEMORAL ARTERY"
-Output: "LFEMORALA"
-
-Input: "FEMORAL ARTERY"
-Output: "FEMORALA"
-
-Input: "ABDPEL"
-Output: "ABDOMENPELVIS"
-
-Input: "{input_value}"
-Output:""",
-    "Default": """Standardize the following text input into a common term suitable for categorization. Respond ONLY with the standardized term. Input: "{input_value}" Standardized Term:"""
-}
 
 def _increment_invocation_count_sync(model_type: str, function_name: str):
     """Synchronously increments the AI invocation counter in Redis."""
@@ -400,194 +373,266 @@ def _increment_invocation_count_sync(model_type: str, function_name: str):
             except Exception as close_err:
                 log.warning("Error closing temporary Redis client for AI counter.", error_details=str(close_err))
 
-
 async def _standardize_vocabulary_gemini_async(
-    input_value: str, context: str = "Default",
-    generation_config_override: Optional[Dict[str, Any]] = None,
-    safety_settings_override: Optional[Dict[Any, Any]] = None
+    input_value: str,
+    prompt_config: AIPromptConfigRead, # Caller passes the full Pydantic schema object
 ) -> Optional[str]:
 
-    if not VERTEX_AI_INITIALIZED_SUCCESSFULLY:
+    if not VERTEX_AI_INITIALIZED_SUCCESSFULLY: # Global flag check
         logger.error("Vertex AI not initialized. Cannot standardize vocabulary using Gemini.")
         return None
-    if not input_value or not isinstance(input_value, str) or not input_value.strip():
-        logger.warning("Invalid or empty input for async standardization.", received_input=input_value, received_type=type(input_value).__name__)
-        return None # Return None, let caller decide if original value should be used
-
-    # Create a new GenerativeModel instance for each async call.
-    # This is safer for concurrency if the underlying client has issues with reuse across event loop contexts.
-    try:
-        local_gemini_model = GenerativeModel(settings.VERTEX_AI_MODEL_NAME)
-    except Exception as model_create_err:
-        logger.error("Failed to create GenerativeModel for async Gemini call.", model_name=settings.VERTEX_AI_MODEL_NAME, error_details=str(model_create_err), exc_info=True)
+        
+    if not prompt_config: # Null check for the config object itself
+        logger.error("Prompt configuration (AIPromptConfigRead object) not provided to async Gemini call.")
         return None
 
-    prompt_template = STANDARDIZATION_PROMPTS.get(context, STANDARDIZATION_PROMPTS["Default"])
-    prompt = prompt_template.format(input_value=input_value)
-    
-    log = logger.bind(
-        ai_model_used=settings.VERTEX_AI_MODEL_NAME,
-        ai_context=context,
+    log = logger.bind( # Bind common log attributes early
+        ai_model_used=prompt_config.model_identifier,
+        ai_prompt_config_id=prompt_config.id,
+        ai_prompt_config_name=prompt_config.name,
+        ai_dicom_tag_keyword=prompt_config.dicom_tag_keyword,
         ai_input_value_snippet=input_value[:80] + ("..." if len(input_value) > 80 else "")
     )
-    # Avoid logging full prompt if it's too verbose or contains sensitive data by default
-    # log.debug("Full prompt for Gemini call.", full_prompt_for_debug=prompt) 
-    log.info("Attempting async vocabulary standardization with Gemini (per-call model).")
+
+    if not input_value or not isinstance(input_value, str) or not input_value.strip():
+        log.warning("Invalid or empty input for async standardization.",
+                    received_input=input_value, # Full value might be sensitive, snippet is better
+                    received_type=type(input_value).__name__)
+        return None
+
+    try:
+        # Use model_identifier from the passed prompt_config
+        local_gemini_model = GenerativeModel(prompt_config.model_identifier)
+    except Exception as model_create_err:
+        log.error("Failed to create GenerativeModel for async Gemini call.",
+                  error_details=str(model_create_err), exc_info=True)
+        return None
+
+    # Use prompt_template from the passed prompt_config
+    # The template should be designed to use {value} and optionally {dicom_tag_keyword}
+    try:
+        prompt = prompt_config.prompt_template.format(
+            value=input_value,
+            dicom_tag_keyword=prompt_config.dicom_tag_keyword # Make keyword available to prompt
+        )
+    except KeyError as fmt_err:
+        log.error("Prompt template formatting error. Missing key.",
+                  template_snippet=prompt_config.prompt_template[:100],
+                  missing_key=str(fmt_err), exc_info=True)
+        return None
+    
+    log.info("Attempting async vocabulary standardization with Gemini (using DB-driven config).")
 
     if settings.AI_INVOCATION_COUNTER_ENABLED:
         try:
-            # Call the modified synchronous incrementer in a separate thread
-            await asyncio.to_thread(_increment_invocation_count_sync, "gemini", f"standardize_{context.lower()}")
+            # Counter context key, e.g., "gemini:standardize_bodypartexamined" or "gemini:standardize_prompt_config_name_xyz"
+            # Using dicom_tag_keyword for broad categorization seems reasonable.
+            counter_function_name = f"standardize_{prompt_config.dicom_tag_keyword.lower().replace(' ', '_').replace('(', '').replace(')', '').replace(',', '')}"
+            await asyncio.to_thread(_increment_invocation_count_sync, "gemini", counter_function_name)
         except Exception as e_redis_inc:
             log.warning("Submitting Redis sync increment call via to_thread failed.", error_details=str(e_redis_inc), exc_info=True)
             
-    current_gen_config = {**DEFAULT_GENERATION_CONFIG, **(generation_config_override or {})}
-    if context == "BodyPartExamined": # Ensure specific overrides for BodyPartExamined
-        current_gen_config["temperature"] = 0.0 
-        current_gen_config["max_output_tokens"] = settings.VERTEX_AI_MAX_OUTPUT_TOKENS_BODYPART # Use specific token limit if defined
-    log.debug("Using generation config for Gemini call.", gen_config_for_call=current_gen_config)
+    # --- GENERATION CONFIGURATION ---
+    # Start with some sensible global defaults for generation if not in settings or overridden by prompt_config
+    # These could come from settings.py for global Vertex AI defaults
+    base_generation_config = {
+        "max_output_tokens": settings.VERTEX_AI_MAX_OUTPUT_TOKENS_VOCAB,
+        "temperature": settings.VERTEX_AI_TEMPERATURE_VOCAB,
+        "top_p": settings.VERTEX_AI_TOP_P_VOCAB,
+        # "top_k": settings.VERTEX_AI_TOP_K_VOCAB, # top_k often not used with top_p for Gemini
+    }
+    # Example of a settings-driven override for a specific known tag, if desired BEFORE DB config
+    # This layer of override is optional. The DB config (model_parameters) is primary.
+    # if prompt_config.dicom_tag_keyword == "BodyPartExamined":
+    #     base_generation_config["temperature"] = getattr(settings, "VERTEX_AI_TEMPERATURE_BODYPART", 0.0)
+    #     base_generation_config["max_output_tokens"] = getattr(
+    #         settings, "VERTEX_AI_MAX_OUTPUT_TOKENS_BODYPART", base_generation_config["max_output_tokens"]
+    #     )
+
+    # Merge/override with parameters from the prompt_config.model_parameters
+    # This ensures DB config takes precedence for these specific parameters.
+    effective_model_params = prompt_config.model_parameters or {}
+    current_gen_config_dict = {**base_generation_config, **effective_model_params}
     
-    current_safety_settings = safety_settings_override or DEFAULT_SAFETY_SETTINGS if VERTEX_AI_AVAILABLE else {}
+    # Convert to Vertex AI's GenerationConfig object
+    try:
+        current_gen_config_obj = generative_models_preview.GenerationConfig(**current_gen_config_dict)
+    except TypeError as te:
+        log.error("Invalid type or unexpected keyword argument in generation_config from model_parameters.",
+                  config_dict_used=current_gen_config_dict, error_details=str(te), exc_info=True)
+        return None
+    # --- END GENERATION CONFIGURATION ---
+
+    log.debug("Using generation config for Gemini call.", gen_config_for_call=current_gen_config_dict)
+    
+    # Safety settings: For now, still using global DEFAULT_SAFETY_SETTINGS.
+    # If these need to be configurable per prompt, they'd need to be in prompt_config.model_parameters too,
+    # potentially under a specific key like "safety_settings" and then parsed.
+    current_safety_settings = DEFAULT_SAFETY_SETTINGS if VERTEX_AI_AVAILABLE else {}
+
+    gemini_prompt_tokens, gemini_candidates_tokens, gemini_total_tokens = "N/A", "N/A", "N/A"
 
     try:
         response = await local_gemini_model.generate_content_async(
-            [prompt], # Pass prompt as a list for multi-turn, or single item list for single turn
-            generation_config=current_gen_config,
+            [prompt], # The formatted prompt string
+            generation_config=current_gen_config_obj, # Pass the GenerationConfig object
             safety_settings=current_safety_settings,
-            stream=False,
+            stream=False, # Non-streaming for this use case
         )
+
+        # Extract token usage if available
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            gemini_prompt_tokens = getattr(response.usage_metadata, 'prompt_token_count', 'N/A')
+            gemini_candidates_tokens = getattr(response.usage_metadata, 'candidates_token_count', 'N/A')
+            gemini_total_tokens = getattr(response.usage_metadata, 'total_token_count', 'N/A')
         
-        raw_response_text_content = "N/A" # Default if no valid text found
+        raw_response_text_content = "" # Initialize
         if response.candidates and hasattr(response.candidates[0], 'content') and response.candidates[0].content and \
            hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
-            # Concatenate text from all parts, if any
+            # Collect text from all parts in the first candidate
             raw_response_text_content = "".join([getattr(part, 'text', '') for part in response.candidates[0].content.parts if hasattr(part, 'text')])
 
         finish_reason_val = getattr(getattr(response.candidates[0], 'finish_reason', None), 'name', 'N/A') if response.candidates else 'N/A'
-        log.debug("Raw Gemini response received (per-call model).",
+        
+        log.debug("Raw Gemini response received.",
                   finish_reason_candidate_0=finish_reason_val,
-                  raw_text_candidate_0_snippet=raw_response_text_content[:100])
+                  raw_text_candidate_0_snippet=raw_response_text_content[:100], # Log snippet
+                  gemini_prompt_tokens=gemini_prompt_tokens,
+                  gemini_candidates_tokens=gemini_candidates_tokens,
+                  gemini_total_tokens=gemini_total_tokens)
 
         if not response.candidates:
-            log.warning("Gemini (per-call model) returned no candidates.")
+            log.warning("Gemini returned no candidates.")
             return None
         
-        candidate = response.candidates[0]
+        candidate = response.candidates[0] # Assuming we only care about the first candidate
         finish_reason_enum_val = getattr(candidate, 'finish_reason', None)
 
         if finish_reason_enum_val == FinishReason.MAX_TOKENS:
-            log.warning("Gemini (per-call model) hit MAX_TOKENS limit.",
-                        max_tokens_set=current_gen_config.get("max_output_tokens"),
-                        received_partial_text=raw_response_text_content)
-            # Return None, indicating failure, caller should use original value or handle error
-            return None 
+            log.warning("Gemini hit MAX_TOKENS limit.",
+                        max_tokens_set=current_gen_config_dict.get("max_output_tokens"),
+                        received_partial_text=raw_response_text_content) # Log what was received
+            return None # Or return partial if acceptable, but usually not for standardization
         
         if finish_reason_enum_val != FinishReason.STOP:
-             log.warning("Gemini (per-call model) generation stopped for a non-STOP reason.",
+             log.warning("Gemini generation stopped for a non-STOP reason.",
                          reason=getattr(finish_reason_enum_val, 'name', 'UNKNOWN'))
-             # Potentially return None or handle based on specific non-STOP reasons if needed
         
-        # Check safety ratings
         if hasattr(candidate, 'safety_ratings'):
              for rating in candidate.safety_ratings:
                   if hasattr(rating, 'blocked') and rating.blocked:
-                       log.warning("Gemini (per-call model) response blocked by safety filter.",
+                       log.warning("Gemini response blocked by safety filter.",
                                    category=getattr(getattr(rating, 'category', None), 'name', 'UNKNOWN_CATEGORY'),
                                    probability=getattr(getattr(rating, 'probability', None), 'name', 'UNKNOWN_PROBABILITY'))
-                       return None # Blocked content, return None
+                       return None # Content was blocked
         
         standardized_text = raw_response_text_content.strip()
         if not standardized_text:
-            log.warning("Gemini (per-call model) returned an empty string after stripping, though finish_reason was STOP.",
-                        original_raw_response=raw_response_text_content)
-            return None # Effectively an empty/failed response
+            log.warning("Gemini returned an empty string after stripping.",
+                        original_raw_response_snippet=raw_response_text_content[:100],
+                        finish_reason=finish_reason_val)
+            return None 
             
-        log.info("Successfully standardized term with Gemini (per-call model).", standardized_term=standardized_text)
+        log.info("Successfully standardized term with Gemini (DB-driven config).",
+                 standardized_term=standardized_text) # Full standardized term
         return standardized_text
         
-    except google_api_exceptions.ResourceExhausted as e_resource: # type: ignore
+    except google_api_exceptions.ResourceExhausted as e_resource: 
         log.error("Gemini API call failed due to resource exhaustion (e.g., quota).", error_details=str(e_resource), exc_info=True)
         return None
-    except google_api_exceptions.InvalidArgument as e_invalid_arg: # type: ignore
+    except google_api_exceptions.InvalidArgument as e_invalid_arg: 
         log.error("Gemini API call failed due to invalid argument (check prompt, config).", error_details=str(e_invalid_arg), exc_info=True)
         return None
-    except google_api_exceptions.GoogleAPICallError as e_gcall: # type: ignore
-        log.error("A Google API call error occurred during async Gemini call (per-call model).", error_details=str(e_gcall), exc_info=True)
+    except google_api_exceptions.GoogleAPICallError as e_gcall: 
+        log.error("A Google API call error occurred during async Gemini call.", error_details=str(e_gcall), exc_info=True)
         return None
-    except RuntimeError as e_runtime: # e.g. issues with event loop if not managed correctly
-        log.error("RuntimeError during async Gemini call (per-call model).", error_details=str(e_runtime), exc_info=True)
+    except RuntimeError as e_runtime: # E.g. if asyncio loop is not running, though called from asyncio.run
+        log.error("RuntimeError during async Gemini call.", error_details=str(e_runtime), exc_info=True)
         return None
     except Exception as e:
-        log.error("Unexpected error during async Gemini call (per-call model).", error_details=str(e), exc_info=True)
+        log.error("Unexpected error during async Gemini call.", error_details=str(e), exc_info=True)
         return None
 
 def standardize_vocabulary_gemini_sync(
-    input_value: str, context: str = "Default",
-    generation_config: Optional[Dict[str, Any]] = None,
-    safety_settings: Optional[Dict[Any, Any]] = None
+    input_value: str,
+    prompt_config: AIPromptConfigRead, # Caller passes the full Pydantic schema object
 ) -> Optional[str]:
     """
-    Synchronous wrapper to call the async Gemini standardization function.
+    Synchronous wrapper to call the async Gemini standardization function using a DB-driven prompt config.
     This is intended to be called from synchronous Celery tasks.
     Returns the standardized string, or None if standardization failed or was not possible.
     """
-    log = logger.bind(
+
+    # Early exit if Vertex AI is not even up
+    if not VERTEX_AI_INITIALIZED_SUCCESSFULLY: # Global flag check
+        # Avoid binding log if prompt_config might be None here
+        logger.error("Vertex AI not initialized. Sync wrapper for Gemini cannot proceed.",
+                     ai_input_value_snippet=input_value[:80] if input_value else "N/A")
+        return None
+        
+    # Check for prompt_config after VERTEX_AI_INITIALIZED_SUCCESSFULLY check
+    if not prompt_config:
+        logger.error("Prompt configuration (AIPromptConfigRead object) not provided to sync Gemini wrapper.",
+                     ai_input_value_snippet=input_value[:80] if input_value else "N/A")
+        return None
+
+    log = logger.bind( # Bind common log attributes
         sync_wrapper_call_gemini=True,
-        ai_context=context,
+        ai_prompt_config_id=prompt_config.id,
+        ai_prompt_config_name=prompt_config.name,
+        ai_dicom_tag_keyword=prompt_config.dicom_tag_keyword,
         ai_input_value_snippet=input_value[:80] + ("..." if len(input_value) > 80 else "")
     )
-
-    if not VERTEX_AI_INITIALIZED_SUCCESSFULLY:
-        log.error("Vertex AI not initialized. Sync wrapper for Gemini cannot proceed.")
-        return None # Or input_value if you want to return original on infra failure
     
     if not input_value or not isinstance(input_value, str) or not input_value.strip():
-        log.debug("Empty or invalid value passed to AI standardization sync wrapper, skipping.", received_value=input_value)
-        return None # Or input_value
+        log.debug("Empty or invalid value passed to AI standardization sync wrapper, skipping.",
+                  received_value_type=type(input_value).__name__) # Don't log potentially sensitive full value
+        return None
 
-    log.info("Executing sync wrapper for Gemini standardization (via thread pool, per-call async model).")
+    log.info("Executing sync wrapper for Gemini standardization (via thread pool, using DB-driven config).")
 
     def run_async_in_thread_capture_loop():
-        # Each thread executing asyncio.run will get/create its own event loop.
+        # This function runs in a separate thread via ThreadPoolExecutor.
+        # It creates its own event loop using asyncio.run().
         try:
-            # Important: asyncio.run creates a new event loop, runs the coro, and closes the loop.
             return asyncio.run(
                 _standardize_vocabulary_gemini_async(
-                    input_value, context, generation_config, safety_settings
+                    input_value,
+                    prompt_config # Pass the full config object
                 )
             )
         except RuntimeError as e:
-            # This might catch "Event loop is closed" if _standardize_vocabulary_gemini_async
-            # itself tries to interact with a loop in an unexpected way after asyncio.run finishes/fails.
-            log.error("RuntimeError in thread's asyncio.run for Gemini (per-call model).", error_details=str(e), exc_info=True)
+            # Log context is bound in the outer scope (log variable)
+            log.error("RuntimeError in thread's asyncio.run for Gemini. Likely event loop issue.",
+                      error_details=str(e), exc_info=True)
             return None
         except Exception as e:
-            log.error("Unexpected exception in thread's async Gemini call execution (per-call model).", error_details=str(e), exc_info=True)
+            log.error("Unexpected exception in thread's async Gemini call execution.",
+                      error_details=str(e), exc_info=True)
             return None
 
     try:
         future = thread_pool_executor.submit(run_async_in_thread_capture_loop)
+        # Timeout from settings, specific to this sync wrapper
         timeout_seconds = settings.AI_SYNC_WRAPPER_TIMEOUT
         
-        # future.result() will block until the function completes or timeout occurs
+        # This blocks until the future completes or times out
         result = future.result(timeout=timeout_seconds)
         
-        log.info("Sync wrapper for Gemini (thread pool, per-call model) completed.", result_is_none=(result is None), timeout_used=timeout_seconds)
-        return result # This will be the string from _standardize_vocabulary_gemini_async or None
+        log.info("Sync wrapper for Gemini (thread pool, DB-driven config) completed.",
+                 result_is_none=(result is None), result_snippet=result[:50] if result else "None",
+                 timeout_used_seconds=timeout_seconds)
+        return result
     except concurrent.futures.TimeoutError:
-        log.error("Sync wrapper for Gemini timed out (per-call model).", timeout_value=timeout_seconds)
-        # Optionally, try to cancel the future if it's still running, though cancellation is best-effort
-        future.cancel()
-        return None # Or input_value
+        log.error("Sync wrapper for Gemini timed out.", timeout_value_seconds=timeout_seconds)
+        # It's good practice to try and cancel the future if it's still running,
+        # though the work inside might continue until its next yield point or completion.
+        if future.running():
+            future.cancel()
+            log.info("Attempted to cancel timed-out future.")
+        return None
     except Exception as e:
-        # This catches errors from thread_pool_executor.submit or future.result() itself
-        log.error("Error submitting/getting result from thread pool for Gemini (per-call model).", error_details=str(e), exc_info=True)
-        return None # Or input_value
-
-# Consider adding a shutdown for the thread_pool_executor if your app has a graceful shutdown hook
-# import atexit
-# def shutdown_thread_pool():
-#    logger.info("Shutting down AI thread pool executor...")
-#    thread_pool_executor.shutdown(wait=True)
-#    logger.info("AI thread pool executor shut down.")
-# atexit.register(shutdown_thread_pool)
+        # This could be an error from submit() itself or other unexpected issues.
+        log.error("Error submitting/getting result from thread pool for Gemini.",
+                  error_details=str(e), exc_info=True)
+        return None

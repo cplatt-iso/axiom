@@ -19,8 +19,9 @@ from app.api.api_v1.endpoints import (
     config_crosswalk,
     config_schedules,
     ai_assist,
-    data_browser, # <-- ADDED IMPORT
+    data_browser, 
     config_google_healthcare_sources,
+    config_ai_prompts,
 )
 
 api_router = APIRouter()
@@ -35,7 +36,7 @@ api_router.include_router(roles.router, prefix="/roles", tags=["Roles"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["DICOMweb"])
 api_router.include_router(ai_assist.router, prefix="/ai-assist", tags=["AI Assist"])
-api_router.include_router(data_browser.router, prefix="/data-browser", tags=["Data Browser"]) # <-- ADDED ROUTER
+api_router.include_router(data_browser.router, prefix="/data-browser", tags=["Data Browser"])
 
 # Add route for new system config area if needed (using placeholder endpoint)
 # api_router.include_router(system_config_placeholder.router, prefix="/admin/system-config", tags=["System Configuration"])
@@ -72,3 +73,4 @@ api_router.include_router(
     tags=["Configuration - Schedules"]
 )
 api_router.include_router(config_google_healthcare_sources.router, prefix="/config/google-healthcare-sources", tags=["config-google-healthcare-sources"])
+api_router.include_router(config_ai_prompts.router, prefix="/config/ai-prompts", tags=["config-ai_prompts"])

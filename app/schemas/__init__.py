@@ -152,6 +152,14 @@ from .google_healthcare_source import (
     GoogleHealthcareSourceRead,
 )
 
+from .ai_prompt_config import (
+    AIPromptConfigBase,
+    AIPromptConfigCreate,
+    AIPromptConfigUpdate,
+    AIPromptConfigRead,
+    AIPromptConfigSummary,
+    AIPromptConfigInDBBase 
+)
 # --- Data Browser Schemas (if defined) ---
 # from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
 
@@ -193,4 +201,10 @@ __all__ = [
     # AI Assist
     "RuleGenRequest", "RuleGenSuggestion", "RuleGenResponse",
     # Data Browser (Add if defined)
+    "AIPromptConfigBase",
+    "AIPromptConfigCreate",
+    "AIPromptConfigUpdate",
+    "AIPromptConfigRead",
+    "AIPromptConfigSummary",
+    "AIPromptConfigInDBBase",
 ]

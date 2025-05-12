@@ -22,18 +22,17 @@ def apply_actions_for_rule(
     dataset: Dataset,
     rule: Rule,
     source_identifier: str,
-    db_session: 'Session', # Keep db_session for crosswalk
-    # ai_portal parameter is REMOVED
+    db_session: 'Session', # Keep db_session for crosswalk AND NOW FOR AI HANDLER
 ) -> bool:
     """
     Applies all defined actions (standard modifications, AI standardization) for a matched rule.
-    Uses the synchronous AI standardization handler.
+    Uses the synchronous AI standardization handler which now requires db_session.
 
     Args:
         dataset: The pydicom.Dataset to modify (should be a deepcopy).
         rule: The matched Rule object.
         source_identifier: Identifier for the DICOM instance source.
-        db_session: The active SQLAlchemy session for database operations (e.g., crosswalk).
+        db_session: The active SQLAlchemy session for database operations (e.g., crosswalk, AI config fetching).
 
     Returns:
         True if any action resulted in a modification to the dataset, False otherwise.
@@ -41,13 +40,15 @@ def apply_actions_for_rule(
     overall_dataset_changed_by_this_rule = False
     rule_name_for_log = f"'{ruleset_name_for_log(rule)}/{rule.name}' (ID: {rule.id})" # Helper for logs
 
-    # --- 1. Validate Rule Components ---
+    # --- 1. Validate Rule Components for Actions ---
     try:
         modifications_validated = TypeAdapter(List[TagModification]).validate_python(rule.tag_modifications or [])
-        ai_tags_to_standardize_validated = TypeAdapter(Optional[List[str]]).validate_python(rule.ai_standardization_tags or None)
+        # --- CHANGED: Validate rule.ai_prompt_config_ids (List[int]) instead of rule.ai_standardization_tags (List[str]) ---
+        ai_prompt_config_ids_validated = TypeAdapter(Optional[List[int]]).validate_python(rule.ai_prompt_config_ids or None)
     except Exception as val_err:
-        logger.error(f"Rule {rule_name_for_log} action components validation error. Skipping actions.", error_details=str(val_err), exc_info=True)
-        return False 
+        logger.error(f"Rule {rule_name_for_log} action components validation error. Skipping actions.",
+                     error_details=str(val_err), exc_info=True)
+        return False
 
     # --- 2. Apply Standard Tag Modifications ---
     if modifications_validated:
@@ -61,27 +62,34 @@ def apply_actions_for_rule(
         logger.debug(f"Rule {rule_name_for_log} has no standard tag modifications defined.")
 
     # --- 3. Apply AI Tag Standardization (using sync handler) ---
-    if ai_tags_to_standardize_validated:
-        # Directly call the sync handler. It performs internal checks on gemini model availability.
-        logger.debug(f"Attempting AI standardization (sync) for tags via rule {rule_name_for_log}.", tags=ai_tags_to_standardize_validated)
-        # Call the handler WITHOUT the portal argument
-        if apply_ai_standardization_for_rule(dataset, ai_tags_to_standardize_validated, source_identifier):
+    # --- CHANGED: Condition now uses ai_prompt_config_ids_validated ---
+    if ai_prompt_config_ids_validated:
+        logger.debug(f"Attempting AI standardization for rule {rule_name_for_log} using {len(ai_prompt_config_ids_validated)} prompt config ID(s).",
+                     prompt_config_ids=ai_prompt_config_ids_validated) # Log the IDs
+
+        # --- CHANGED: Call apply_ai_standardization_for_rule with db_session and validated IDs ---
+        if apply_ai_standardization_for_rule(
+            db=db_session, # Pass the db_session
+            dataset=dataset,
+            ai_prompt_config_ids=ai_prompt_config_ids_validated, # Pass the list of int IDs
+            source_identifier=source_identifier
+        ):
             overall_dataset_changed_by_this_rule = True
-            logger.debug(f"AI standardization (sync) resulted in changes for rule {rule_name_for_log}.")
+            logger.debug(f"AI standardization resulted in changes for rule {rule_name_for_log}.")
         else:
-            logger.debug(f"AI standardization (sync) did not result in changes for rule {rule_name_for_log}.")
-    # No 'else' block needed here to check for portal/anyio etc.
-    elif rule.ai_standardization_tags is not None: # Only log if the list was explicitly present but empty
-         logger.debug(f"Rule {rule_name_for_log} has an empty list for ai_standardization_tags.")
-    # else: ai_standardization_tags was null/not present, no need to log anything
+            logger.debug(f"AI standardization did not result in changes for rule {rule_name_for_log}.")
+    # Log if the list was explicitly present but empty (after validation, it would be an empty list)
+    elif rule.ai_prompt_config_ids is not None and not rule.ai_prompt_config_ids: # Check original field if it was an empty list
+         logger.debug(f"Rule {rule_name_for_log} has an empty list for ai_prompt_config_ids.")
+    # else: rule.ai_prompt_config_ids was null (None), no need to log anything specific here.
 
 
     # --- Final Logging ---
     if overall_dataset_changed_by_this_rule:
         logger.info(f"Actions for rule {rule_name_for_log} resulted in dataset modifications.")
     else:
-        # Log only if actions were defined but made no change, otherwise it's just noise.
-        if modifications_validated or ai_tags_to_standardize_validated:
+        # Log only if actions were defined but made no change
+        if modifications_validated or ai_prompt_config_ids_validated: # Use the validated list of IDs
              logger.info(f"Defined actions for rule {rule_name_for_log} did not result in dataset modifications.")
         else:
              logger.debug(f"No actions defined or applied for rule {rule_name_for_log}.")
@@ -92,4 +100,7 @@ def ruleset_name_for_log(rule: Rule) -> str:
     """Helper to safely get ruleset name for logging."""
     if rule.ruleset:
         return rule.ruleset.name
+    # Fallback if ruleset is not loaded or available (should ideally always be for a Rule object from DB)
+    # Could happen if 'rule' object is constructed manually for testing without full relationships.
+    logger.warning("Rule object does not have ruleset information for logging.", rule_id=rule.id, rule_name=rule.name)
     return "UnknownRuleset"

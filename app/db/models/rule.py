@@ -90,13 +90,20 @@ class Rule(Base):
     )
 
     # --- ADDED: AI Standardization Column ---
-    ai_standardization_tags: Mapped[Optional[List[str]]] = mapped_column(
-        JSONB, # Store list of strings as JSONB
-        nullable=True,
-        default=None, # Default to null (meaning disabled for this rule)
-        comment="List of DICOM tags (keywords or 'GGGG,EEEE') to standardize using AI."
-    )
+ #   ai_standardization_tags: Mapped[Optional[List[str]]] = mapped_column(
+ #       JSONB, # Store list of strings as JSONB
+ #       nullable=True,
+ #       default=None, # Default to null (meaning disabled for this rule)
+ #       comment="List of DICOM tags (keywords or 'GGGG,EEEE') to standardize using AI."
+ #   )
     # --- END ADDED ---
+    
+    ai_prompt_config_ids: Mapped[Optional[List[int]]] = mapped_column( # <<<< Changed to List[int]
+        JSONB, # Or JSON
+        nullable=True,
+        default=None,
+        comment="List of AIPromptConfig IDs to be used for AI vocabulary standardization for this rule."
+    )
 
     # Timestamps - managed by Base
 
@@ -128,7 +135,6 @@ class Rule(Base):
     )
 
     def __repr__(self):
-        # Updated repr to include the new field
-        ai_tags_repr = f", ai_tags={self.ai_standardization_tags}" if self.ai_standardization_tags else ""
+        ai_configs_repr = f", ai_prompt_config_ids={self.ai_prompt_config_ids}" if self.ai_prompt_config_ids else ""
         return (f"<Rule(id={self.id}, name='{self.name}', ruleset_id={self.ruleset_id}, "
-                f"schedule_id={self.schedule_id}{ai_tags_repr})>")
+                f"schedule_id={self.schedule_id}{ai_configs_repr})>")

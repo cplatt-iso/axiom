@@ -36,7 +36,7 @@ services:
         fluentd-max-retries: "60"
 
   rabbitmq:
-    image: rabbitmq:3.12-management-alpine # Use specific version with management UI
+    image: rabbitmq # Use specific version with management UI
     container_name: dicom_processor_rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
