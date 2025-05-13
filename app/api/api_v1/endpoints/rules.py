@@ -15,6 +15,7 @@ import json # For potential string parsing if needed, but from_json handles dict
 from app.db import models
 from app.api import deps
 from app import crud, schemas # Import top-level schemas
+from app.core.config import settings # Added import for settings
 # Import specific schemas used in this endpoint
 from app.schemas.rule import ( 
     RuleSet, RuleSetCreate, RuleSetUpdate, Rule, RuleCreate, RuleUpdate, 
