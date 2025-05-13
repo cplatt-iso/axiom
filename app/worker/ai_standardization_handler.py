@@ -71,7 +71,10 @@ def apply_ai_standardization_for_rule(
             log_ctx_per_config.warning("AI Std: AIPromptConfig not found in DB, skipping.",
                                        searched_config_id=config_id)
             continue
-
+        if not prompt_config_db_obj.is_enabled:
+            log_ctx_per_config.info("AI Std: AIPromptConfig is disabled, skipping.",
+                                        config_name=prompt_config_db_obj.name)
+            continue
         # Convert DB model to Pydantic schema for the service (if service expects schema)
         # If service expects DB model, this step isn't needed.
         # Our ai_assist_service.standardize_vocabulary_gemini_sync expects AIPromptConfigRead schema.

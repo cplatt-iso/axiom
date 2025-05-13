@@ -35,6 +35,7 @@ class AIPromptConfigBase(BaseModel):
     name: str = Field(..., min_length=3, max_length=255,
                       description="Unique, human-readable name for this AI prompt configuration.")
     description: Optional[str] = Field(None, description="Optional detailed description.")
+    is_enabled: bool = Field(default=True, description="Whether this AI prompt configuration is active and can be used.")
     dicom_tag_keyword: str = Field(
         ..., max_length=100,
         description="DICOM keyword of the tag this configuration targets (e.g., BodyPartExamined, StudyDescription)."
@@ -80,6 +81,7 @@ class AIPromptConfigUpdate(BaseModel):
     dicom_tag_keyword: Optional[str] = Field(default=None, max_length=100)
     prompt_template: Optional[str] = Field(default=None, min_length=10)
     model_identifier: Optional[str] = Field(default=None, max_length=100)
+    is_enabled: Optional[bool] = Field(default=None)
     model_parameters: Optional[Dict[str, Any]] = Field(default=None) # Allows setting to null explicitly
 
     @field_validator('dicom_tag_keyword')
