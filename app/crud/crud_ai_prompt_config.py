@@ -2,14 +2,15 @@
 from typing import List, Optional, Union, Dict, Any
 
 from sqlalchemy.orm import Session
-import structlog # Using structlog as requested
+from sqlalchemy import select, asc # Added asc, select
+import structlog 
 
 from app.crud.base import CRUDBase
 from app.db.models.ai_prompt_config import AIPromptConfig # The DB Model
 from app.schemas.ai_prompt_config import ( # The Pydantic Schemas
     AIPromptConfigCreate,
     AIPromptConfigUpdate,
-    AIPromptConfigRead # For potential type hinting or future use, though CRUDBase returns ModelType
+    # AIPromptConfigRead # Not directly used in return types here by default
 )
 
 logger = structlog.get_logger(__name__)
@@ -20,81 +21,107 @@ class CRUDAIPromptConfig(CRUDBase[AIPromptConfig, AIPromptConfigCreate, AIPrompt
         """
         Retrieves an AI Prompt Configuration by its unique name.
         """
-        return db.query(self.model).filter(self.model.name == name).first()
+        logger.debug("Fetching AI prompt config by name", name=name)
+        return db.execute(select(self.model).filter(self.model.name == name)).scalar_one_or_none()
 
     def create(self, db: Session, *, obj_in: AIPromptConfigCreate) -> AIPromptConfig:
         """
         Creates a new AI Prompt Configuration.
-        Checks for name uniqueness before creation.
+        Name uniqueness is primarily handled by the DB constraint,
+        but an early check can be done via get_by_name if desired (as in API layer).
+        This CRUD method will rely on the DB for the unique constraint enforcement on commit.
         """
-        logger.debug("Attempting to create AI prompt config", name=obj_in.name, tag_keyword=obj_in.dicom_tag_keyword)
-        existing_config = self.get_by_name(db, name=obj_in.name)
-        if existing_config:
-            logger.warning("AI prompt config with this name already exists", name=obj_in.name)
-            # Consider raising a more specific exception that can be caught by the API layer
-            # to return a 409 Conflict or similar, instead of a generic ValueError from CRUDBase.
-            # For now, letting CRUDBase's IntegrityError handling catch it if DB constraint exists,
-            # or this custom ValueError.
-            raise ValueError(f"An AI Prompt Configuration with the name '{obj_in.name}' already exists.")
+        logger.debug("Attempting to create AI prompt config in CRUD", name=obj_in.name)
+        # The API layer now does a pre-check for name uniqueness, 
+        # so this CRUD method can be simpler and rely on DB constraints.
+        # If a ValueError for uniqueness is desired from CRUD, add the get_by_name check here.
         
-        # Additional business logic check:
-        # Ensure that a prompt for a specific dicom_tag_keyword is reasonably unique if needed,
-        # e.g., you might not want 10 different prompts all for "BodyPartExamined" unless distinguished by name.
-        # This is more of a business rule than a strict DB constraint.
-        # For now, only name is strictly unique by DB and this check.
-
-        # Call the parent CRUDBase create method
         try:
-            db_obj = super().create(db, obj_in=obj_in)
-            logger.info("Successfully created AI prompt config", id=db_obj.id, name=db_obj.name)
+            db_obj = super().create(db, obj_in=obj_in) # Calls CRUDBase.create
+            logger.info("Successfully created AI prompt config in CRUD", id=db_obj.id, name=db_obj.name)
             return db_obj
-        except ValueError as e: # Catch ValueError from CRUDBase or this class
-            logger.error("Error creating AI prompt config", error_details=str(e), name=obj_in.name, exc_info=True)
-            raise e # Re-raise to be handled by API layer
-
+        except ValueError as e: # Catch other ValueErrors from CRUDBase if any
+            logger.error("ValueError during AI prompt config creation in CRUD", error=str(e), name=obj_in.name, exc_info=True)
+            raise
+        # IntegrityError (like unique constraint violation) will be raised by SQLAlchemy/DB driver
+        # and should be handled by the API layer (which it does, by catching Exception).
 
     def update(
         self,
         db: Session,
         *,
-        db_obj: AIPromptConfig, # The existing DB object instance
+        db_obj: AIPromptConfig, 
         obj_in: Union[AIPromptConfigUpdate, Dict[str, Any]]
     ) -> AIPromptConfig:
         """
         Updates an existing AI Prompt Configuration.
-        Checks for name uniqueness if the name is being changed.
+        Name uniqueness if name is changed is primarily handled by DB constraint.
+        API layer performs a pre-check.
         """
         current_name = db_obj.name
-        new_name = None
+        new_name_in_payload = None
+        update_data_dict = {}
 
         if isinstance(obj_in, dict):
-            new_name = obj_in.get("name")
+            update_data_dict = obj_in
+            new_name_in_payload = obj_in.get("name")
         else: # Pydantic model
-            # obj_in.model_dump(exclude_unset=True) will be used by super().update()
-            # We need to check if 'name' is part of the update payload
-            if obj_in.model_fields_set and "name" in obj_in.model_fields_set:
-                 new_name = obj_in.name
+            update_data_dict = obj_in.model_dump(exclude_unset=True)
+            if "name" in update_data_dict: # Check if name was actually provided for update
+                 new_name_in_payload = update_data_dict["name"]
         
-        logger.debug("Attempting to update AI prompt config", id=db_obj.id, current_name=current_name, new_name_in_payload=new_name)
+        logger.debug("Attempting to update AI prompt config in CRUD", id=db_obj.id, current_name=current_name, new_name_in_payload=new_name_in_payload)
 
-        if new_name and new_name != current_name:
-            existing_with_new_name = self.get_by_name(db, name=new_name)
-            if existing_with_new_name and existing_with_new_name.id != db_obj.id:
-                logger.warning("AI prompt config with the new name already exists", new_name=new_name, existing_id=existing_with_new_name.id)
-                raise ValueError(f"An AI Prompt Configuration with the name '{new_name}' already exists.")
+        # The API layer now does a pre-check for name uniqueness if name is changing.
+        # This CRUD method relies on DB constraints for final enforcement.
 
-        # Call the parent CRUDBase update method
         try:
-            updated_db_obj = super().update(db, db_obj=db_obj, obj_in=obj_in)
-            logger.info("Successfully updated AI prompt config", id=updated_db_obj.id, name=updated_db_obj.name)
+            # Pass the already prepared update_data_dict to super().update
+            updated_db_obj = super().update(db, db_obj=db_obj, obj_in=update_data_dict)
+            logger.info("Successfully updated AI prompt config in CRUD", id=updated_db_obj.id, name=updated_db_obj.name)
             return updated_db_obj
-        except ValueError as e: # Catch ValueError from CRUDBase
-            logger.error("Error updating AI prompt config", error_details=str(e), id=db_obj.id, exc_info=True)
-            raise e # Re-raise
+        except ValueError as e: 
+            logger.error("ValueError during AI prompt config update in CRUD", error=str(e), id=db_obj.id, exc_info=True)
+            raise
+        # IntegrityError (like unique constraint violation) will be raised by SQLAlchemy/DB driver
+        # and should be handled by the API layer.
+
+    def get_multi_filtered(
+        self, 
+        db: Session, 
+        *, 
+        skip: int = 0, 
+        limit: int = 100,
+        is_enabled: Optional[bool] = None,
+        dicom_tag_keyword: Optional[str] = None,
+        model_identifier: Optional[str] = None
+    ) -> List[AIPromptConfig]:
+        """
+        Retrieves multiple AI Prompt Configurations with optional filtering, pagination, and ordering.
+        """
+        logger.debug(
+            "Fetching multiple AI prompt configs with filters", 
+            skip=skip, limit=limit, is_enabled=is_enabled, 
+            dicom_tag_keyword=dicom_tag_keyword, model_identifier=model_identifier
+        )
+        statement = select(self.model)
+        
+        if is_enabled is not None:
+            statement = statement.filter(self.model.is_enabled == is_enabled)
+        if dicom_tag_keyword:
+            # Using '==' for exact match as per endpoint description
+            statement = statement.filter(self.model.dicom_tag_keyword == dicom_tag_keyword)
+        if model_identifier:
+            statement = statement.filter(self.model.model_identifier == model_identifier)
             
-    # get, get_multi, remove are inherited from CRUDBase and should work as is.
-    # If you need custom logic for them (e.g., special filtering for get_multi),
-    # you can override them here.
+        # Apply ordering for consistent pagination results
+        statement = statement.order_by(asc(self.model.id)) # Default order by ID
+        
+        statement = statement.offset(skip).limit(limit)
+        
+        results = db.execute(statement).scalars().all()
+        logger.debug("Fetched AI prompt configs count", count=len(results))
+        return results
 
 # Instantiate the CRUD object for AI Prompt Configurations
 crud_ai_prompt_config = CRUDAIPromptConfig(AIPromptConfig)

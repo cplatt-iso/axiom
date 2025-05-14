@@ -1,62 +1,54 @@
-# filename: app/crud/crud_rule.py
+# backend/app/crud/crud_rule.py
 
-from sqlalchemy.orm import Session, joinedload, selectinload, with_polymorphic
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import asc, desc, func, update as sql_update, delete as sql_delete, select
-from sqlalchemy.exc import IntegrityError # To catch DB errors
+from sqlalchemy.exc import IntegrityError 
 from typing import List, Optional
 
-from app.db.models import RuleSet, Rule, RuleSetExecutionMode
+# Assuming your model imports are structured like this:
+from app.db.models import RuleSet, Rule # RuleSetExecutionMode might not be directly used in this file
 from app.db.models.storage_backend_config import StorageBackendConfig
 from app.schemas.rule import RuleSetCreate, RuleSetUpdate, RuleCreate, RuleUpdate
 
 # --- RuleSet CRUD Functions ---
-# These were missing in the previous version you showed, re-adding them from your reference.
 
 def get_ruleset(db: Session, ruleset_id: int) -> Optional[RuleSet]:
-    """Gets a single RuleSet by ID, eagerly loading its rules and their destinations."""
     return (
         db.query(RuleSet)
         .options(
-            selectinload(RuleSet.rules) # Load rules for the ruleset
-            .selectinload(Rule.destinations) # Then load destinations for each rule
+            selectinload(RuleSet.rules)
+            .selectinload(Rule.destinations)
         )
         .filter(RuleSet.id == ruleset_id)
         .first()
     )
 
 def get_rulesets(db: Session, skip: int = 0, limit: int = 100) -> List[RuleSet]:
-    """Gets a list of RuleSets with pagination, eagerly loading rules and their destinations."""
     return (
         db.query(RuleSet)
         .options(
-            selectinload(RuleSet.rules) # Load rules for each ruleset
-            .selectinload(Rule.destinations) # Then load destinations for each rule
+            selectinload(RuleSet.rules)
+            .selectinload(Rule.destinations) 
         )
-        .order_by(asc(RuleSet.priority), asc(RuleSet.name)) # Order by priority, then name
+        .order_by(asc(RuleSet.priority), asc(RuleSet.name))
         .offset(skip)
         .limit(limit)
         .all()
     )
 
 def get_active_rulesets_ordered(db: Session) -> list[RuleSet]:
-    """
-    Retrieves all active RuleSets, ordered by priority (ascending).
-    Eagerly loads associated rules (ordered by priority) and their destinations.
-    """
     return (
         db.query(RuleSet)
         .filter(RuleSet.is_active == True)
         .options(
-            selectinload(RuleSet.rules) # Load rules for each ruleset
-            .selectinload(Rule.destinations) # Then load destinations for each rule
+            selectinload(RuleSet.rules)
+            .selectinload(Rule.destinations)
         )
         .order_by(asc(RuleSet.priority))
-        # Rule ordering is handled by the relationship definition in the model
         .all()
     )
 
 def create_ruleset(db: Session, ruleset: RuleSetCreate) -> RuleSet:
-    """Creates a new RuleSet."""
     try:
         db_ruleset = RuleSet(**ruleset.model_dump())
         db.add(db_ruleset)
@@ -65,39 +57,32 @@ def create_ruleset(db: Session, ruleset: RuleSetCreate) -> RuleSet:
         return db_ruleset
     except IntegrityError as e:
         db.rollback()
-        if "unique constraint" in str(e).lower() and "name" in ruleset.model_dump(): # Check if name was part of the input
+        if "unique constraint" in str(e).lower() and "name" in ruleset.model_dump():
              raise ValueError(f"RuleSet with name '{ruleset.name}' already exists.")
-        # Consider logging the original error e before raising a generic or specific one
-        # logger.error(f"Database integrity error during ruleset creation: {e}", exc_info=True)
-        raise # Re-raise the original error or a more specific one
+        raise 
 
 def update_ruleset(db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) -> Optional[RuleSet]:
-    """Updates an existing RuleSet."""
     db_ruleset = db.query(RuleSet).filter(RuleSet.id == ruleset_id).first()
     if not db_ruleset:
         return None
 
     update_data = ruleset_update.model_dump(exclude_unset=True)
-    if not update_data: # No actual data provided for update
-         return db_ruleset # Return the object as is
+    if not update_data:
+         return db_ruleset
 
     try:
         for key, value in update_data.items():
             setattr(db_ruleset, key, value)
-        # db.add(db_ruleset) # Not strictly necessary if only updating fields on an existing tracked object
         db.commit()
         db.refresh(db_ruleset)
         return db_ruleset
     except IntegrityError as e:
          db.rollback()
-         # Check if the error is due to a unique constraint on 'name' if 'name' was being updated
          if "unique constraint" in str(e).lower() and 'name' in update_data:
              raise ValueError(f"Cannot update RuleSet: name '{update_data['name']}' already exists.")
-         # logger.error(f"Database integrity error during ruleset update for ID {ruleset_id}: {e}", exc_info=True)
          raise
 
 def delete_ruleset(db: Session, ruleset_id: int) -> bool:
-    """Deletes a RuleSet and its associated Rules (due to cascade ondelete in Rule model)."""
     db_ruleset = db.query(RuleSet).filter(RuleSet.id == ruleset_id).first()
     if db_ruleset:
         db.delete(db_ruleset)
@@ -107,11 +92,8 @@ def delete_ruleset(db: Session, ruleset_id: int) -> bool:
 
 
 # --- Rule CRUD Functions ---
-# These functions were present in the "broken" version you sent and seem mostly okay.
-# Keeping them as they were, with minor consistency adjustments if any.
 
 def get_rule(db: Session, rule_id: int) -> Optional[Rule]:
-    """Gets a single Rule by ID, eagerly loading its destinations."""
     return (
         db.query(Rule)
         .options(selectinload(Rule.destinations))
@@ -120,7 +102,6 @@ def get_rule(db: Session, rule_id: int) -> Optional[Rule]:
     )
 
 def get_rules_by_ruleset(db: Session, ruleset_id: int, skip: int = 0, limit: int = 100) -> List[Rule]:
-    """Gets rules belonging to a specific RuleSet, eagerly loading destinations."""
     return (
         db.query(Rule)
         .filter(Rule.ruleset_id == ruleset_id)
@@ -132,7 +113,6 @@ def get_rules_by_ruleset(db: Session, ruleset_id: int, skip: int = 0, limit: int
         )
 
 def create_rule(db: Session, rule: RuleCreate) -> Rule:
-    """Creates a new Rule for a given RuleSet ID, associating destinations."""
     db_ruleset = db.query(RuleSet).filter(RuleSet.id == rule.ruleset_id).first()
     if not db_ruleset:
         raise ValueError(f"RuleSet with id {rule.ruleset_id} does not exist.")
@@ -142,7 +122,6 @@ def create_rule(db: Session, rule: RuleCreate) -> Rule:
     db_rule = Rule(**rule_data)
 
     if destination_ids:
-        # Ensure unique destination IDs before querying to avoid issues
         unique_destination_ids = list(set(destination_ids))
         destinations = db.execute(
             select(StorageBackendConfig).where(StorageBackendConfig.id.in_(unique_destination_ids))
@@ -154,37 +133,33 @@ def create_rule(db: Session, rule: RuleCreate) -> Rule:
              raise ValueError(f"One or more destination IDs not found: {missing_ids}")
         db_rule.destinations = destinations
     else:
-        db_rule.destinations = [] # Explicitly set to empty list if no IDs
+        db_rule.destinations = []
 
     db.add(db_rule)
     db.commit()
     db.refresh(db_rule)
-    # Ensure relationships are fresh, especially after manual list appends.
-    # selectinload on subsequent gets might be preferred over manual refresh here.
-    # db.refresh(db_rule, attribute_names=['destinations']) 
     return db_rule
 
 
 def update_rule(db: Session, rule_id: int, rule_update: RuleUpdate) -> Optional[Rule]:
-    """Updates an existing Rule, including its associated destinations."""
     db_rule = (
         db.query(Rule)
-        .options(selectinload(Rule.destinations)) # Load current destinations
+        .options(selectinload(Rule.destinations))
         .filter(Rule.id == rule_id)
         .first()
     )
     if not db_rule:
         return None
 
-    destination_ids = rule_update.destination_ids # This can be None, an empty list, or list of IDs
+    destination_ids = rule_update.destination_ids 
     update_data = rule_update.model_dump(exclude={'destination_ids'}, exclude_unset=True)
 
     if update_data:
         for key, value in update_data.items():
             setattr(db_rule, key, value)
 
-    if destination_ids is not None: # If destination_ids is part of the update payload
-        if not destination_ids: # An empty list means clear all destinations
+    if destination_ids is not None: 
+        if not destination_ids: 
             db_rule.destinations = []
         else:
             unique_destination_ids = list(set(destination_ids))
@@ -195,29 +170,21 @@ def update_rule(db: Session, rule_id: int, rule_update: RuleUpdate) -> Optional[
                 found_ids = {d.id for d in destinations}
                 missing_ids = [id_ for id_ in unique_destination_ids if id_ not in found_ids]
                 raise ValueError(f"Destination IDs not found during update: {missing_ids}")
-            db_rule.destinations = destinations # Assign the new list
+            db_rule.destinations = destinations
 
-    # Only commit if there were actual changes from update_data or if destination_ids was provided
     if update_data or destination_ids is not None:
         try:
             db.commit()
             db.refresh(db_rule)
-            # Refreshing relationships explicitly might be good practice
-            # db.refresh(db_rule, attribute_names=['destinations'])
-            # For response consistency, re-fetch using the get_rule function
-            # which handles eager loading as defined for reads.
             return get_rule(db, rule_id) 
         except IntegrityError as e:
              db.rollback()
-             # logger.error(f"Database integrity error during rule update for ID {rule_id}: {e}", exc_info=True)
              raise
     else:
-         # No changes were made to rule fields or destinations
          return db_rule
 
 
 def delete_rule(db: Session, rule_id: int) -> bool:
-    """Deletes a Rule."""
     db_rule = db.query(Rule).filter(Rule.id == rule_id).first()
     if db_rule:
         db.delete(db_rule)
@@ -225,17 +192,35 @@ def delete_rule(db: Session, rule_id: int) -> bool:
         return True
     return False
 
+# --- NEW FUNCTION ---
+def get_rules_by_ai_prompt_config_id(db: Session, *, config_id: int) -> List[Rule]:
+    """
+    Retrieves all rules that have the given config_id in their
+    ai_prompt_config_ids list.
+    Assumes Rule.ai_prompt_config_ids is a JSONB column storing an array of integers (PostgreSQL).
+    """
+    # This query uses jsonb_path_exists for PostgreSQL.
+    # It checks if a path exists in the JSONB document (Rule.ai_prompt_config_ids)
+    # where an array element ('@') equals the provided 'config_id' (passed as '$id').
+    statement = select(Rule).filter(
+        func.jsonb_path_exists(
+            Rule.ai_prompt_config_ids,
+            '$[*] ? (@ == $id)',  # JSONPath: any array element equal to variable $id
+            func.jsonb_build_object('id', config_id)  # Variables: {"id": <config_id_value>}
+        )
+    )
+    return db.execute(statement).scalars().all()
+
 
 # --- CRUD Object instances ---
-# These classes will now correctly call the globally defined functions.
 
 class RuleSetCRUDMethods:
     def get(self, db: Session, ruleset_id: int) -> Optional[RuleSet]: return get_ruleset(db, ruleset_id)
     def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> List[RuleSet]: return get_rulesets(db, skip=skip, limit=limit)
     def get_active_ordered(self, db: Session) -> list[RuleSet]: return get_active_rulesets_ordered(db)
-    def create(self, db: Session, ruleset: RuleSetCreate) -> RuleSet: return create_ruleset(db, ruleset) # Now calls defined function
-    def update(self, db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) -> Optional[RuleSet]: return update_ruleset(db, ruleset_id, ruleset_update) # Now calls defined function
-    def delete(self, db: Session, ruleset_id: int) -> bool: return delete_ruleset(db, ruleset_id) # Now calls defined function
+    def create(self, db: Session, ruleset: RuleSetCreate) -> RuleSet: return create_ruleset(db, ruleset)
+    def update(self, db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) -> Optional[RuleSet]: return update_ruleset(db, ruleset_id, ruleset_update)
+    def delete(self, db: Session, ruleset_id: int) -> bool: return delete_ruleset(db, ruleset_id)
 
 class RuleCRUDMethods:
     def get(self, db: Session, rule_id: int) -> Optional[Rule]: return get_rule(db, rule_id)
@@ -243,7 +228,10 @@ class RuleCRUDMethods:
     def create(self, db: Session, rule: RuleCreate) -> Rule: return create_rule(db, rule)
     def update(self, db: Session, rule_id: int, rule_update: RuleUpdate) -> Optional[Rule]: return update_rule(db, rule_id, rule_update)
     def delete(self, db: Session, rule_id: int) -> bool: return delete_rule(db, rule_id)
+    # Add the new method here so it's accessible via `crud.crud_rule.get_rules_by_ai_prompt_config_id`
+    def get_rules_by_ai_prompt_config_id(self, db: Session, *, config_id: int) -> List[Rule]:
+        return get_rules_by_ai_prompt_config_id(db, config_id=config_id) # Calls the top-level function
 
-
+# Instantiate the CRUD objects
 ruleset = RuleSetCRUDMethods()
-rule = RuleCRUDMethods()
+rule = RuleCRUDMethods() # This instance will now have the new method
