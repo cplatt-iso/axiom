@@ -1,5 +1,4 @@
 # backend/app/worker/standard_modification_handler.py
-
 import structlog
 import re
 from copy import deepcopy
@@ -28,56 +27,79 @@ from app.db.models import CrosswalkMap # For crosswalk type hint
 from app.worker.utils.dicom_utils import parse_dicom_tag
 
 logger = structlog.get_logger(__name__)
+# --- START: New Tag Constants from Recommended Rewrite ---
+OAS_TAG   = Tag(0x0400, 0x0561)   # Original Attributes Sequence  (SQ) - Corrected outer sequence
+MAS_TAG   = Tag(0x0400, 0x0550)   # Modified Attributes Sequence  (SQ) - Nested sequence for original value
+MOD_DT    = Tag(0x0400, 0x0562)   # Attribute Modification DateTime (DT)
+MOD_SYS   = Tag(0x0400, 0x0563)   # Modifying System               (LO)
+SRC_PREV  = Tag(0x0400, 0x0564)   # Source of Previous Values       (LO)
+REASON    = Tag(0x0400, 0x0565)   # Reason for Attribute Mod.       (LO)
+# --- END: New Tag Constants ---
 
-ORIGINAL_ATTRIBUTES_SEQUENCE_TAG = Tag(0x0400, 0x0550)
-MODIFIED_ATTRIBUTES_SEQUENCE_TAG = Tag(0x0400, 0x0561)
-SOURCE_MODIFICATION_ITEM_TAG = Tag(0x0400,0x0565) # Used in Original Attributes Sequence Item
-
-def _add_original_attribute(dataset: Dataset, original_element: Optional[DataElement], modification_description: str, source_identifier: str):
-    """Adds original attribute info to the Original Attributes Sequence."""
-    log_enabled = getattr(settings, 'LOG_ORIGINAL_ATTRIBUTES', False)
-    if not log_enabled:
+# --- START: Recommended Full Rewrite of _add_original_attribute ---
+def _add_original_attribute(
+    ds: Dataset, # Changed from 'dataset' to 'ds' to match proposal
+    original_element: Optional[DataElement], # Matched type hint from proposal
+    description: str, # Changed from 'modification_description'
+    source_id: str,   # Changed from 'source_identifier'
+):
+    if not getattr(settings, "LOG_ORIGINAL_ATTRIBUTES", False): # Assuming 'settings' is available globally or passed in
         return
 
-    try:
-        if ORIGINAL_ATTRIBUTES_SEQUENCE_TAG not in dataset:
-            dataset[ORIGINAL_ATTRIBUTES_SEQUENCE_TAG] = DataElement(
-                ORIGINAL_ATTRIBUTES_SEQUENCE_TAG, 'SQ', Sequence([])
-            )
-        elif not isinstance(dataset[ORIGINAL_ATTRIBUTES_SEQUENCE_TAG].value, (Sequence, list)):
-             logger.error(f"Existing OriginalAttributesSequence {ORIGINAL_ATTRIBUTES_SEQUENCE_TAG} is not a Sequence.")
-             return
+    # never copy group-length elements (tag.elem ends in 0x0000)
+    # or command-set elements (tag.group is 0x0000)
+    if original_element and (original_element.tag.element == 0x0000 or original_element.tag.group == 0x0000):
+        logger.debug(f"Skipping logging of group-length or command-set element: {original_element.tag}")
+        return
 
-        item = Dataset()
-        if original_element is not None:
-            # If the original element was itself a sequence, we might need special handling
-            # For now, assume it's a non-sequence element or a sequence that can be copied.
-            # We store the Source Modification Item Sequence (0400,0565) within the Original Attributes Sequence Item.
-            # This sequence contains the original DataElement.
-            source_mod_item_ds = Dataset()
-            source_mod_item_ds.add(deepcopy(original_element)) # Add the original element here
-
-            source_mod_seq = Sequence([source_mod_item_ds])
-            item.add_new(SOURCE_MODIFICATION_ITEM_TAG, 'SQ', source_mod_seq)
-
-
-        # ModifiedAttributesSequence (0400,0561) part
-        mod_attr_item = Dataset()
-        mod_attr_item.add_new(Tag(0x0040, 0xA73A), "DT", datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S.%f')[:26]) # AttributeModificationDateTime
-        mod_attr_item.add_new(Tag(0x0400, 0x0563), "LO", source_identifier[:64]) # ModifyingSystem
-        mod_attr_item.add_new(Tag(0x0400, 0x0562), "LO", modification_description[:64]) # ReasonForTheAttributeModification
-
-        item.add_new(MODIFIED_ATTRIBUTES_SEQUENCE_TAG, 'SQ', Sequence([mod_attr_item]))
-
-        dataset[ORIGINAL_ATTRIBUTES_SEQUENCE_TAG].value.append(item)
-        log_tag_repr = str(original_element.tag) if original_element else "N/A (Element new or deleted)"
-        logger.debug(f"Logged modification details for tag {log_tag_repr} to OriginalAttributesSequence.")
-
-    except Exception as e:
-        log_tag_repr = str(original_element.tag) if original_element else "N/A"
-        logger.error(f"Failed to add item to OriginalAttributesSequence for tag {log_tag_repr}: {e}", exc_info=True)
+    # get or create the outer Original Attributes Sequence (0x0400,0x0561)
+    # pydicom < 2.1 way:
+    if OAS_TAG not in ds:
+        # Create a new DataElement for the sequence
+        oas_element = DataElement(OAS_TAG, "SQ", Sequence([]))
+        ds.add(oas_element)
+        oas_sequence = oas_element.value
+    else:
+        oas_sequence = ds[OAS_TAG].value
+        if not isinstance(oas_sequence, Sequence):
+            logger.error(f"Existing OriginalAttributesSequence {OAS_TAG} is not a Sequence. Cannot append.")
+            # Potentially re-initialize or raise error
+            oas_element = DataElement(OAS_TAG, "SQ", Sequence([]))
+            ds[OAS_TAG] = oas_element # Replace if not a sequence
+            oas_sequence = oas_element.value
 
 
+    # build one item of Original Attributes Sequence
+    item = Dataset()
+
+    # Modified Attributes Sequence (0x0400,0x0550) (exactly one item inside, containing the original element)
+    # This sequence holds the attribute(s) as they were before modification.
+    if original_element is not None: # Only add MAS if there was an original element
+        mas_item_content = Dataset()
+        # Add the original element itself into this item (e.g. (0010,0010), "Patient Name", "ORIGINAL^PATIENT")
+        mas_item_content.add(deepcopy(original_element))
+        
+        # Create the Modified Attributes Sequence and add the item with original content to it
+        item.add_new(MAS_TAG, "SQ", Sequence([mas_item_content]))
+
+    # audit attributes, added directly to the 'item' of OriginalAttributesSequence
+    now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S.%f")[:26]
+    item.add_new(MOD_DT,  "DT", now)
+    item.add_new(MOD_SYS, "LO", source_id[:64]) # 'source_id' is our 'source_identifier'
+    
+    # SourceOfPreviousValues (0x0400,0x0564) - could be the same as ModifyingSystem, or more specific if known
+    # For now, let's use source_id, but this could be enhanced.
+    item.add_new(SRC_PREV, "LO", source_id[:64]) 
+    
+    item.add_new(REASON,  "LO", description[:64]) # 'description' is our 'modification_description'
+
+    oas_sequence.append(item) # Append the fully constructed item to the OriginalAttributesSequence
+
+    log_tag_repr = str(original_element.tag) if original_element else "N/A (Element new or created)"
+    logger.debug(f"Logged modification details for tag {log_tag_repr} to OriginalAttributesSequence (DICOM Spec Aligned).")
+
+
+# ... (rest of the file remains the same) ...
 def _apply_crosswalk_modification(dataset: pydicom.Dataset, mod: TagCrosswalkModification, source_identifier: str, db_session) -> bool: # Added db_session
     """Applies crosswalk modifications. Returns True if dataset was changed."""
     # db_session is now passed in
@@ -306,8 +328,8 @@ def apply_standard_modifications(dataset: pydicom.Dataset, modifications: List[T
 
                 if isinstance(current_value, MultiValue):
                     new_multi_value = []
-                    for item in current_value:
-                        item_str = str(item) if item is not None else ""
+                    for item_val in current_value: # Renamed to avoid conflict
+                        item_str = str(item_val) if item_val is not None else ""
                         if action == ModifyActionEnum.PREPEND: new_item = text_to_add + item_str
                         else: new_item = item_str + text_to_add
                         new_multi_value.append(new_item)
@@ -348,8 +370,8 @@ def apply_standard_modifications(dataset: pydicom.Dataset, modifications: List[T
                 try:
                     if isinstance(current_value, MultiValue):
                         new_multi_value = []
-                        for item in current_value:
-                            item_str = str(item) if item is not None else ""
+                        for item_val in current_value: # Renamed to avoid conflict
+                            item_str = str(item_val) if item_val is not None else ""
                             new_item = re.sub(pattern, replacement, item_str)
                             new_multi_value.append(new_item)
                             if new_item != item_str: changed_during_op = True
@@ -374,7 +396,7 @@ def apply_standard_modifications(dataset: pydicom.Dataset, modifications: List[T
 
             elif action in [ModifyActionEnum.COPY, ModifyActionEnum.MOVE]:
                 if not isinstance(mod, (TagCopyModification, TagMoveModification)): continue
-                if not tag or not destination_tag_str:
+                if not tag or not destination_tag_str: # tag is source_tag here
                     logger.warning(f"Skipping {action.value}: Invalid source ('{log_tag_str}') or dest ('{destination_tag_str}').")
                     continue
                 dest_tag = parse_dicom_tag(destination_tag_str)
@@ -385,16 +407,19 @@ def apply_standard_modifications(dataset: pydicom.Dataset, modifications: List[T
                 dest_kw = keyword_for_tag(dest_tag) or '(Unknown Keyword)'
                 dest_tag_str_repr = f"{dest_kw} {dest_tag}"
 
-                if not original_element_for_log: # This is original_element of source_tag
+                if not original_element_for_log: # This is original_element of source_tag (named 'tag')
                     logger.warning(f"Cannot {action.value}: Source tag {tag_str_repr} not found.")
                     continue
 
                 original_dest_element_before_mod: Optional[DataElement] = deepcopy(dataset.get(dest_tag, None))
-                modification_description = f"{action.value} tag {tag_str_repr} to {dest_tag_str_repr}"
-                dest_vr = mod.destination_vr or original_element_for_log.VR
+                # For COPY/MOVE, the modification_description refers to the *destination* tag being changed.
+                # The original_element passed to _add_original_attribute should be the original state of the *destination* tag.
+                modification_description = f"{action.value} from {tag_str_repr} to {dest_tag_str_repr}"
+                dest_vr = mod.destination_vr or original_element_for_log.VR # Use source VR if dest VR not specified
                 
-                # Check if destination will change
                 new_value_for_dest = deepcopy(original_element_for_log.value)
+
+                # Check if destination tag will actually change
                 if original_dest_element_before_mod is None or \
                    original_dest_element_before_mod.value != new_value_for_dest or \
                    original_dest_element_before_mod.VR != dest_vr:
@@ -402,21 +427,23 @@ def apply_standard_modifications(dataset: pydicom.Dataset, modifications: List[T
                     new_element = DataElement(dest_tag, dest_vr, new_value_for_dest)
                     dataset[dest_tag] = new_element
                     logger.debug(f"Tag {tag_str_repr} {action.value.lower()}d to {dest_tag_str_repr} (VR '{dest_vr}').")
+                    # Log the change to the destination tag, passing its original state
                     _add_original_attribute(dataset, original_dest_element_before_mod, modification_description, source_identifier)
                     current_tag_changed_dataset = True # The destination tag was changed/created
                 else:
                     logger.debug(f"{action.value}: Destination {dest_tag_str_repr} already has same value and VR. No change to destination.")
 
                 if action == ModifyActionEnum.MOVE:
-                    # The source tag deletion is a change itself if it existed
-                    if tag in dataset: # Source tag
-                        move_delete_desc = f"Deleted source {tag_str_repr} for MOVE to {dest_tag_str_repr}"
+                    # If moving, the source tag is deleted. This is another modification.
+                    # original_element_for_log here is the state of the *source* tag before deletion.
+                    if tag in dataset: # Source tag (named 'tag')
+                        move_delete_desc = f"Deleted source {tag_str_repr} (part of MOVE to {dest_tag_str_repr})"
+                        # Log the deletion of the source tag, passing its original state (which is original_element_for_log)
                         _add_original_attribute(dataset, original_element_for_log, move_delete_desc, source_identifier)
-                        del dataset[tag] # original_element_for_log is the source tag's original state
+                        del dataset[tag] 
                         logger.debug(f"Deleted original source tag {tag_str_repr} after move.")
-                        # current_tag_changed_dataset = True # This is also a change
-                        overall_dataset_changed = True # Explicitly mark overall change due to deletion
-                    else: # Should not happen if original_element_for_log existed
+                        current_tag_changed_dataset = True # Mark change because source was deleted
+                    else: 
                          logger.warning(f"MOVE: Source tag {tag_str_repr} unexpectedly not found for deletion after copy.")
             
             if current_tag_changed_dataset:
