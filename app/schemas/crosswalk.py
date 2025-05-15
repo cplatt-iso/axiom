@@ -221,15 +221,31 @@ class CrosswalkMapUpdate(BaseModel):
     cache_ttl_seconds: Optional[int] = Field(None, gt=0)
     on_cache_miss: Optional[str] = Field(None, pattern="^(fail|query_db|log_only)$")
 
-    # Re-apply JSON validators if needed for update
-    _validate_match_columns_up = field_validator('match_columns', mode='before')(_validate_json_list_of_dict)
-    _validate_cache_key_columns_up = field_validator('cache_key_columns', mode='before')(_validate_json_list_of_string)
-    _validate_replacement_mapping_up = field_validator('replacement_mapping', mode='before')(_validate_json_list_of_dict)
+    # Re-apply JSON validators with correct signatures
+    _validate_match_columns_up = field_validator('match_columns', mode='before')
+    @classmethod
+    def _validate_match_columns_up(cls, v):
+        return _validate_json_list_of_dict(v)
 
-    # Re-apply item structure validation if needed
-    _check_match_items_up = field_validator('match_columns')(CrosswalkMapBase.check_match_column_items)
-    _check_replace_items_up = field_validator('replacement_mapping')(CrosswalkMapBase.check_replacement_mapping_items)
+    _validate_cache_key_columns_up = field_validator('cache_key_columns', mode='before')
+    @classmethod
+    def _validate_cache_key_columns_up(cls, v):
+        return _validate_json_list_of_string(v)
 
+    _validate_replacement_mapping_up = field_validator('replacement_mapping', mode='before')
+    @classmethod
+    def _validate_replacement_mapping_up(cls, v):
+        return _validate_json_list_of_dict(v)
+
+    _check_match_items_up = field_validator('match_columns')
+    @classmethod
+    def _check_match_items_up(cls, v):
+        return CrosswalkMapBase.check_match_column_items(v)
+
+    _check_replace_items_up = field_validator('replacement_mapping')
+    @classmethod
+    def _check_replace_items_up(cls, v):
+        return CrosswalkMapBase.check_replacement_mapping_items(v)
 
 # Add DataSource nested info for Read schema
 class CrosswalkDataSourceInfoForMap(BaseModel):
