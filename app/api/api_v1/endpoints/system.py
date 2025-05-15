@@ -1,6 +1,5 @@
 # app/api/api_v1/endpoints/system.py
-
-import logging
+import logging # Fallback if structlog isn't there (should be, but defensive)
 import socket
 import os
 from pathlib import Path
@@ -19,7 +18,14 @@ from app.api import deps
 from app.db import models # Import models
 from app import crud # Import top-level crud package
 from app import schemas # Import top-level schemas package
+from app.core import gcp_utils
+from app.services import ai_assist_service
 
+try:
+    import structlog
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 # Import the specific error from base_backend if needed
 # from app.services.storage_backends import StorageBackendError # Or handle generically
 
@@ -481,3 +487,59 @@ async def get_dashboard_status(
         status=overall_status,
         components=component_statuses
     )
+
+@router.post(
+    "/cache/ai-vocab/clear",
+    summary="Clear the AI Vocabulary Cache from Redis",
+    status_code=status.HTTP_200_OK,
+    response_model=Dict[str, Any] # Define a response model if you want more structure
+)
+def clear_ai_vocab_cache_endpoint(
+    prompt_config_id: Optional[int] = Query(None, description="Specific AIPromptConfig ID to clear entries for. If omitted, affects all AI vocab cache based on other params."),
+    input_value: Optional[str] = Query(None, description="Specific input value to clear (requires prompt_config_id)."),
+    # current_user: models.User = Depends(deps.get_current_active_superuser) # TODO: UNCOMMENT AND PROTECT
+):
+    """
+    Clears the AI Vocabulary cache.
+    - Call with no parameters to clear ALL AI vocabulary cache entries.
+    - Provide `prompt_config_id` to clear all entries for that specific prompt configuration.
+    - Provide `prompt_config_id` AND `input_value` to clear a single specific cache entry.
+    """
+    # Add authentication/authorization checks here if current_user is enabled
+
+    if input_value and prompt_config_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="If 'input_value' is provided, 'prompt_config_id' must also be provided to clear a specific entry."
+        )
+
+    try:
+        result = ai_assist_service.clear_ai_vocab_cache(
+            prompt_config_id=prompt_config_id,
+            input_value=input_value
+        )
+        
+        if result.get("status") == "error":
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result.get("message", "Unknown error during cache clearing."))
+        if result.get("status") == "warning": # e.g. cache not enabled
+             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.get("message", "Cache operation could not be fully performed."))
+        
+        return result # {"status": "success", "message": "...", "keys_deleted": X}
+
+    except Exception as e:
+        # This catches unexpected errors from the service call itself, though the utility should handle its own.
+        logger.error(f"API error calling clear_ai_vocab_cache utility: {e}", exc_info=True) # Ensure logger is available here or use print
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred: {str(e)}")
+
+@router.post("/cache/secrets/clear", summary="Clear the cached secrets", status_code=status.HTTP_200_OK)
+def clear_secrets_cache_endpoint(
+    secret_id: Optional[str] = Query(None, description="Specific secret ID to clear (requires version and project_id too)"),
+    version: Optional[str] = Query(None, description="Specific secret version to clear"),
+    project_id: Optional[str] = Query(None, description="Specific GCP project ID for the secret"),
+    # current_user: models.User = Depends(deps.get_current_active_superuser) # Protect this endpoint
+):
+    # Ensure current_user has rights if you uncomment the Depends above
+    result = gcp_utils.clear_secret_cache(secret_id, version, project_id)
+    if result["status"] == "warning":
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=result["message"])
+    return result

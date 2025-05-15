@@ -1,6 +1,5 @@
 # app/core/config.py
 import os
-import logging
 import json
 from typing import List, Optional, Union, Any, Dict
 from pydantic import (
@@ -10,7 +9,12 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+try:
+    import structlog
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    import logging # Fallback if structlog isn't there (should be, but defensive)
+    logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -21,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     PROJECT_NAME: str = "Axiom Flow"
-    PROJECT_VERSION: str = "pre-alpha 0.04.25.01" # Add if missing
+    PROJECT_VERSION: str = "hallucination pahse" 
     ENVIRONMENT: str = "development" # Add if missing
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
@@ -29,6 +33,8 @@ class Settings(BaseSettings):
     SECRET_KEY: SecretStr = SecretStr("09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
     ALGORITHM: str = "HS256"
+    SECRET_CACHE_MAX_SIZE: int = int(os.getenv("SECRET_CACHE_MAX_SIZE", 100))
+    SECRET_CACHE_TTL_SECONDS: int = int(os.getenv("SECRET_CACHE_TTL_SECONDS", 3600)) # Default 1 hour
 
     GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
 
@@ -79,6 +85,11 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: Optional[SecretStr] = None
 
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_URL: Optional[str] = None
+
     # --- Vertex AI Gemini Settings ---
     VERTEX_AI_PROJECT: Optional[str] = None # Your GCP Project ID
     VERTEX_AI_LOCATION: Optional[str] = "us-central1" # Default, but make configurable
@@ -97,10 +108,9 @@ class Settings(BaseSettings):
     AI_THREAD_POOL_WORKERS: int = 2
     AI_SYNC_WRAPPER_TIMEOUT: int = 30
 
-    REDIS_HOST: str = "redis"
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
-    REDIS_URL: Optional[str] = None
+    AI_VOCAB_CACHE_ENABLED: bool = bool(os.getenv("AI_VOCAB_CACHE_ENABLED", "True").lower() in ("true", "1", "yes"))
+    AI_VOCAB_CACHE_TTL_SECONDS: int = int(os.getenv("AI_VOCAB_CACHE_TTL_SECONDS", 60 * 60 * 24 * 30)) # Default 30 days
+    AI_VOCAB_CACHE_KEY_PREFIX: str = os.getenv("AI_VOCAB_CACHE_KEY_PREFIX", "ax_ai_vocab")
 
     CELERY_RESULT_BACKEND: Optional[str] = None
     CELERY_TASK_DEFAULT_QUEUE: str = "default"
