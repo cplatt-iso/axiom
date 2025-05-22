@@ -9,7 +9,8 @@ from decimal import Decimal, InvalidOperation
 import pydicom
 from pydicom.tag import Tag, BaseTag
 from pydicom.datadict import dictionary_VR, keyword_for_tag
-from pydicom.dataset import DataElement, Dataset
+from pydicom.dataset import Dataset # MODIFIED: DataElement removed from here
+from pydicom.dataelem import DataElement # MODIFIED: DataElement imported directly
 from pydicom.multival import MultiValue
 from pydicom.sequence import Sequence
 
@@ -450,7 +451,7 @@ def apply_standard_modifications(dataset: pydicom.Dataset, modifications: List[T
                 overall_dataset_changed = True
 
         except Exception as e:
-            tag_id_for_error = tag_str_repr if tag_str_repr != "N/A" else (getattr(mod, 'crosswalk_map_id', 'N/A') if action == ModifyActionEnum.CROSSWALK else 'Unknown Target')
+            tag_id_for_error = tag_str_repr if tag_str_repr != "N/A" else (getattr(mod, 'crosswalk_map_id', 'N/A') if action == ModifyActionEnum.CROSSWALK else 'Unknown Target') # type: ignore[possibly-undefined]
             logger.error(f"Failed to apply modification ({action.value}) for target '{tag_id_for_error}': {e}", exc_info=True)
             
     return overall_dataset_changed

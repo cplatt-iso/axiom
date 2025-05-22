@@ -16,7 +16,7 @@ class DimseQueryRetrieveSource(Base):
     using C-MOVE or C-GET. Includes TLS configuration using Google
     Secret Manager resource names for SCU operations.
     """
-    __tablename__ = "dimse_qr_sources"
+    __tablename__ = "dimse_qr_sources" # type: ignore
 
     # --- Basic Config ---
     name: Mapped[str] = mapped_column(

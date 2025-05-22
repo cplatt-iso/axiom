@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 # Pynetdicom imports
-from pynetdicom.sop_class import StudyRootQueryRetrieveInformationModelMove
+from pynetdicom.sop_class import StudyRootQueryRetrieveInformationModelMove # type: ignore[attr-defined]
 
 # Application imports
 from sqlalchemy.orm import Session
@@ -56,7 +56,7 @@ def trigger_dimse_cmove_task(self: Task, source_id: int, study_instance_uid: str
     Initiates a C-MOVE request via scu_service.move_study.
     """
     task_id = self.request.id
-    log = logger.bind(task_id=task_id, source_id=source_id, study_uid=study_instance_uid) if hasattr(logger, 'bind') else logger
+    log = (logger.bind) # type: ignore[attr-defined])(task_id=task_id, source_id=source_id, study_uid=study_instance_uid) if hasattr(logger, 'bind') else logger
     log.info("Received request to trigger C-MOVE")
 
     db: Optional[Session] = None
@@ -72,7 +72,7 @@ def trigger_dimse_cmove_task(self: Task, source_id: int, study_instance_uid: str
             return {"status": "error", "message": f"Configuration for source ID {source_id} not found."}
 
         if hasattr(log, 'bind'):
-            log = log.bind(source_name=config.name, remote_ae=config.remote_ae_title, tls_enabled=config.tls_enabled)
+            log = (log.bind) # type: ignore[attr-defined])(source_name=config.name, remote_ae=config.remote_ae_title, tls_enabled=config.tls_enabled)
 
         if not config.is_enabled:
              log.warning("Source is disabled. Skipping C-MOVE.")
@@ -102,7 +102,7 @@ def trigger_dimse_cmove_task(self: Task, source_id: int, study_instance_uid: str
             move_sop_class=StudyRootQueryRetrieveInformationModelMove
         )
 
-        log.info("C-MOVE command successful via service", result=move_result)
+        log.info("C-MOVE command successful via service", result=move_result) # type: ignore[call-arg]
 
         try:
             # --- CORRECTED CALL ---
@@ -115,7 +115,7 @@ def trigger_dimse_cmove_task(self: Task, source_id: int, study_instance_uid: str
             db.commit()
             log.info("Updated last_successful_move timestamp.")
         except Exception as db_err:
-            log.error("Failed to update last_successful_move timestamp", db_error=str(db_err))
+            log.error("Failed to update last_successful_move timestamp", db_error=str(db_err)) # type: ignore[call-arg]
             db.rollback()
 
         return {"status": "success", "message": f"C-MOVE successful for Study {study_instance_uid}", "details": move_result}
@@ -123,17 +123,18 @@ def trigger_dimse_cmove_task(self: Task, source_id: int, study_instance_uid: str
     except (TlsConfigError, AssociationError, DimseCommandError, ConnectionRefusedError, TimeoutError, OSError) as move_exc:
         log.error(f"Error during C-MOVE operation, will retry if possible: {move_exc}", exc_info=True)
         try:
-            # --- CORRECTED CALL ---
-            crud_dimse_qr_source.update_move_status(
-                 db=db,
-                 source_id=config.id if config else source_id,
-                 last_error_time=datetime.now(timezone.utc),
-                 last_error_message=f"C-MOVE Error: {str(move_exc)[:500]}"
-            )
-            # --- END CORRECTED CALL ---
-            db.commit()
+            if db: # ADDED check for db
+                # --- CORRECTED CALL ---
+                crud_dimse_qr_source.update_move_status(
+                     db=db, # type: ignore[arg-type] # db is now confirmed not None
+                     source_id=config.id if config else source_id,
+                     last_error_time=datetime.now(timezone.utc),
+                     last_error_message=f"C-MOVE Error: {str(move_exc)[:500]}"
+                )
+                # --- END CORRECTED CALL ---
+                db.commit()
         except Exception as db_err:
-             log.error("Failed to update error status in DB during C-MOVE failure handling", db_error=str(db_err))
+             log.error("Failed to update error status in DB during C-MOVE failure handling", db_error=str(db_err)) # type: ignore[call-arg]
              if db: db.rollback()
         raise move_exc
 
@@ -150,9 +151,9 @@ def trigger_dimse_cmove_task(self: Task, source_id: int, study_instance_uid: str
                 # --- END CORRECTED CALL ---
                 db.commit()
             except Exception as db_err:
-                 log.error("Failed to update error status in DB during critical failure handling", db_error=str(db_err))
+                 log.error("Failed to update error status in DB during critical failure handling", db_error=str(db_err)) # type: ignore[call-arg]
                  if db: db.rollback()
-        elif db:
+        elif db: # If config is None but db exists
              db.rollback()
         return {"status": "error", "message": f"Critical task error: {e}"}
     finally:

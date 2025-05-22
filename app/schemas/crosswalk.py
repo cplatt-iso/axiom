@@ -45,6 +45,8 @@ class CrosswalkDataSourceBase(BaseModel):
         port = v.get('port')
         if not isinstance(port, int):
              try:
+                 if port is None:
+                     raise ValueError("'port' cannot be None.")
                  port = int(port) # Try converting if it's a string/number-like
                  v['port'] = port # Store the converted int back
              except (ValueError, TypeError):
@@ -222,29 +224,29 @@ class CrosswalkMapUpdate(BaseModel):
     on_cache_miss: Optional[str] = Field(None, pattern="^(fail|query_db|log_only)$")
 
     # Re-apply JSON validators with correct signatures
-    _validate_match_columns_up = field_validator('match_columns', mode='before')
+    @field_validator('match_columns', mode='before')
     @classmethod
     def _validate_match_columns_up(cls, v):
         return _validate_json_list_of_dict(v)
 
-    _validate_cache_key_columns_up = field_validator('cache_key_columns', mode='before')
+    @field_validator('cache_key_columns', mode='before')
     @classmethod
     def _validate_cache_key_columns_up(cls, v):
         return _validate_json_list_of_string(v)
 
-    _validate_replacement_mapping_up = field_validator('replacement_mapping', mode='before')
+    @field_validator('replacement_mapping', mode='before')
     @classmethod
     def _validate_replacement_mapping_up(cls, v):
         return _validate_json_list_of_dict(v)
 
-    _check_match_items_up = field_validator('match_columns')
+    @field_validator('match_columns')
     @classmethod
-    def _check_match_items_up(cls, v):
+    def _check_match_items_up(cls, v: List[Dict[str, str]]) -> List[Dict[str, str]]:
         return CrosswalkMapBase.check_match_column_items(v)
 
-    _check_replace_items_up = field_validator('replacement_mapping')
+    @field_validator('replacement_mapping')
     @classmethod
-    def _check_replace_items_up(cls, v):
+    def _check_replace_items_up(cls, v: List[Dict[str, str]]) -> List[Dict[str, str]]:
         return CrosswalkMapBase.check_replacement_mapping_items(v)
 
 # Add DataSource nested info for Read schema

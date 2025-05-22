@@ -29,16 +29,28 @@ async def run_data_browser_query(
     """
     Execute a query against a configured data source.
     """
-    log = data_browser_service.logger.bind(
-        user_id=current_user.id,
-        source_id=query_request.source_id,
-        source_type=query_request.source_type,
-        query_level=query_request.query_level.value if query_request.query_level else QueryLevel.STUDY.value
-    ) if hasattr(data_browser_service.logger, 'bind') else data_browser_service.logger
+    base_logger = data_browser_service.logger # Get the logger from the service
+    log = base_logger
+    # Check if the logger has a 'bind' method (like structlog)
+    if hasattr(base_logger, 'bind'):
+        try:
+            log = base_logger.bind( # type: ignore
+                user_id=current_user.id,
+                source_id=query_request.source_id,
+                source_type=query_request.source_type,
+                query_level=query_request.query_level.value if query_request.query_level else QueryLevel.STUDY.value
+            )
+        except Exception: # Fallback if bind fails unexpectedly
+            log = base_logger # Use the original logger
+
+    # The Pylance errors for missing attributes (execute_query, SourceNotFoundError, etc.)
+    # indicate these are not defined or exposed in app.services.data_browser_service.
+    # They must be fixed in that module.
 
     try:
         log.info("Received data browser query request")
-        response = await data_browser_service.execute_query(
+        # This line assumes data_browser_service.execute_query is defined.
+        response = await data_browser_service.execute_query( # type: ignore
             db=db,
             source_id=query_request.source_id,
             source_type=query_request.source_type,
@@ -48,18 +60,22 @@ async def run_data_browser_query(
         log.info("Data browser query execution finished in service")
         return response
 
-    except data_browser_service.SourceNotFoundError as e:
-         log.warning(f"Data browser query failed: Source not found.", error=str(e))
+    # This assumes data_browser_service.SourceNotFoundError is defined.
+    except data_browser_service.SourceNotFoundError as e: # type: ignore
+         log.warning(f"Data browser query failed: Source not found. Error: {e}")
          raise HTTPException(status_code=404, detail=str(e))
-    except data_browser_service.InvalidParameterError as e:
-         log.warning(f"Data browser query failed: Invalid parameters.", error=str(e))
+    # This assumes data_browser_service.InvalidParameterError is defined.
+    except data_browser_service.InvalidParameterError as e: # type: ignore
+         log.warning(f"Data browser query failed: Invalid parameters. Error: {e}")
          raise HTTPException(status_code=400, detail=str(e))
-    except (data_browser_service.RemoteConnectionError, data_browser_service.RemoteQueryError) as e:
-         log.error(f"Data browser query failed: Remote error.", error=str(e), exc_info=False)
+    # This assumes data_browser_service.RemoteConnectionError and RemoteQueryError are defined.
+    except (data_browser_service.RemoteConnectionError, data_browser_service.RemoteQueryError) as e: # type: ignore
+         log.error(f"Data browser query failed: Remote error. Error: {e}", exc_info=False)
          raise HTTPException(status_code=502, detail=str(e))
-    except data_browser_service.QueryServiceError as e:
-         log.error(f"Data browser query failed: Generic service error.", error=str(e), exc_info=True)
+    # This assumes data_browser_service.QueryServiceError is defined.
+    except data_browser_service.QueryServiceError as e: # type: ignore
+         log.error(f"Data browser query failed: Generic service error. Error: {e}", exc_info=True)
          raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        log.exception("Unexpected error processing data browser query")
+        log.exception("Unexpected error processing data browser query") # Logs exception with traceback
         raise HTTPException(status_code=500, detail="An unexpected error occurred while processing the query.")

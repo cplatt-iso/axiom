@@ -68,6 +68,9 @@ from .system import ( # Renamed for clarity from your example
     DimseListenersStatusResponse,
     DimseQrSourceStatus,
     DimseQrSourcesStatusResponse,
+    DiskUsageStats, # ADDED
+    DirectoryUsageStats, # Already present in some contexts, ensure it's here
+    SystemInfo, # ADDED
 )
 
 # --- DICOMweb & DIMSE Config Schemas ---
@@ -149,7 +152,7 @@ from .google_healthcare_source import (
     GoogleHealthcareSourceBase,
     GoogleHealthcareSourceCreate,
     GoogleHealthcareSourceUpdate,
-    GoogleHealthcareSourceRead,
+    GoogleHealthcareSourceRead, # Assuming this is correct and Pylance might be having a moment
 )
 
 from .ai_prompt_config import (
@@ -177,9 +180,10 @@ __all__ = [
     "GoogleToken", "TokenResponse", "TokenPayload",
     "ApiKeyBase", "ApiKeyCreate", "ApiKeyCreateResponse", "ApiKeyUpdate", "ApiKey",
     # Health & System
-    "ComponentStatus", "HealthCheckResponse", "SystemInfo", "DiskUsage",
+    "ComponentStatus", "HealthCheckResponse", "SystemInfo", "DiskUsageStats", # MODIFIED DiskUsage to DiskUsageStats
     "DicomWebSourceStatus", "DicomWebPollersStatusResponse", "DimseListenerStatus",
     "DimseListenersStatusResponse", "DimseQrSourceStatus", "DimseQrSourcesStatusResponse",
+    "DirectoryUsageStats", # ADDED if it wasn't explicitly in __all__ but imported
     # DICOMweb & DIMSE Config
     "AuthType", "DicomWebSourceConfigBase", "DicomWebSourceConfigCreate",
     "DicomWebSourceConfigUpdate", "DicomWebSourceConfigRead",
@@ -200,7 +204,10 @@ __all__ = [
     "TimeRange", "ScheduleBase", "ScheduleCreate", "ScheduleUpdate", "ScheduleRead",
     # AI Assist
     "RuleGenRequest", "RuleGenSuggestion", "RuleGenResponse",
-    # Data Browser (Add if defined)
+    # Google Healthcare Source
+    "GoogleHealthcareSourceBase", "GoogleHealthcareSourceCreate",
+    "GoogleHealthcareSourceUpdate", "GoogleHealthcareSourceRead", # ADDED
+    # AI Prompt Config
     "AIPromptConfigBase",
     "AIPromptConfigCreate",
     "AIPromptConfigUpdate",

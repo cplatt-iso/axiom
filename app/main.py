@@ -189,7 +189,8 @@ async def health_check(db: Session = Depends(get_db)):
     db_details = "Connection successful."
     logger.debug("Performing health check...")
     try:
-        db.execute("SELECT 1")
+        from sqlalchemy.sql import text
+        db.execute(text("SELECT 1"))
         logger.debug("Health check: Database connection successful.")
     except Exception as e:
         logger.error("Health check failed: Database connection error", error=str(e), exc_info=False)

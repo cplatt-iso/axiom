@@ -1,13 +1,16 @@
 # app/core/config.py
 import os
 import json
-from typing import List, Optional, Union, Any, Dict
+from typing import List, Optional, Union, Any, Dict, Sequence
 from pydantic import (
     AnyHttpUrl, PostgresDsn, field_validator, ValidationInfo, BaseModel,
-    EmailStr, SecretStr
+    EmailStr, SecretStr, Field
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+
+import pydicom
+import pydicom.uid
 
 try:
     import structlog
@@ -29,6 +32,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development" # Add if missing
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
+    LOG_LEVEL: str = "DEBUG"
 
     SECRET_KEY: SecretStr = SecretStr("09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
@@ -42,6 +46,22 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "dicom_processor_user"
     POSTGRES_PASSWORD: SecretStr = SecretStr("changeme")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     POSTGRES_DB: str = "dicom_processor_db"
     SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None
 
@@ -64,7 +84,7 @@ class Settings(BaseSettings):
 
     @field_validator("BACKEND_CORS_ORIGINS", mode='before')
     @classmethod
-    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[Union[str, AnyHttpUrl]]:
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Sequence[Union[str, AnyHttpUrl]]:
         if isinstance(v, str):
             if v.startswith("["):
                  try: return json.loads(v)
@@ -84,6 +104,10 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: Optional[str] = None
 
     OPENAI_API_KEY: Optional[SecretStr] = None
+    OPENAI_MODEL_NAME_RULE_GEN: Optional[str] = None # Optional: Model name for OpenAI rule generation
+    OPENAI_TEMPERATURE_RULE_GEN: float = 0.3
+    OPENAI_MAX_TOKENS_RULE_GEN: int = 512
+
 
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -91,6 +115,7 @@ class Settings(BaseSettings):
     REDIS_URL: Optional[str] = None
 
     # --- Vertex AI Gemini Settings ---
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp/axiom-flow-gcs-key.json")
     VERTEX_AI_PROJECT: Optional[str] = None # Your GCP Project ID
     VERTEX_AI_LOCATION: Optional[str] = "us-central1" # Default, but make configurable
     VERTEX_AI_MODEL_NAME: str = "gemini-2.5-flash-preview-04-17" # Or gemini-1.0-pro, etc.
@@ -101,6 +126,7 @@ class Settings(BaseSettings):
     VERTEX_AI_TEMPERATURE_VOCAB: float = 0.2
     VERTEX_AI_TOP_P_VOCAB: float = 0.8
     VERTEX_AI_TOP_K_VOCAB: int = 40
+    VERTEX_AI_CONFIG_PROJECT_ID: Optional[str] = None # Optional: Project ID for Vertex AI (if different from GCP project)
 
     # --- AI Invocation Tracking ---
     AI_INVOCATION_COUNTER_ENABLED: bool = True
@@ -129,6 +155,8 @@ class Settings(BaseSettings):
     DELETE_ON_SUCCESS: bool = True
     DELETE_UNMATCHED_FILES: bool = False
     DELETE_ON_NO_DESTINATION: bool = False
+    DELETE_ON_PARTIAL_FAILURE_IF_MODIFIED: bool = False # <-- ADD THIS LINE (defaulting to False)
+
     MOVE_TO_ERROR_ON_PARTIAL_FAILURE: bool = True
 
     LOG_ORIGINAL_ATTRIBUTES: bool = True
@@ -144,6 +172,13 @@ class Settings(BaseSettings):
     DIMSE_ACSE_TIMEOUT: int = 30     # Timeout for establishing association (seconds)
     DIMSE_DIMSE_TIMEOUT: int = 60    # Timeout for DIMSE message responses (seconds)
     DIMSE_NETWORK_TIMEOUT: int = 30  # Low-level network activity timeout (seconds)
+
+    RULES_CACHE_ENABLED: bool = Field(default=True)
+    # RULES_CACHE_ENABLED: bool = False
+    RULES_CACHE_TTL_SECONDS: int = Field(default=60)  # in seconds
+
+    PYDICOM_IMPLEMENTATION_UID: str = "1.2.826.0.1.3680043.8.498.1" # Example: generate a new UID or use a predefined one
+    IMPLEMENTATION_VERSION_NAME: str = "AXIOM_FLOW_V" # Also ensure this is defined if not already
 
     KNOWN_INPUT_SOURCES: List[str] = [
         "api_json",

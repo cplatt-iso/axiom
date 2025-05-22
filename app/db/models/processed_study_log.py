@@ -6,6 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.sql import func
 from sqlalchemy.orm import Mapped, mapped_column
 import enum
+from typing import ClassVar
 # --- ADDED: Import datetime ---
 from datetime import datetime
 # --- END ADDED ---
@@ -17,15 +18,18 @@ class ProcessedStudySourceType(str, enum.Enum):
     DICOMWEB = "DICOMWEB"
     DIMSE_QR = "DIMSE_QR"
     DIMSE_LISTENER = "DIMSE_LISTENER" # Added for C-STORE SCP input
-    # Add STOW_RS later if needed
+    STOW_RS = "STOW_RS"               # Added for STOW-RS input
+    GOOGLE_HEALTHCARE = "GOOGLE_HEALTHCARE" # Added for Google Healthcare input
+    FILE_UPLOAD = "FILE_UPLOAD" # Added for File Upload input
+    # Add other source types as needed
 
 class ProcessedStudyLog(Base):
     """
-    Logs Study Instance UIDs that have been queued for retrieval/processing
     by a specific polling source or listener to prevent duplicates.
     """
-    __tablename__ = "processed_study_log"
+    __tablename__ = "processed_study_log"  # type: ignore
 
+    # Inherits id (PK), created_at, updated_at from Base
     # Inherits id (PK), created_at, updated_at from Base
 
     source_type: Mapped[ProcessedStudySourceType] = mapped_column(

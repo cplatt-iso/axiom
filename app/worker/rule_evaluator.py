@@ -138,9 +138,11 @@ def _compare_numeric(actual_val: Any, expected_val: Any, op: MatchOperation) -> 
     except (ValueError, TypeError, InvalidOperation):
         return False
 
-def check_tag_criteria(dataset: Dataset, criteria: List[MatchCriterion]) -> bool:
-    """Checks if a dataset matches all provided tag criteria."""
-    if not criteria: return True
+def check_tag_criteria(dataset: pydicom.Dataset, criteria: List[MatchCriterion]) -> bool:
+    if not criteria:
+        return True
+
+    logger.debug("Checking tag criteria", criteria=criteria, patient_id_in_dataset=str(dataset.get("00100020", "MISSING"))) # Log PatientID presence
 
     for criterion in criteria:
         if not hasattr(criterion, 'tag') or not hasattr(criterion, 'op'): # Basic sanity

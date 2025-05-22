@@ -25,7 +25,7 @@ async def poll_google_healthcare_source(source_id: int):
     Celery task to poll a single configured Google Healthcare DICOM store for new studies,
     check against processed log, and trigger metadata processing for new studies.
     """
-    log = logger.bind(source_id=source_id, source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE.value)
+    log = logger.bind(source_id=source_id, source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE.value) # type: ignore[attr-defined]
     log.info("Starting Google Healthcare poll task")
 
     db = SessionLocal()
@@ -46,7 +46,7 @@ async def poll_google_healthcare_source(source_id: int):
             db.close()
             return
 
-        log = log.bind(source_name=source_config.name)
+        log = log.bind(source_name=source_config.name) # type: ignore[attr-defined]
         log.info("Found active source configuration, proceeding with poll.")
 
         backend_config_dict: Dict[str, Any] = {
@@ -61,12 +61,13 @@ async def poll_google_healthcare_source(source_id: int):
         ghc_backend: Optional[GoogleHealthcareDicomStoreStorage] = None
         try:
             ghc_backend = GoogleHealthcareDicomStoreStorage(config=backend_config_dict)
-            await ghc_backend.initialize_client()
+            # await ghc_backend.initialize_client() # REMOVED: initialize_client does not exist on sync backend
 
             query_params = source_config.query_filters if isinstance(source_config.query_filters, dict) else None
             log.debug("Using query filters", filters=query_params)
 
-            found_studies_raw: List[Dict[str, Any]] = await ghc_backend.search_studies(
+            found_studies_raw: List[Dict[str, Any]] = await asyncio.to_thread( # MODIFIED: Use asyncio.to_thread
+                ghc_backend.search_studies,
                 query_params=query_params,
                 limit=1000
             )
@@ -76,7 +77,7 @@ async def poll_google_healthcare_source(source_id: int):
                  for study in found_studies_raw
                  if study.get("0020000D", {}).get("Value", [None])[0] is not None
             ]
-            log = log.bind(studies_found_count=len(study_uids_found))
+            log = log.bind(studies_found_count=len(study_uids_found)) # type: ignore[attr-defined]
             log.info(f"Poll query found {len(study_uids_found)} studies.")
 
             if not study_uids_found:
@@ -85,9 +86,9 @@ async def poll_google_healthcare_source(source_id: int):
                 return
 
             log.debug("Checking found studies against processed log...")
-            processed_uids = crud.processed_study_log.get_processed_study_uids_for_source(
+            processed_uids = crud.crud_processed_study_log.get_processed_study_uids_for_source(
                 db=db,
-                source_id=source_id,
+                source_id=str(source_id), # MODIFIED: Cast to str
                 source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE,
                 study_uids_to_check=study_uids_found
             )
@@ -95,7 +96,7 @@ async def poll_google_healthcare_source(source_id: int):
             log.debug(f"Found {len(processed_uids_set)} already processed studies in log.")
 
             new_study_uids = [uid for uid in study_uids_found if uid not in processed_uids_set]
-            log = log.bind(new_studies_count=len(new_study_uids))
+            log = log.bind(new_studies_count=len(new_study_uids)) # type: ignore[attr-defined]
 
             if not new_study_uids:
                 log.info("No new studies found after checking processed log.")
@@ -107,12 +108,12 @@ async def poll_google_healthcare_source(source_id: int):
             processed_count_for_log = 0
             for study_uid in new_study_uids:
                 log.debug("Dispatching metadata processing task for new study", study_uid=study_uid)
-                process_google_healthcare_metadata_task.delay(source_id, study_uid)
+                process_google_healthcare_metadata_task.delay(source_id, study_uid) # type: ignore[operator]
                 try:
-                    crud.processed_study_log.log_processed_study(
+                    crud.crud_processed_study_log.create_log_entry( # MODIFIED: Renamed from log_processed_study
                         db=db,
                         study_instance_uid=study_uid,
-                        source_id=source_id,
+                        source_id=str(source_id), # MODIFIED: Cast to str
                         source_type=ProcessedStudySourceType.GOOGLE_HEALTHCARE
                     )
                     processed_count_for_log += 1
@@ -144,7 +145,7 @@ def poll_all_google_healthcare_sources():
     Celery Beat task to find all active Google Healthcare sources
     and dispatch individual polling tasks for each.
     """
-    log = logger.bind(task_name="poll_all_google_healthcare_sources_scheduler")
+    log = logger.bind(task_name="poll_all_google_healthcare_sources_scheduler") # type: ignore[attr-defined]
     log.info("Scheduler task started: Finding active Google Healthcare sources...")
     db = SessionLocal()
     active_sources: List[GoogleHealthcareSource] = []
@@ -154,7 +155,7 @@ def poll_all_google_healthcare_sources():
 
         for source in active_sources:
             log.debug(f"Dispatching poll task for source ID: {source.id}, Name: {source.name}")
-            poll_google_healthcare_source.delay(source.id)
+            poll_google_healthcare_source.delay(source.id) # type: ignore[operator]
 
     except Exception as e:
         log.error(f"Error during scheduling Google Healthcare poll tasks: {e}", exc_info=True)

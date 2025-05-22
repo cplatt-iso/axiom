@@ -70,16 +70,27 @@ def list_input_sources(db: Session = Depends(deps.get_db)) -> List[str]: # Add D
     # 2. Add configured DICOMweb source names
     try:
         dicomweb_sources = crud.dicomweb_source.get_multi(db, limit=1000)
-        web_names = {source.name for source in dicomweb_sources if source.name} # Use name (correct from schema)
-        logger.debug(f"Found {len(web_names)} configured DICOMweb source names: {web_names}")
-        known_sources.update(web_names)
+        # Explicitly check for non-empty string to aid type checker
+        web_names = {
+            source.source_name
+            for source in dicomweb_sources
+            if source.source_name.isnot(None) and source.source_name.ne("")
+        }
+        # Convert Column[str] to str
+        web_names_str = {str(name) for name in web_names}
+        logger.debug(f"Found {len(web_names_str)} configured DICOMweb source names: {web_names_str}")
+        known_sources.update(web_names_str)
     except Exception as e:
         logger.error(f"Failed to fetch DICOMweb source names for input list: {e}", exc_info=True)
 
     # 3. Add configured DIMSE Listener names
     try:
-        listener_configs = crud.crud_dimse_listener_config.get_multi(db, limit=1000)
-        listener_names = {config.name for config in listener_configs if config.name}
+        # Corrected to fetch DIMSE Listener states/configs
+        # Assuming DimseListenerState has a 'listener_id' or similar 'name' attribute
+        # and crud.crud_dimse_listener_state has a get_multi method.
+        # If not, adjust to the correct CRUD method and model attribute.
+        listener_states = crud.crud_dimse_listener_state.get_all_listener_states(db, limit=1000) # MODIFIED: Changed get_multi to get_all_listener_states
+        listener_names = {state.listener_id for state in listener_states if state.listener_id and state.listener_id != ""} # Assuming listener_id is the name
         logger.debug(f"Found {len(listener_names)} configured DIMSE Listener names: {listener_names}")
         known_sources.update(listener_names)
     except Exception as e:
@@ -88,7 +99,8 @@ def list_input_sources(db: Session = Depends(deps.get_db)) -> List[str]: # Add D
     # 4. Add configured DIMSE Q/R source names
     try:
         qr_sources = crud.crud_dimse_qr_source.get_multi(db, limit=1000)
-        qr_names = {source.name for source in qr_sources if source.name}
+        # Explicitly check for non-empty string
+        qr_names = {source.name for source in qr_sources if source.name and source.name != ""}
         logger.debug(f"Found {len(qr_names)} configured DIMSE Q/R source names: {qr_names}")
         known_sources.update(qr_names)
     except Exception as e:
@@ -214,7 +226,9 @@ def get_dimse_qr_sources_status(
     logger.debug("Request received for DIMSE Q/R source status.")
     try:
         qr_sources_db: List[models.DimseQueryRetrieveSource] = crud.crud_dimse_qr_source.get_multi(db=db, skip=skip, limit=limit)
-        return schemas.system.DimseQrSourcesStatusResponse(sources=qr_sources_db)
+        # Convert each DB model to the Pydantic schema model
+        response_sources = [schemas.system.DimseQrSourceStatus.model_validate(qs) for qs in qr_sources_db]
+        return schemas.system.DimseQrSourcesStatusResponse(sources=response_sources)
     except Exception as e:
         logger.error(f"Error retrieving DIMSE Q/R source status from DB: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error retrieving DIMSE Q/R source status.")

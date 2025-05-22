@@ -119,7 +119,7 @@ class CRUDAIPromptConfig(CRUDBase[AIPromptConfig, AIPromptConfigCreate, AIPrompt
         
         statement = statement.offset(skip).limit(limit)
         
-        results = db.execute(statement).scalars().all()
+        results = list(db.execute(statement).scalars().all()) # MODIFIED: Explicitly cast to list
         logger.debug("Fetched AI prompt configs count", count=len(results))
         return results
 

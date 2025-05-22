@@ -44,16 +44,16 @@ async def login_google_access_token(
         )
 
     # Try finding user by Google ID first, then by email
-    user = crud.user.get_user_by_google_id(db, google_id=google_id)
+    user = crud.crud_user.get_user_by_google_id(db, google_id=google_id)
     if not user:
-        user = crud.user.get_user_by_email(db, email=email)
+        user = crud.crud_user.get_user_by_email(db, email=email)
         if user:
             # User exists by email, but Google ID might be missing, update it
-            user = crud.user.update_user_google_info(db, db_user=user, google_info=google_info)
+            user = crud.crud_user.update_user_google_info(db, db_user=user, google_info=google_info)
         else:
             # User does not exist, create new user from Google info
             try:
-                user = crud.user.create_user_from_google(db, google_info=google_info)
+                user = crud.crud_user.create_user_from_google(db, google_info=google_info)
             except ValueError as e: # Handle errors like non-verified email
                  raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,

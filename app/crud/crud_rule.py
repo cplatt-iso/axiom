@@ -9,6 +9,7 @@ from typing import List, Optional
 from app.db.models import RuleSet, Rule # RuleSetExecutionMode might not be directly used in this file
 from app.db.models.storage_backend_config import StorageBackendConfig
 from app.schemas.rule import RuleSetCreate, RuleSetUpdate, RuleCreate, RuleUpdate
+from app.cache.rules_cache import invalidate
 
 # --- RuleSet CRUD Functions ---
 
@@ -131,7 +132,7 @@ def create_rule(db: Session, rule: RuleCreate) -> Rule:
              found_ids = {d.id for d in destinations}
              missing_ids = [id_ for id_ in unique_destination_ids if id_ not in found_ids]
              raise ValueError(f"One or more destination IDs not found: {missing_ids}")
-        db_rule.destinations = destinations
+        db_rule.destinations = list(destinations)
     else:
         db_rule.destinations = []
 
@@ -170,7 +171,7 @@ def update_rule(db: Session, rule_id: int, rule_update: RuleUpdate) -> Optional[
                 found_ids = {d.id for d in destinations}
                 missing_ids = [id_ for id_ in unique_destination_ids if id_ not in found_ids]
                 raise ValueError(f"Destination IDs not found during update: {missing_ids}")
-            db_rule.destinations = destinations
+            db_rule.destinations = list(destinations)
 
     if update_data or destination_ids is not None:
         try:
@@ -209,28 +210,65 @@ def get_rules_by_ai_prompt_config_id(db: Session, *, config_id: int) -> List[Rul
             func.jsonb_build_object('id', config_id)  # Variables: {"id": <config_id_value>}
         )
     )
-    return db.execute(statement).scalars().all()
-
+    return list(db.execute(statement).scalars().all())
 
 # --- CRUD Object instances ---
 
 class RuleSetCRUDMethods:
-    def get(self, db: Session, ruleset_id: int) -> Optional[RuleSet]: return get_ruleset(db, ruleset_id)
-    def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> List[RuleSet]: return get_rulesets(db, skip=skip, limit=limit)
-    def get_active_ordered(self, db: Session) -> list[RuleSet]: return get_active_rulesets_ordered(db)
-    def create(self, db: Session, ruleset: RuleSetCreate) -> RuleSet: return create_ruleset(db, ruleset)
-    def update(self, db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) -> Optional[RuleSet]: return update_ruleset(db, ruleset_id, ruleset_update)
-    def delete(self, db: Session, ruleset_id: int) -> bool: return delete_ruleset(db, ruleset_id)
+    def get(self, db: Session, ruleset_id: int) -> Optional[RuleSet]:
+        return get_ruleset(db, ruleset_id)
+
+    def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> List[RuleSet]:
+        return get_rulesets(db, skip=skip, limit=limit)
+
+    def get_active_ordered(self, db: Session) -> list[RuleSet]:
+        return get_active_rulesets_ordered(db)
+
+    def create(self, db: Session, ruleset: RuleSetCreate) -> RuleSet:
+        result = create_ruleset(db, ruleset)
+        invalidate()
+        return result
+
+    def update(self, db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) -> Optional[RuleSet]:
+        result = update_ruleset(db, ruleset_id, ruleset_update)
+        if result:
+            invalidate()
+        return result
+
+    def delete(self, db: Session, ruleset_id: int) -> bool:
+        result = delete_ruleset(db, ruleset_id)
+        if result:
+            invalidate()
+        return result
+
 
 class RuleCRUDMethods:
-    def get(self, db: Session, rule_id: int) -> Optional[Rule]: return get_rule(db, rule_id)
-    def get_multi_by_ruleset(self, db: Session, ruleset_id: int, skip: int = 0, limit: int = 100) -> List[Rule]: return get_rules_by_ruleset(db, ruleset_id, skip=skip, limit=limit)
-    def create(self, db: Session, rule: RuleCreate) -> Rule: return create_rule(db, rule)
-    def update(self, db: Session, rule_id: int, rule_update: RuleUpdate) -> Optional[Rule]: return update_rule(db, rule_id, rule_update)
-    def delete(self, db: Session, rule_id: int) -> bool: return delete_rule(db, rule_id)
-    # Add the new method here so it's accessible via `crud.crud_rule.get_rules_by_ai_prompt_config_id`
+    def get(self, db: Session, rule_id: int) -> Optional[Rule]:
+        return get_rule(db, rule_id)
+
+    def get_multi_by_ruleset(self, db: Session, ruleset_id: int, skip: int = 0, limit: int = 100) -> List[Rule]:
+        return get_rules_by_ruleset(db, ruleset_id, skip=skip, limit=limit)
+
+    def create(self, db: Session, rule: RuleCreate) -> Rule:
+        result = create_rule(db, rule)
+        invalidate()
+        return result
+
+    def update(self, db: Session, rule_id: int, rule_update: RuleUpdate) -> Optional[Rule]:
+        result = update_rule(db, rule_id, rule_update)
+        if result:
+            invalidate()
+        return result
+
+    def delete(self, db: Session, rule_id: int) -> bool:
+        result = delete_rule(db, rule_id)
+        if result:
+            invalidate()
+        return result
+
     def get_rules_by_ai_prompt_config_id(self, db: Session, *, config_id: int) -> List[Rule]:
-        return get_rules_by_ai_prompt_config_id(db, config_id=config_id) # Calls the top-level function
+        return get_rules_by_ai_prompt_config_id(db, config_id=config_id)
+
 
 # Instantiate the CRUD objects
 ruleset = RuleSetCRUDMethods()

@@ -7,7 +7,8 @@ from typing import Optional, List, Any
 import pydicom
 from pydicom.tag import BaseTag
 from pydicom.datadict import keyword_for_tag, dictionary_VR
-from pydicom.dataset import DataElement, Dataset
+from pydicom.dataset import Dataset # MODIFIED: Removed DataElement from here
+from pydicom.dataelem import DataElement # MODIFIED: Added direct import for DataElement
 from pydicom.multival import MultiValue
 
 from sqlalchemy.orm import Session

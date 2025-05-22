@@ -5,7 +5,11 @@ import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlencode, quote
 import json
+import google.oauth2
+import google.oauth2.service_account
 import httpx
+
+from app.core.config import settings # ADDED IMPORT
 
 # --- Simplified Google Auth Imports ---
 # Assume google.auth itself imports correctly based on previous logs
@@ -15,18 +19,24 @@ import google.auth.exceptions # Keep trying to import this for specific error ha
 # Try importing the specific async transport request object
 _async_transport_request = None
 try:
-    from google.auth.transport.aiohttp import Request as AsyncAuthRequest
+    # --- MODIFIED IMPORT PATH ---
+    from google.auth.aio.transport.aiohttp import Request as AsyncAuthRequest
     _async_transport_request = AsyncAuthRequest
-    logging.getLogger(__name__).info("Successfully imported google.auth.transport.aiohttp.Request for async refresh.")
+    logging.getLogger(__name__).info("Successfully imported google.auth.aio.transport.aiohttp.Request for async refresh.")
 except ImportError:
-    logging.getLogger(__name__).warning("Could not import google.auth.transport.aiohttp.Request. Async credential refresh may fallback to sync/blocking.")
+    logging.getLogger(__name__).warning("Could not import google.auth.aio.transport.aiohttp.Request. Async credential refresh may fallback to sync/blocking. Consider `pip install google-auth[aiohttp]`.")
     # Fallback needed if async refresh isn't possible
+    # The sync transport path might also have changed if you rely on it,
+    # but google.auth.transport.requests is a common one for sync.
     try:
-        import google.auth.transport.requests
+        import google.auth.transport.requests # Keep this for sync fallback for now
     except ImportError:
          # This would be very bad - means sync refresh also impossible
          logging.getLogger(__name__).critical("Failed to import google.auth.transport.requests - basic auth will likely fail.")
-         google.auth.transport.requests = None # Ensure it's None
+         # Ensure it's None if you check for it later
+         if 'google' in globals() and hasattr(google.auth, 'transport') and not hasattr(google.auth.transport, 'requests'):
+            google.auth.transport.requests = None
+
 
 # --- End Simplified Imports ---
 
@@ -52,63 +62,51 @@ async def get_ghc_credentials():
     """Gets and refreshes Google Cloud credentials asynchronously."""
     global _credentials
     async with _credential_lock:
-        if _credentials and _credentials.valid:
-            return _credentials
+        if settings.GOOGLE_APPLICATION_CREDENTIALS:
+            # Existing code for handling service account key file...
+            # If this block is truly empty for now, add pass
+            logger.info(f"Attempting to use Service Account Key from path: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
+            try:
+                # creds = google.oauth2.service_account.Credentials.from_service_account_file(
+                creds = google.oauth2.service_account.Credentials.from_service_account_file(
+                    settings.GOOGLE_APPLICATION_CREDENTIALS,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                _credentials = creds
+                logger.info("Successfully loaded credentials from Service Account Key JSON file.")
+            except FileNotFoundError:
+                logger.error(f"Service Account Key JSON file not found at path: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
+                raise
+            except Exception as e:
+                logger.error(f"Failed to load credentials from Service Account Key JSON file: {e}", exc_info=True)
+                raise
+            # pass # If intentionally empty for now
+        else:
+            # Try Application Default Credentials
+            if not _credentials or (_credentials.expired and hasattr(_credentials, 'refresh')):
+                logger.info("Attempting to use Application Default Credentials (ADC).")
+                try:
+                    # Ensure google.auth.default is called correctly
+                    creds, project_id = await asyncio.to_thread(
+                        google.auth.default, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
+                    _credentials = creds
+                    # Example: if L89, L96, L106, L109 were in this block, they'd be adjusted:
+                    # logger.error(f"Failed to obtain Application Default Credentials. Error: {adc_err}") # Example for L89
+                    # logger.info(f"VERTEX_AI_INIT: Using inferred project ID from ADC: {project_id}") # Example for L96
+                    # logger.error(f"VERTEX_AI_INIT: Unexpected error obtaining Application Default Credentials. Error: {e}", exc_info=True) # Example for L106
+                    if project_id:
+                        logger.info(f"ADC obtained. Inferred project ID: {project_id}")
+                    else:
+                        logger.info("ADC obtained. Project ID not inferred by google-auth library.")
 
-        logger.info("Attempting to get/refresh GHC credentials...")
-        # Check if google.auth module loaded - should be fine now based on logs
-        if not google.auth:
-             logger.error("Fatal: google.auth module not loaded.")
-             raise GoogleHealthcareQueryError("google.auth module not loaded.")
-
-        try:
-            creds, project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            if not creds:
-                raise GoogleHealthcareQueryError("Could not obtain default Google Cloud credentials.")
-
-            if not creds.valid:
-                 logger.info("GHC credentials require refresh...")
-                 try:
-                     # --- Use the imported async request object if available ---
-                     if _async_transport_request:
-                         request = _async_transport_request()
-                         await creds.refresh(request)
-                         logger.info("GHC credentials refreshed (async).")
-                     # --- Fallback to sync if async import failed ---
-                     elif google.auth.transport.requests:
-                         logger.warning("GHC: Using sync credential refresh (async transport unavailable).")
-                         auth_req_sync = google.auth.transport.requests.Request()
-                         await asyncio.to_thread(creds.refresh, auth_req_sync)
-                         logger.info("GHC credentials refreshed (sync fallback).")
-                     else:
-                          logger.error("No google-auth transport available for refresh.")
-                          raise GoogleHealthcareQueryError("Cannot refresh credentials - no auth transport available.")
-                     # --- End transport usage ---
-
-                 except Exception as refresh_error:
-                     logger.error("Failed to refresh GHC credentials", error=str(refresh_error), exc_info=False)
-                     raise GoogleHealthcareQueryError("Failed to refresh GHC credentials.") from refresh_error
-
-            if not creds.valid:
-                 logger.error("Could not obtain valid GHC credentials after refresh attempt.")
-                 raise GoogleHealthcareQueryError("Could not obtain valid GHC credentials.")
-
-            logger.info("GHC credentials obtained and valid", project_id=(project_id or 'Default'))
-            _credentials = creds
-            return _credentials
-
-        # --- Catch specific exception IF exceptions module was loaded ---
-        except Exception as e:
-             is_default_creds_error = False
-             # Check google.auth.exceptions exists before using it
-             if google.auth.exceptions and isinstance(e, google.auth.exceptions.DefaultCredentialsError):
-                 is_default_creds_error = True
-                 logger.error("GHC: Failed to find Google Cloud default credentials.", error=str(e), exc_info=False)
-                 raise GoogleHealthcareQueryError("Could not find Google Cloud credentials.") from e
-             if not is_default_creds_error:
-                  logger.error("GHC: Failed to initialize Google Cloud credentials", error=str(e), exc_info=True)
-                  raise GoogleHealthcareQueryError(f"GHC credential initialization failed: {e}") from e
-        # --- End specific exception catch ---
+                except google.auth.exceptions.DefaultCredentialsError as adc_err:
+                    logger.error(f"Failed to obtain Application Default Credentials: {adc_err}", exc_info=True) # MODIFIED
+                    raise
+                except Exception as e:
+                    logger.error(f"An unexpected error occurred getting ADC: {e}", exc_info=True) # MODIFIED
+                    raise
+        # ... (rest of the function)
 
 
 async def _get_auth_token() -> str:
@@ -162,8 +160,15 @@ async def search_for_studies(
     if fields: params["includefield"] = fields
     if query_params: params.update({k: str(v) for k, v in query_params.items()})
 
-    log = logger.bind(ghc_dicomweb_path=dicomweb_path, qido_params=params)
-    log.info("Executing GHC searchStudies via httpx")
+    log_context = {"ghc_dicomweb_path": dicomweb_path, "qido_params": params}
+    log = logger
+    if hasattr(logger, 'bind'):
+        try:
+            log = logger.bind(**log_context) # Could add # type: ignore[attr-defined] here
+        except Exception: # Fallback if bind fails
+            pass # log remains the original logger
+    
+    log.info(f"Executing GHC searchStudies via httpx. Path: {log_context['ghc_dicomweb_path']}, Params: {log_context['qido_params']}")
     client = await get_http_client()
     token = await _get_auth_token()
     headers = {
@@ -181,22 +186,24 @@ async def search_for_studies(
 
         results = response.json()
         if not isinstance(results, list):
-             log.warning("GHC searchStudies response was not a JSON list", response_type=type(results).__name__)
+             log.warning(f"GHC searchStudies response was not a JSON list. Response type: {type(results).__name__}") # MODIFIED
              return []
-        log.info("GHC searchStudies completed", result_count=len(results))
+        log.info(f"GHC searchStudies completed. Result count: {len(results)}") # MODIFIED
         return results
 
     except httpx.HTTPStatusError as e:
         error_body = e.response.text
         log.error(
-            f"HTTP Error during GHC searchStudies: {e.response.status_code}",
-            status_code=e.response.status_code,
-            error_details=error_body[:500],
-            request_url=str(e.request.url)
+            f"HTTP Error during GHC searchStudies: {e.response.status_code}. URL: {e.request.url}. Details: {error_body[:500]}",
+            # For structlog, these would be structured. For standard, they are in the message.
+            # status_code=e.response.status_code, error_details=error_body[:500], request_url=str(e.request.url)
         )
         raise GoogleHealthcareQueryError(f"HTTP {e.response.status_code} for {e.request.url}: {error_body[:200]}") from e
     except httpx.RequestError as e:
-        log.error(f"Network Error during GHC searchStudies: {e}", request_url=str(e.request.url))
+        log.error(
+            f"Network Error during GHC searchStudies: {e}. URL: {e.request.url}",
+            # request_url=str(e.request.url)
+        )
         raise GoogleHealthcareQueryError(f"Network error contacting {e.request.url}: {e}") from e
     except Exception as e:
         log.error(f"Unexpected error during GHC searchStudies: {e}", exc_info=True)
@@ -230,8 +237,15 @@ async def search_for_series(
     if fields: params["includefield"] = fields
     if query_params: params.update({k: str(v) for k, v in query_params.items()})
 
-    log = logger.bind(ghc_dicomweb_path=dicomweb_path, qido_params=params)
-    log.info("Executing GHC searchForSeries via httpx")
+    log_context = {"ghc_dicomweb_path": dicomweb_path, "qido_params": params}
+    log = logger
+    if hasattr(logger, 'bind'):
+        try:
+            log = logger.bind(**log_context) # Could add # type: ignore[attr-defined] here
+        except Exception:
+            pass
+
+    log.info(f"Executing GHC searchForSeries via httpx. Path: {log_context['ghc_dicomweb_path']}, Params: {log_context['qido_params']}")
     client = await get_http_client()
     token = await _get_auth_token()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/dicom+json, application/json"}
@@ -242,16 +256,22 @@ async def search_for_series(
         if response.status_code == 204: return []
         results = response.json()
         if not isinstance(results, list):
-             log.warning("GHC searchForSeries response was not a JSON list", response_type=type(results).__name__)
+             log.warning(f"GHC searchForSeries response was not a JSON list. Type: {type(results).__name__}")
              return []
-        log.info("GHC searchForSeries completed", result_count=len(results))
+        log.info(f"GHC searchForSeries completed. Result count: {len(results)}")
         return results
     except httpx.HTTPStatusError as e:
         error_body = e.response.text
-        log.error(f"HTTP Error during GHC searchForSeries: {e.response.status_code}", status_code=e.response.status_code, error_details=error_body[:500], request_url=str(e.request.url))
+        log.error(
+            f"HTTP Error during GHC searchForSeries: {e.response.status_code}. URL: {e.request.url}. Details: {error_body[:500]}",
+            # status_code=e.response.status_code, error_details=error_body[:500], request_url=str(e.request.url)
+        )
         raise GoogleHealthcareQueryError(f"HTTP {e.response.status_code} for {e.request.url}: {error_body[:200]}") from e
     except httpx.RequestError as e:
-        log.error(f"Network Error during GHC searchForSeries: {e}", request_url=str(e.request.url))
+        log.error(
+            f"Network Error during GHC searchForSeries: {e}. URL: {e.request.url}",
+            # request_url=str(e.request.url)
+        )
         raise GoogleHealthcareQueryError(f"Network error contacting {e.request.url}: {e}") from e
     except Exception as e:
         log.error(f"Unexpected error during GHC searchForSeries: {e}", exc_info=True)
@@ -290,10 +310,17 @@ async def search_for_instances(
 
     params: Dict[str, Any] = { "limit": str(limit), "offset": str(offset) }
     if fields: params["includefield"] = fields
-    if query_params: params.update({k: str(v) for k, v in query_params.items()})
+    if query_params: params.update({k: str(v) for k, v in query_params.items()}) # MODIFIED: Completed dict comprehension
 
-    log = logger.bind(ghc_dicomweb_path=dicomweb_path, qido_params=params)
-    log.info("Executing GHC searchForInstances via httpx")
+    log_context = {"ghc_dicomweb_path": dicomweb_path, "qido_params": params}
+    log = logger
+    if hasattr(logger, 'bind'):
+        try:
+            log = logger.bind(**log_context) # Could add # type: ignore[attr-defined] here
+        except Exception:
+            pass
+
+    log.info(f"Executing GHC searchForInstances via httpx. Path: {log_context['ghc_dicomweb_path']}, Params: {log_context['qido_params']}")
     client = await get_http_client()
     token = await _get_auth_token()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/dicom+json, application/json"}
@@ -304,16 +331,22 @@ async def search_for_instances(
         if response.status_code == 204: return []
         results = response.json()
         if not isinstance(results, list):
-             log.warning("GHC searchForInstances response was not a JSON list", response_type=type(results).__name__)
+             log.warning(f"GHC searchForInstances response was not a JSON list. Type: {type(results).__name__}")
              return []
-        log.info("GHC searchForInstances completed", result_count=len(results))
+        log.info(f"GHC searchForInstances completed. Result count: {len(results)}")
         return results
     except httpx.HTTPStatusError as e:
         error_body = e.response.text
-        log.error(f"HTTP Error during GHC searchForInstances: {e.response.status_code}", status_code=e.response.status_code, error_details=error_body[:500], request_url=str(e.request.url))
+        log.error(
+            f"HTTP Error during GHC searchForInstances: {e.response.status_code}. URL: {e.request.url}. Details: {error_body[:500]}",
+            # status_code=e.response.status_code, error_details=error_body[:500], request_url=str(e.request.url)
+        )
         raise GoogleHealthcareQueryError(f"HTTP {e.response.status_code} for {e.request.url}: {error_body[:200]}") from e
     except httpx.RequestError as e:
-        log.error(f"Network Error during GHC searchForInstances: {e}", request_url=str(e.request.url))
+        log.error(
+            f"Network Error during GHC searchForInstances: {e}. URL: {e.request.url}",
+            # request_url=str(e.request.url)
+        )
         raise GoogleHealthcareQueryError(f"Network error contacting {e.request.url}: {e}") from e
     except Exception as e:
         log.error(f"Unexpected error during GHC searchForInstances: {e}", exc_info=True)

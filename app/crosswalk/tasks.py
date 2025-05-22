@@ -26,7 +26,7 @@ def sync_all_enabled_crosswalk_sources():
         logger.info(f"Found {len(enabled_sources)} enabled crosswalk sources.")
         for source in enabled_sources:
             logger.info(f"Queueing sync/health check task for source ID: {source.id}, Name: {source.name}")
-            sync_crosswalk_source_task.delay(source.id)
+            sync_crosswalk_source_task.delay(source.id) # type: ignore
     except Exception as e:
         logger.error(f"Error querying/queueing crosswalk sources: {e}", exc_info=True)
     finally:
@@ -98,7 +98,7 @@ def sync_crosswalk_source_task(source_id: int):
                             # Use the defined order column
                             stmt = text(f"SELECT * FROM {source_config.target_table} ORDER BY {order_col} LIMIT {SYNC_CHUNK_SIZE} OFFSET {offset}")
                             result = connection.execute(stmt)
-                            chunk_data = [row._mapping for row in result]
+                            chunk_data = [dict(row._mapping) for row in result] # Convert RowMapping to dict
                         except SQLAlchemyError as db_err:
                              logger.error(f"Database error fetching chunk for source {source_id} at offset {offset}: {db_err}")
                              batch_errors.append(f"DB Error offset {offset}: {db_err}")

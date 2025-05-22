@@ -51,8 +51,8 @@ class AIPromptConfigBase(BaseModel):
     )
     model_parameters: Optional[Dict[str, Any]] = Field(
         default=None, # Explicitly default to None
-        example={"temperature": 0.2, "max_output_tokens": 50, "top_p": 0.9},
-        description="JSON object for model-specific parameters."
+        description="JSON object for model-specific parameters.",
+        json_schema_extra={"example": {"temperature": 0.2, "max_output_tokens": 50, "top_p": 0.9}}
     )
 
     @field_validator('dicom_tag_keyword')

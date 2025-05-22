@@ -11,7 +11,7 @@ class DimseListenerConfig(Base):
     Database model to store the configuration for DIMSE C-STORE SCP listeners.
     Each record defines a potential listener instance. Includes TLS server config.
     """
-    __tablename__ = "dimse_listener_configs"
+    __tablename__ = "dimse_listener_configs" # type: ignore
 
     # Inherits id, created_at, updated_at from Base
 

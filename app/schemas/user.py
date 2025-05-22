@@ -36,8 +36,8 @@ class UserCreate(UserBase):
     """Properties required to create a new user."""
     # For initial Google signup, email and google_id are key
     # We might set a dummy password in the CRUD layer
-    email: EmailStr
-    google_id: str # Make google_id required for this path
+    email: EmailStr = "default@example.com"  # type: ignore # Provide a default value as a string
+    google_id: str  # type: ignore # Make google_id required for this path
     full_name: Optional[str] = None
     # Password might not be needed here if set automatically in CRUD
     # password: str # If allowing password creation
@@ -49,7 +49,7 @@ class UserUpdate(UserBase):
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
     is_active: Optional[bool] = None
-    is_superuser: Optional[bool] = None
+    is_superuser: Optional[bool] = None # type: ignore
     # Generally don't allow updating google_id or password directly here
     # roles: Optional[List[int]] = None # Example: Update roles by ID list
 

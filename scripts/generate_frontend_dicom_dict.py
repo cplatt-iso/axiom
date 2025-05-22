@@ -1,7 +1,8 @@
 # backend/scripts/generate_frontend_dicom_dict.py
 import json
 import os
-from pydicom.datadict import DicomDictionary, keyword_for_tag # Use keyword_for_tag for consistency
+from pydicom.datadict import keyword_for_tag # Use keyword_for_tag for consistency
+from pydicom._dicom_dict import DicomDictionary
 
 # --- Configuration ---
 # Adjust the output path as needed relative to where you run the script

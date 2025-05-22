@@ -24,7 +24,7 @@ class CrosswalkSyncStatus(str, enum.Enum):
 
 class CrosswalkDataSource(Base):
     """Configuration for connecting to an external crosswalk data source."""
-    __tablename__ = "crosswalk_data_sources"
+    __tablename__ = "crosswalk_data_sources" # type: ignore
 
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -55,7 +55,7 @@ class CrosswalkDataSource(Base):
 
 class CrosswalkMap(Base):
     """Defines how to use a CrosswalkDataSource for tag mapping."""
-    __tablename__ = "crosswalk_maps"
+    __tablename__ = "crosswalk_maps" # type: ignore
 
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

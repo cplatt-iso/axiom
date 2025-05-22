@@ -6,8 +6,8 @@ import re
 
 # Pynetdicom imports
 from pynetdicom.sop_class import (
-    PatientRootQueryRetrieveInformationModelFind,
-    StudyRootQueryRetrieveInformationModelFind,
+    PatientRootQueryRetrieveInformationModelFind, # type: ignore[attr-defined]
+    StudyRootQueryRetrieveInformationModelFind, # type: ignore[attr-defined]
     SOPClass # Import base type if needed for type hints elsewhere
 )
 from pydicom.dataset import Dataset
@@ -69,7 +69,7 @@ def _resolve_dynamic_date_filter(value: Any) -> Optional[str]:
     if re.match(r"^\d{8}$", val_upper): return val_upper
     if re.match(r"^\d{8}-$", val_upper): return val_upper
     if re.match(r"^\d{8}-\d{8}$", val_upper): return val_upper
-    logger.warning("Unrecognized dynamic date format", value=value)
+    logger.warning("Unrecognized dynamic date format", unrecognized_value=value) # type: ignore[call-arg]
     return None
 
 
@@ -96,7 +96,7 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
 
         for source in all_sources:
-            log = logger.bind(source_id=source.id, source_name=source.name) if hasattr(logger, 'bind') else logger
+            log = logger.bind(source_id=source.id, source_name=source.name) if hasattr(logger, 'bind') else logger # type: ignore[attr-defined]
             if not source.is_enabled or not source.is_active:
                 log.debug("Source is disabled or inactive, skipping interval check.")
                 continue
@@ -124,9 +124,9 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
                 time_since_last_poll = now - last_success_aware
                 if time_since_last_poll >= timedelta(seconds=interval_seconds):
                     interval_met = True
-                    log.debug("Polling interval met.", interval_sec=interval_seconds, time_since=time_since_last_poll.total_seconds())
+                    log.debug("Polling interval met.", interval_duration_sec=interval_seconds, time_since_last_poll_sec=time_since_last_poll.total_seconds()) # type: ignore[call-arg]
                 else:
-                    log.debug("Polling interval not met yet.", interval_sec=interval_seconds, time_since=time_since_last_poll.total_seconds())
+                    log.debug("Polling interval not met yet.", interval_duration_sec=interval_seconds, time_since_last_poll_sec=time_since_last_poll.total_seconds()) # type: ignore[call-arg]
 
             if interval_met:
                 sources_due_for_poll.append(source)
@@ -136,7 +136,7 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
         # Poll only the sources that are due
         for source_config in sources_due_for_poll:
             # Re-bind logger for the specific poll attempt
-            poll_log = logger.bind(source_id=source_config.id, source_name=source_config.name) if hasattr(logger, 'bind') else logger
+            poll_log = logger.bind(source_id=source_config.id, source_name=source_config.name) if hasattr(logger, 'bind') else logger # type: ignore[attr-defined]
             polls_attempted += 1
             try:
                  # Call the existing function that handles the actual poll logic
@@ -145,7 +145,7 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
                  successful_polls += 1
                  # Note: _poll_single_dimse_source now handles committing its own success updates
             except (DimseQrPollingError, TlsConfigError, AssociationError, DimseCommandError, DimseScuError) as poll_err:
-                poll_log.error("Polling failed for DIMSE Q/R source", error=str(poll_err), exc_info=True)
+                poll_log.error("Polling failed for DIMSE Q/R source", specific_error=str(poll_err), exc_info=True) # type: ignore[call-arg]
                 failed_polls += 1
                 try:
                     # Update error status in DB
@@ -156,10 +156,10 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
                     )
                     db.commit() # Commit error update separately
                 except Exception as db_err:
-                    poll_log.error("Failed to update error status in DB", database_error=str(db_err), exc_info=True)
+                    poll_log.error("Failed to update error status in DB", db_update_error=str(db_err), exc_info=True) # type: ignore[call-arg]
                     db.rollback() # Rollback only the failed status update
             except Exception as e:
-                poll_log.error("Unexpected error during polling", error=str(e), exc_info=True)
+                poll_log.error("Unexpected error during polling", general_error=str(e), exc_info=True) # type: ignore[call-arg]
                 failed_polls += 1
                 try:
                     # Update error status in DB
@@ -170,18 +170,17 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
                     )
                     db.commit() # Commit error update separately
                 except Exception as db_err:
-                    poll_log.error("Failed to update error status in DB after unexpected error", database_error=str(db_err), exc_info=True)
+                    poll_log.error("Failed to update error status in DB after unexpected error", db_update_error=str(db_err), exc_info=True) # type: ignore[call-arg]
                     db.rollback()
-
     except Exception as e:
-        logger.error("Critical error during DIMSE Q/R interval check cycle", error=str(e), exc_info=True);
+        logger.error("Critical error during DIMSE Q/R interval check cycle", cycle_error=str(e), exc_info=True); # type: ignore[call-arg]
         if db: db.rollback() # Rollback any potential partial commits if outer loop fails
     finally:
         if db:
             db.close()
             logger.debug("Database session closed.")
 
-    logger.info("DIMSE Q/R interval check cycle finished.", polls_attempted=polls_attempted, successful=successful_polls, failed=failed_polls)
+    logger.info("DIMSE Q/R interval check cycle finished.", num_polls_attempted=polls_attempted, num_successful_polls=successful_polls, num_failed_polls=failed_polls) # type: ignore[call-arg]
     return {
         "status": "cycle_complete",
         "polls_attempted": polls_attempted,
@@ -192,30 +191,54 @@ def poll_all_dimse_qr_sources() -> Dict[str, Any]:
 # Helper to Poll a Single Source (Refactored)
 def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSource):
     """Polls a single DIMSE Q/R source using scu_service.find_studies."""
-    log = logger.bind(source_name=config.name, source_id=config.id, remote_ae=config.remote_ae_title) if hasattr(logger, 'bind') else logger
+    log = logger.bind(source_name=config.name, source_id=config.id, remote_ae=config.remote_ae_title) if hasattr(logger, 'bind') else logger # type: ignore[attr-defined]
     log.info("Polling DIMSE Q/R source using scu_service")
 
     # Determine SOP Class Object
-    find_sop_class = QR_LEVEL_SOP_CLASSES.get(config.query_level.upper());
-    if not find_sop_class: raise ValueError(f"Unsupported query level: {config.query_level}")
+    find_sop_class = QR_LEVEL_SOP_CLASSES.get(config.query_level.upper())
+    if not find_sop_class:
+        raise ValueError(f"Unsupported query level: {config.query_level}")
 
     # --- Build C-FIND Identifier ---
-    identifier = Dataset(); identifier.QueryRetrieveLevel = config.query_level.upper(); filter_keys_used = set()
+    identifier = Dataset()
+    identifier.QueryRetrieveLevel = config.query_level.upper()
+    filter_keys_used = set()
+
     if isinstance(config.query_filters, dict):
         for key, value in config.query_filters.items():
-            resolved_value = value;
-            if key.upper() == 'STUDYDATE': resolved_value = _resolve_dynamic_date_filter(value)
-            if resolved_value is None and key.upper() == 'STUDYDATE': log.warning(f"Skipping StudyDate filter", filter_value=value); continue
-            try: tag = Tag(key); keyword = tag.keyword or key
-            except Exception: keyword = key
-            try: setattr(identifier, keyword, resolved_value); filter_keys_used.add(keyword); log.debug(f" Filter: {keyword}={resolved_value}")
-            except Exception as e: log.warning(f"Error setting filter", keyword=keyword, value=resolved_value, error=str(e))
-    default_return_keys = [];
-    if config.query_level.upper() == "STUDY": default_return_keys = ["PatientID", "PatientName", "StudyInstanceUID", "StudyDate", "StudyTime", "AccessionNumber", "ModalitiesInStudy"]
+            resolved_value = value
+            if key.upper() == 'STUDYDATE':
+                resolved_value = _resolve_dynamic_date_filter(value)
+            
+            if resolved_value is None and key.upper() == 'STUDYDATE':
+                log.warning(f"Skipping StudyDate filter", original_filter_value=value) # type: ignore[call-arg]
+                continue
+            
+            try:
+                tag = Tag(key)
+                keyword = (tag.keyword # type: ignore[attr-defined]
+                          ) or key
+            except Exception:
+                keyword = key
+            
+            try:
+                setattr(identifier, keyword, resolved_value)
+                filter_keys_used.add(keyword)
+                log.debug(f" Filter: {keyword}={resolved_value}")
+            except Exception as e:
+                log.warning(f"Error setting filter", filter_keyword=keyword, filter_value_set=resolved_value, filter_set_error=str(e)) # type: ignore[call-arg]
+    
+    default_return_keys: List[str] = []
+    if config.query_level.upper() == "STUDY":
+        default_return_keys = ["PatientID", "PatientName", "StudyInstanceUID", "StudyDate", "StudyTime", "AccessionNumber", "ModalitiesInStudy"]
+    
     for key in default_return_keys:
         if key not in filter_keys_used:
-            try: setattr(identifier, key, '')
-            except Exception as e: log.warning("Could not set default return key", key=key, error=str(e))
+            try:
+                setattr(identifier, key, '')
+            except Exception as e:
+                log.warning("Could not set default return key", return_key_name=key, set_key_error=str(e)) # type: ignore[call-arg]
+    
     log.debug(f"Final C-FIND Identifier:\n{identifier}")
 
     # --- Prepare config dict for scu_service ---
@@ -240,12 +263,12 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
             identifier=identifier,
             find_sop_class=find_sop_class # Pass the object
         )
-        log.info("scu_service.find_studies completed", result_count=len(found_results))
+        log.info("scu_service.find_studies completed", num_results_found=len(found_results)) # type: ignore[call-arg]
     except (TlsConfigError, AssociationError, DimseCommandError, DimseScuError, ValueError) as scu_err:
-        log.error("C-FIND failed via scu_service", error=str(scu_err), exc_info=True)
+        log.error("C-FIND failed via scu_service", scu_service_error=str(scu_err), exc_info=True) # type: ignore[call-arg]
         raise DimseQrPollingError(f"C-FIND via service failed: {scu_err}") from scu_err
     except Exception as e:
-        log.error("Unexpected error calling scu_service.find_studies", error=str(e), exc_info=True)
+        log.error("Unexpected error calling scu_service.find_studies", general_find_error=str(e), exc_info=True) # type: ignore[call-arg]
         raise DimseQrPollingError(f"Unexpected error during C-FIND: {e}") from e
 
 
@@ -266,27 +289,27 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
             already_processed = crud.crud_processed_study_log.check_exists(
                 db=db,
                 source_type=ProcessedStudySourceType.DIMSE_QR,
-                source_id=source_id_str,
+                source_id=source_id_str, # type: ignore[arg-type]
                 study_instance_uid=study_uid
             )
-            if already_processed: log.debug("Study already logged. Skipping C-MOVE queue.", study_uid=study_uid)
+            if already_processed: log.debug("Study already logged. Skipping C-MOVE queue.", current_study_uid=study_uid) # type: ignore[call-arg]
             elif config.move_destination_ae_title:
                 try:
-                    log.debug("Queueing C-MOVE task", study_uid=study_uid, move_dest=config.move_destination_ae_title)
-                    trigger_dimse_cmove_task.delay(source_id=source_id_for_task, study_instance_uid=study_uid)
+                    log.debug("Queueing C-MOVE task", current_study_uid=study_uid, move_destination_target=config.move_destination_ae_title) # type: ignore[call-arg]
+                    trigger_dimse_cmove_task.delay(source_id=source_id_for_task, study_instance_uid=study_uid) # type: ignore[attr-defined]
                     log_created = crud.crud_processed_study_log.create_log_entry(
                         db=db,
                         source_type=ProcessedStudySourceType.DIMSE_QR,
-                        source_id=source_id_str,
+                        source_id=source_id_str, # type: ignore[arg-type]
                         study_instance_uid=study_uid,
                         commit=False
                     )
                     if log_created:
                         studies_queued_this_run += 1
-                        log.info("Logged study for C-MOVE queueing.", study_uid=study_uid)
-                    else: log.error("Failed to log study after queueing C-MOVE task.", study_uid=study_uid)
-                except Exception as queue_err: log.error("Failed queue C-MOVE task", study_uid=study_uid, error=str(queue_err), exc_info=True)
-            else: log.warning("Study found but no move destination configured.", study_uid=study_uid)
+                        log.info("Logged study for C-MOVE queueing.", current_study_uid=study_uid) # type: ignore[call-arg]
+                    else: log.error("Failed to log study after queueing C-MOVE task.", current_study_uid=study_uid) # type: ignore[call-arg]
+                except Exception as queue_err: log.error("Failed queue C-MOVE task", current_study_uid=study_uid, c_move_queue_error=str(queue_err), exc_info=True) # type: ignore[call-arg]
+            else: log.warning("Study found but no move destination configured.", current_study_uid=study_uid) # type: ignore[call-arg]
         else: log.warning("Found result missing StudyInstanceUID.")
 
     # --- Update DB Counts ---
@@ -294,25 +317,25 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
     if len(found_study_uids_this_run) > 0:
          try:
              rows_affected = crud.crud_dimse_qr_source.increment_found_study_count(db=db, source_id=source_id_for_task, count=len(found_study_uids_this_run))
-             if rows_affected > 0: log.info("Incremented found study count", count=len(found_study_uids_this_run)); commit_needed = True
+             if rows_affected > 0: log.info("Incremented found study count", increment_amount=len(found_study_uids_this_run)); commit_needed = True # type: ignore[call-arg]
              else: log.warning("Failed to increment found study count (rows affected 0)")
          except Exception as inc_err:
-               log.error("DB Error incrementing found study count", error=str(inc_err))
+               log.error("DB Error incrementing found study count", db_increment_error=str(inc_err)) # type: ignore[call-arg]
 
     if studies_queued_this_run > 0:
          try:
              rows_affected = crud.crud_dimse_qr_source.increment_move_queued_count(db=db, source_id=source_id_for_task, count=studies_queued_this_run)
-             if rows_affected > 0: log.info("Incremented move queued count", count=studies_queued_this_run); commit_needed = True
+             if rows_affected > 0: log.info("Incremented move queued count", increment_amount=studies_queued_this_run); commit_needed = True # type: ignore[call-arg]
              else: log.warning("Failed to increment move queued count (rows affected 0)")
          except Exception as inc_err:
-               log.error("DB Error incrementing move queued count", error=str(inc_err))
+               log.error("DB Error incrementing move queued count", db_increment_error=str(inc_err)) # type: ignore[call-arg]
 
     # Update last successful query timestamp
     try:
          crud.crud_dimse_qr_source.update_query_status(db=db, source_id=config.id, last_successful_query=datetime.now(timezone.utc))
          commit_needed = True
     except Exception as status_err:
-         log.error("DB Error updating last successful query timestamp", error=str(status_err))
+         log.error("DB Error updating last successful query timestamp", db_status_update_error=str(status_err)) # type: ignore[call-arg]
 
     # Commit successful updates
     if commit_needed:
@@ -320,9 +343,9 @@ def _poll_single_dimse_source(db: Session, config: models.DimseQueryRetrieveSour
              db.commit()
              log.info("Committed DB updates for successful poll.")
          except Exception as commit_err:
-              log.error("Failed to commit DB updates after successful poll", error=str(commit_err))
+              log.error("Failed to commit DB updates after successful poll", db_commit_error=str(commit_err)) # type: ignore[call-arg]
               db.rollback()
     else:
          log.info("No database changes to commit for this poll.")
 
-    log.info("Finished processing poll", found_studies=len(found_study_uids_this_run), queued_moves=studies_queued_this_run)
+    log.info("Finished processing poll", num_found_studies_in_run=len(found_study_uids_this_run), num_queued_moves_in_run=studies_queued_this_run) # type: ignore[call-arg]

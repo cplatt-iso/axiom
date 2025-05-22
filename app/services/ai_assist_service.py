@@ -1,11 +1,15 @@
 # filename: backend/app/services/ai_assist_service.py
 import asyncio
-import concurrent.futures
+import concurrent.futures # Import for Future type hint
 import json
 import os
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING, Type # MODIFIED: Added TYPE_CHECKING and Type
 import enum
 import hashlib # For creating more robust cache keys if needed
+
+# Import types for module type hint
+if TYPE_CHECKING: # NEW
+    import types # NEW
 
 from app.schemas.ai_prompt_config import AIPromptConfigRead
 
@@ -15,13 +19,17 @@ logger = structlog.get_logger(__name__)
 from app.core.config import settings # For all configurable parameters
 
 # GCP Utils Import
+gcp_utils: Optional['types.ModuleType'] = None # NEW: Initialize gcp_utils
+GCP_UTILS_IMPORT_SUCCESS = False # NEW: Initialize flag
 try:
-    from app.core import gcp_utils
-    from app.core.gcp_utils import SecretManagerError, SecretNotFoundError, PermissionDeniedError
-    GCP_UTILS_IMPORT_SUCCESS = True
+    from app.core import gcp_utils as _gcp_utils # MODIFIED: Import with an alias
+    from app.core.gcp_utils import SecretManagerError, SecretNotFoundError, PermissionDeniedError # type: ignore
+    gcp_utils = _gcp_utils # NEW: Assign to the main variable if import is successful
+    GCP_UTILS_IMPORT_SUCCESS = True # MOVED: Set flag on successful import
 except ImportError as gcp_import_err:
      logger.error("Failed to import app.core.gcp_utils", error_details=str(gcp_import_err), exc_info=True)
-     GCP_UTILS_IMPORT_SUCCESS = False
+     # gcp_utils remains None, GCP_UTILS_IMPORT_SUCCESS remains False
+     # Define dummy classes if import fails
      class SecretManagerError(Exception): pass # type: ignore
      class SecretNotFoundError(SecretManagerError): pass # type: ignore
      class PermissionDeniedError(SecretManagerError): pass # type: ignore
@@ -33,7 +41,7 @@ thread_pool_executor = concurrent.futures.ThreadPoolExecutor(
 
 # OpenAI Client
 try:
-    from openai import AsyncOpenAI, APIError, RateLimitError, APIConnectionError
+    from openai import AsyncOpenAI, APIError, RateLimitError, APIConnectionError # type: ignore
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
@@ -52,12 +60,12 @@ if not OPENAI_AVAILABLE:
 logger.info("Attempting Vertex AI library imports...")
 try:
     import vertexai
-    from vertexai.generative_models import GenerativeModel, Part, FinishReason
-    import vertexai.preview.generative_models as generative_models_preview
-    from google.oauth2 import service_account
-    from google.auth import default as google_auth_default
-    from google.auth.exceptions import DefaultCredentialsError
-    from google.api_core import exceptions as google_api_exceptions
+    from vertexai.generative_models import GenerativeModel, Part, FinishReason # type: ignore
+    import vertexai.preview.generative_models as generative_models_preview # type: ignore
+    from google.oauth2 import service_account # type: ignore
+    from google.auth import default as google_auth_default # type: ignore
+    from google.auth.exceptions import DefaultCredentialsError # type: ignore
+    from google.api_core import exceptions as google_api_exceptions # type: ignore
     VERTEX_AI_AVAILABLE = True
     logger.info("Vertex AI library imports successful.")
 except ImportError as vertex_import_err:
@@ -123,7 +131,7 @@ if OPENAI_AVAILABLE and settings.OPENAI_API_KEY:
     try:
         api_key_value = settings.OPENAI_API_KEY.get_secret_value() if settings.OPENAI_API_KEY else None
         if api_key_value:
-            openai_client = AsyncOpenAI(api_key=api_key_value)
+            openai_client = AsyncOpenAI(api_key=api_key_value) # type: ignore
             logger.info("OpenAI client initialized.")
         else:
             logger.warning("OpenAI API Key is configured but empty. OpenAI features disabled.")
@@ -143,17 +151,20 @@ if globals().get('VERTEX_AI_AVAILABLE', False) and settings.VERTEX_AI_PROJECT:
 
     try:
         # 1. Try Secret Manager for credentials JSON
-        if settings.VERTEX_AI_CREDENTIALS_SECRET_ID and GCP_UTILS_IMPORT_SUCCESS and getattr(gcp_utils, 'GCP_SECRET_MANAGER_AVAILABLE', False):
+        # Ensure VERTEX_AI_CONFIG_PROJECT_ID is defined in app.core.config.Settings
+        if settings.VERTEX_AI_CREDENTIALS_SECRET_ID and GCP_UTILS_IMPORT_SUCCESS and gcp_utils and getattr(gcp_utils, 'GCP_SECRET_MANAGER_AVAILABLE', False):
+            # Ensure VERTEX_AI_CONFIG_PROJECT_ID is defined in app.core.config.Settings
             logger.info(f"VERTEX_AI_INIT: Attempting to load credentials from Secret Manager: {settings.VERTEX_AI_CREDENTIALS_SECRET_ID} in project {settings.VERTEX_AI_CONFIG_PROJECT_ID or 'default'}")
             try:
-                secret_json_str = gcp_utils.get_secret( # USE THE CACHED GET_SECRET
+                secret_json_str = gcp_utils.get_secret( 
                     secret_id=settings.VERTEX_AI_CREDENTIALS_SECRET_ID,
+                    # Ensure VERTEX_AI_CONFIG_PROJECT_ID is defined in app.core.config.Settings
                     project_id=settings.VERTEX_AI_CONFIG_PROJECT_ID or project_id, # Project where secret resides
                     version="latest"
                 )
                 if secret_json_str:
                     secret_info = json.loads(secret_json_str)
-                    credentials = service_account.Credentials.from_service_account_info(secret_info)
+                    credentials = service_account.Credentials.from_service_account_info(secret_info) # type: ignore
                     logger.info("VERTEX_AI_INIT: Successfully loaded credentials from Secret Manager (via gcp_utils.get_secret).")
                 else:
                     logger.warning("VERTEX_AI_INIT: Secret content from Secret Manager was empty.")
@@ -171,7 +182,7 @@ if globals().get('VERTEX_AI_AVAILABLE', False) and settings.VERTEX_AI_PROJECT:
             logger.info(f"VERTEX_AI_INIT: Attempting to load credentials from JSON file path: {settings.VERTEX_AI_CREDENTIALS_JSON_PATH}")
             try:
                 if os.path.exists(settings.VERTEX_AI_CREDENTIALS_JSON_PATH):
-                    credentials = service_account.Credentials.from_service_account_file(settings.VERTEX_AI_CREDENTIALS_JSON_PATH)
+                    credentials = service_account.Credentials.from_service_account_file(settings.VERTEX_AI_CREDENTIALS_JSON_PATH) # type: ignore
                     logger.info("VERTEX_AI_INIT: Successfully loaded credentials from JSON file.")
                 else:
                     logger.warning(f"VERTEX_AI_INIT: Credentials JSON file not found at path: {settings.VERTEX_AI_CREDENTIALS_JSON_PATH}")
@@ -182,7 +193,7 @@ if globals().get('VERTEX_AI_AVAILABLE', False) and settings.VERTEX_AI_PROJECT:
         if not credentials:
             logger.info("VERTEX_AI_INIT: Attempting to use Application Default Credentials (ADC).")
             try:
-                credentials, inferred_project_id = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                credentials, inferred_project_id = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"]) # type: ignore
                 logger.info(f"VERTEX_AI_INIT: Successfully obtained ADC. Inferred project: {inferred_project_id}")
                 if not project_id and inferred_project_id: 
                     project_id = inferred_project_id
@@ -196,12 +207,12 @@ if globals().get('VERTEX_AI_AVAILABLE', False) and settings.VERTEX_AI_PROJECT:
             logger.error("VERTEX_AI_INIT: Vertex AI Project ID is not set and could not be inferred. Initialization failed.")
             VERTEX_AI_INITIALIZED_SUCCESSFULLY = False
         elif credentials:
-            vertexai.init(project=project_id, location=location, credentials=credentials)
+            vertexai.init(project=project_id, location=location, credentials=credentials) # type: ignore
             logger.info(f"VERTEX_AI_INIT: vertexai.init() successful for project '{project_id}' and location '{location}' with provided credentials.")
             VERTEX_AI_INITIALIZED_SUCCESSFULLY = True
         else: 
             logger.info("VERTEX_AI_INIT: No explicit credentials provided or loaded, relying on environment for ADC for vertexai.init().")
-            vertexai.init(project=project_id, location=location) 
+            vertexai.init(project=project_id, location=location) # type: ignore
             logger.info(f"VERTEX_AI_INIT: vertexai.init() successful for project '{project_id}' and location '{location}' (likely via environment ADC).")
             VERTEX_AI_INITIALIZED_SUCCESSFULLY = True
 
@@ -288,19 +299,27 @@ async def generate_rule_suggestion(request: RuleGenRequest) -> RuleGenResponse:
 # --- generate_rule_suggestion REMAINS IDENTICAL ---
     if not OPENAI_AVAILABLE or not openai_client:
         logger.warning("OpenAI client not available or not initialized for rule generation.")
-        return RuleGenResponse(error="OpenAI features are not available or not configured.")
+        # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+        # e.g., error: Optional[str] = None, suggestion: Optional[RuleGenSuggestion] = None, etc.
+        return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error="OpenAI features are not available or not configured.")
 
-    log = logger.bind(request_text=request.request_text, model_name=settings.OPENAI_MODEL_NAME_RULE_GEN)
+    # Ensure OPENAI_MODEL_NAME_RULE_GEN is defined in app.core.config.Settings
+    # Ensure the attribute used here (e.g., 'prompt') is a valid attribute of RuleGenRequest schema
+    log = logger.bind(request_text=request.prompt, model_name=settings.OPENAI_MODEL_NAME_RULE_GEN)
     log.info("Generating DICOM rule suggestion.")
 
     try:
-        completion = await openai_client.chat.completions.create(
+        completion = await openai_client.chat.completions.create( # type: ignore
+            # Ensure OPENAI_MODEL_NAME_RULE_GEN is defined in app.core.config.Settings
             model=settings.OPENAI_MODEL_NAME_RULE_GEN,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_RULE_GEN},
-                {"role": "user", "content": request.request_text}
+                # Ensure the attribute used here (e.g., 'prompt') is a valid attribute of RuleGenRequest schema
+                {"role": "user", "content": request.prompt}
             ],
+            # Ensure OPENAI_TEMPERATURE_RULE_GEN is defined in app.core.config.Settings
             temperature=settings.OPENAI_TEMPERATURE_RULE_GEN,
+            # Ensure OPENAI_MAX_TOKENS_RULE_GEN is defined in app.core.config.Settings
             max_tokens=settings.OPENAI_MAX_TOKENS_RULE_GEN,
             response_format={"type": "json_object"}
         )
@@ -317,7 +336,8 @@ async def generate_rule_suggestion(request: RuleGenRequest) -> RuleGenResponse:
 
         if not completion.choices or not completion.choices[0].message.content:
             log.warning("OpenAI response was empty or malformed.")
-            return RuleGenResponse(error="Failed to generate rule: OpenAI response was empty.")
+            # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+            return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error="Failed to generate rule: OpenAI response was empty.")
 
         generated_json_str = completion.choices[0].message.content
         log.debug("Raw JSON response from OpenAI.", raw_json=generated_json_str)
@@ -329,26 +349,34 @@ async def generate_rule_suggestion(request: RuleGenRequest) -> RuleGenResponse:
                      openai_prompt_tokens=prompt_tokens,
                      openai_completion_tokens=completion_tokens,
                      openai_total_tokens=total_tokens)
-            return RuleGenResponse(suggestion=suggestion)
+            # Ensure RuleGenResponse schema in app.schemas.ai_assist allows suggestion to be passed alone
+            # Or provide defaults for other fields if they are not optional in the schema
+            return RuleGenResponse(suggestion=suggestion, explanation=None, confidence=None, error=None)
         except json.JSONDecodeError as json_err:
             log.error("Failed to parse JSON from OpenAI response.", json_error=str(json_err), raw_response=generated_json_str)
-            return RuleGenResponse(error=f"Failed to parse generated rule: {str(json_err)}. Raw: {generated_json_str[:200]}...")
+            # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+            return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error=f"Failed to parse generated rule: {str(json_err)}. Raw: {generated_json_str[:200]}...")
         except Exception as pydantic_err: 
             log.error("Failed to validate generated rule against Pydantic schema.", pydantic_error=str(pydantic_err), raw_response=generated_json_str)
-            return RuleGenResponse(error=f"Generated rule failed validation: {str(pydantic_err)}. Raw: {generated_json_str[:200]}...")
+            # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+            return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error=f"Generated rule failed validation: {str(pydantic_err)}. Raw: {generated_json_str[:200]}...")
 
     except RateLimitError:
         log.error("OpenAI API rate limit exceeded.")
-        return RuleGenResponse(error="OpenAI API rate limit exceeded. Please try again later.")
+        # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+        return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error="OpenAI API rate limit exceeded. Please try again later.")
     except APIConnectionError:
         log.error("Failed to connect to OpenAI API.")
-        return RuleGenResponse(error="Failed to connect to OpenAI API. Check network connectivity.")
+        # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+        return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error="Failed to connect to OpenAI API. Check network connectivity.")
     except APIError as api_err: 
         log.error("OpenAI API error.", api_error_details=str(api_err))
-        return RuleGenResponse(error=f"OpenAI API error: {str(api_err)}")
+        # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+        return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error=f"OpenAI API error: {str(api_err)}")
     except Exception as e:
         log.error("An unexpected error occurred during rule generation.", error_details=str(e), exc_info=True)
-        return RuleGenResponse(error=f"An unexpected error occurred: {str(e)}")
+        # Ensure RuleGenResponse schema in app.schemas.ai_assist allows error to be passed alone
+        return RuleGenResponse(suggestion=None, explanation=None, confidence=None, error=f"An unexpected error occurred: {str(e)}")
 
 
 DEFAULT_SAFETY_SETTINGS = {}
@@ -444,7 +472,7 @@ async def _standardize_vocabulary_gemini_async(
     # --- End AI Vocab Cache Check ---
 
     try:
-        local_gemini_model = GenerativeModel(prompt_config.model_identifier)
+        local_gemini_model = GenerativeModel(prompt_config.model_identifier) # type: ignore
     except Exception as model_create_err:
         log.error("Failed to create GenerativeModel for async Gemini call.", error_details=str(model_create_err), exc_info=True)
         return None
@@ -473,7 +501,7 @@ async def _standardize_vocabulary_gemini_async(
     current_gen_config_dict = {**base_generation_config, **effective_model_params}
     
     try:
-        current_gen_config_obj = generative_models_preview.GenerationConfig(**current_gen_config_dict)
+        current_gen_config_obj = generative_models_preview.GenerationConfig(**current_gen_config_dict) # type: ignore
     except TypeError as te:
         log.error("Invalid type or unexpected keyword argument in generation_config from model_parameters.", config_dict_used=current_gen_config_dict, error_details=str(te), exc_info=True)
         return None
@@ -483,7 +511,7 @@ async def _standardize_vocabulary_gemini_async(
     gemini_prompt_tokens, gemini_candidates_tokens, gemini_total_tokens = "N/A", "N/A", "N/A"
 
     try:
-        response = await local_gemini_model.generate_content_async(
+        response = await local_gemini_model.generate_content_async( # type: ignore
             [prompt],
             generation_config=current_gen_config_obj,
             safety_settings=current_safety_settings,
@@ -549,13 +577,13 @@ async def _standardize_vocabulary_gemini_async(
         log.info("Successfully standardized term with Gemini (DB-driven config).", standardized_term=standardized_text)
         return standardized_text
         
-    except google_api_exceptions.ResourceExhausted as e_resource: 
+    except google_api_exceptions.ResourceExhausted as e_resource: # type: ignore
         log.error("Gemini API call failed due to resource exhaustion (e.g., quota).", error_details=str(e_resource), exc_info=True)
         return None
-    except google_api_exceptions.InvalidArgument as e_invalid_arg: 
+    except google_api_exceptions.InvalidArgument as e_invalid_arg: # type: ignore
         log.error("Gemini API call failed due to invalid argument (check prompt, config).", error_details=str(e_invalid_arg), exc_info=True)
         return None
-    except google_api_exceptions.GoogleAPICallError as e_gcall: 
+    except google_api_exceptions.GoogleAPICallError as e_gcall: # type: ignore
         log.error("A Google API call error occurred during async Gemini call.", error_details=str(e_gcall), exc_info=True)
         return None
     except RuntimeError as e_runtime: 
@@ -610,9 +638,10 @@ def standardize_vocabulary_gemini_sync(
             log.error("Unexpected exception in thread's async Gemini call execution.", error_details=str(e), exc_info=True)
             return None
 
+    future: Optional[concurrent.futures.Future] = None # Initialize future
+    timeout_seconds: int = settings.AI_SYNC_WRAPPER_TIMEOUT # Define timeout_seconds before try
     try:
         future = thread_pool_executor.submit(run_async_in_thread_capture_loop)
-        timeout_seconds = settings.AI_SYNC_WRAPPER_TIMEOUT
         result = future.result(timeout=timeout_seconds)
         
         log.info("Sync wrapper for Gemini (thread pool, DB-driven config) completed.",
@@ -621,8 +650,8 @@ def standardize_vocabulary_gemini_sync(
         return result
     except concurrent.futures.TimeoutError:
         log.error("Sync wrapper for Gemini timed out.", timeout_value_seconds=timeout_seconds)
-        if future.running():
-            future.cancel()
+        if future and future.running(): # Check if future is not None
+            future.cancel() # Check if future is not None
             log.info("Attempted to cancel timed-out future.")
         return None
     except Exception as e:

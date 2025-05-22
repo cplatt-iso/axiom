@@ -137,13 +137,17 @@ async def get_current_user(
                             raise credentials_exception
                         else:
                             user = related_user # Assign the authenticated user
+                            # Log successful authentication first
+                            if user:  # Ensure user is not None before accessing id
+                                logger.debug(f"[Auth] API Key authentication successful for User ID {user.id}")
+                            else:
+                                logger.debug("[Auth] API Key authentication successful but user is None")
                             # Update the key's last used timestamp (fire and forget for this dependency)
                             try:
                                  crud.crud_api_key.update_last_used(db=db, api_key=db_api_key)
                                  # commit might happen later or need explicit handling if critical
                             except Exception as update_err:
-                                 logger.warning(f"[Auth] Failed to update last_used for API key {db_api_key.id}: {update_err}")
-                            logger.debug(f"[Auth] API Key authentication successful for User ID {user.id}")
+                                logger.warning(f"[Auth] Failed to update last_used for API key {db_api_key.id}: {update_err}")
                      else:
                          logger.warning(f"[Auth] Verification FAILED for prefix {prefix} (key value mismatch)")
                          # Fall through to raise 401 if user is still None

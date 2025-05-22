@@ -88,14 +88,14 @@ def get_ghc_credentials():
                           raise GoogleHealthcareQueryError("Cannot refresh credentials - no sync auth transport available.")
 
                  except Exception as refresh_error:
-                     logger.error("Failed to refresh GHC credentials (sync)", error=str(refresh_error), exc_info=False)
+                     logger.error("Failed to refresh GHC credentials (sync)", error=str(refresh_error), exc_info=False) # type: ignore[call-arg]
                      raise GoogleHealthcareQueryError("Failed to refresh GHC credentials (sync).") from refresh_error
 
             if not creds.valid:
                  logger.error("Could not obtain valid GHC credentials after sync refresh attempt.")
                  raise GoogleHealthcareQueryError("Could not obtain valid GHC credentials.")
 
-            logger.info("GHC credentials obtained and valid (sync)", project_id=(project_id or 'Default'))
+            logger.info("GHC credentials obtained and valid (sync)", project_id=(project_id or 'Default')) # type: ignore[call-arg]
             _credentials = creds
             return _credentials
 
@@ -103,10 +103,10 @@ def get_ghc_credentials():
              is_default_creds_error = False
              if google_auth_exceptions and isinstance(e, google_auth_exceptions.DefaultCredentialsError):
                  is_default_creds_error = True
-                 logger.error("GHC: Failed to find Google Cloud default credentials.", error=str(e), exc_info=False)
+                 logger.error("GHC: Failed to find Google Cloud default credentials.", error=str(e), exc_info=False) # type: ignore[call-arg]
                  raise GoogleHealthcareQueryError("Could not find Google Cloud default credentials. Ensure Application Default Credentials (ADC) are configured correctly in the environment (e.g., via GOOGLE_APPLICATION_CREDENTIALS environment variable or gcloud auth application-default login).") from e
              if not is_default_creds_error:
-                  logger.error("GHC: Failed to initialize Google Cloud credentials", error=str(e), exc_info=True)
+                  logger.error("GHC: Failed to initialize Google Cloud credentials", error=str(e), exc_info=True) # type: ignore[call-arg]
                   raise GoogleHealthcareQueryError(f"GHC credential initialization failed: {e}") from e
 
 # --- Synchronous Token Getter ---
@@ -126,7 +126,7 @@ def _get_auth_token() -> str:
             else:
                  raise GoogleHealthcareQueryError("Cannot refresh credentials - no sync auth transport available.")
         except Exception as refresh_error:
-             logger.error("Explicit token refresh failed", error=str(refresh_error))
+             logger.error("Explicit token refresh failed", error=str(refresh_error)) # type: ignore[call-arg]
              raise GoogleHealthcareQueryError("Failed to obtain valid token during explicit refresh.") from refresh_error
 
         if not creds.token: # Check again after explicit refresh
@@ -184,7 +184,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
         missing = [key for key in self.required_keys if not getattr(self, key.replace("gcp_", ""), None)]
         if missing:
             raise ValueError(f"Google Healthcare storage config (name: {self.name}) missing required keys: {', '.join(missing)}")
-        logger.debug("GHC Backend: Synchronous config key validation passed.", backend_name=self.name)
+        logger.debug("GHC Backend: Synchronous config key validation passed.", backend_name=self.name) # type: ignore[call-arg]
 
     # Removed initialize_client as it's handled implicitly by getters now
     # Removed client property as it's handled by get_http_client()
@@ -195,7 +195,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
             token = _get_auth_token() # Call sync token getter
             return {"Authorization": f"Bearer {token}"}
         except GoogleHealthcareQueryError as e:
-             logger.error("GHC Backend: Failed to get auth token.", backend_name=self.name, error=str(e))
+             logger.error("GHC Backend: Failed to get auth token.", backend_name=self.name, error=str(e)) # type: ignore[call-arg]
              raise StorageBackendError(f"Failed to obtain GHC access token for {self.name}.") from e
 
 
@@ -211,7 +211,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
 
         sop_instance_uid: str = getattr(modified_ds, 'SOPInstanceUID', 'Unknown_SOPInstanceUID')
         study_instance_uid: str = getattr(modified_ds, 'StudyInstanceUID', 'Unknown_StudyInstanceUID')
-        log = logger.bind(
+        log = logger.bind( # type: ignore[attr-defined]
             sop_instance_uid=sop_instance_uid, study_instance_uid=study_instance_uid,
             google_dicom_store=f"{self.project_id}/{self.location}/{self.dataset_id}/{self.dicom_store_id}",
             storage_backend_type=self.backend_type,
@@ -227,7 +227,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
             # File meta creation logic remains the same
             if not hasattr(modified_ds, 'file_meta') or not modified_ds.file_meta:
                  log.warning("Dataset missing file_meta, creating default for GHC STOW.")
-                 file_meta = pydicom.dataset.FileMetaDataset()
+                 file_meta = pydicom.dataset.FileMetaDataset() # type: ignore[attr-defined]
                  file_meta.FileMetaInformationVersion = b'\x00\x01'
                  sop_class_uid_data = modified_ds.get("SOPClassUID")
                  sop_class_uid_val_list = getattr(sop_class_uid_data, 'value', ['1.2.840.10008.5.1.4.1.1.2'])
@@ -238,12 +238,12 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
                      transfer_syntax = modified_ds.file_meta.TransferSyntaxUID
                  except AttributeError:
                      log.warning("No file_meta or TransferSyntaxUID found on file_meta. Defaulting to ImplicitVRLittleEndian.")
-                     transfer_syntax = pydicom.uid.ImplicitVRLittleEndian
-                 if transfer_syntax not in pydicom.uid.TRANSFER_SYNTAXES:
+                     transfer_syntax = pydicom.uid.ImplicitVRLittleEndian # type: ignore[attr-defined]
+                 if transfer_syntax not in pydicom.uid.TRANSFER_SYNTAXES: # type: ignore[attr-defined]
                      log.warning(f"Unrecognized TransferSyntaxUID '{transfer_syntax}'. Defaulting to ImplicitVRLittleEndian.")
-                     transfer_syntax = pydicom.uid.ImplicitVRLittleEndian
+                     transfer_syntax = pydicom.uid.ImplicitVRLittleEndian # type: ignore[attr-defined]
                  file_meta.TransferSyntaxUID = transfer_syntax
-                 file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
+                 file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID # type: ignore[attr-defined]
                  file_meta.ImplementationVersionName = f"pydicom {pydicom.__version__}"
                  modified_ds.file_meta = file_meta
 
@@ -333,7 +333,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
         fuzzymatching: bool = False,
         fields: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        log = logger.bind(storage_backend_name=self.name)
+        log = logger.bind(storage_backend_name=self.name) # type: ignore[attr-defined]
         log.debug("Calling sync search_for_studies")
         # Calls the synchronous helper
         return search_for_studies(
@@ -353,7 +353,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
         offset: int = 0,
         fields: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        log = logger.bind(storage_backend_name=self.name)
+        log = logger.bind(storage_backend_name=self.name) # type: ignore[attr-defined]
         log.debug("Calling sync search_for_series")
         return search_for_series(
              base_url=self.base_url,
@@ -373,7 +373,7 @@ class GoogleHealthcareDicomStoreStorage(BaseStorageBackend):
         offset: int = 0,
         fields: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        log = logger.bind(storage_backend_name=self.name)
+        log = logger.bind(storage_backend_name=self.name) # type: ignore[attr-defined]
         log.debug("Calling sync search_for_instances")
         return search_for_instances(
              base_url=self.base_url,
@@ -401,7 +401,7 @@ def _execute_qido_query(
     fields: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """Executes a QIDO query synchronously."""
-    log = logger.bind(qido_url=url)
+    log = logger.bind(qido_url=url) # type: ignore[attr-defined]
     params = {}
     if query_params:
         params.update(query_params)

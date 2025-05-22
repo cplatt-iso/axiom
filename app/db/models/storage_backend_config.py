@@ -8,6 +8,7 @@ from sqlalchemy.sql import expression # Added expression
 
 # Import Base and the centrally defined association table
 from app.db.base import Base, rule_destination_association
+from app.db.models.rule import Rule
 
 # Define allowed backend types - MUST match discriminator values
 ALLOWED_BACKEND_TYPES = [
@@ -23,7 +24,7 @@ class StorageBackendConfig(Base):
     Base class for Storage Backend configurations using Single Table Inheritance.
     Contains common fields and the discriminator.
     """
-    __tablename__ = "storage_backend_configs" # Keep the same table name
+    __tablename__ = "storage_backend_configs" # type: ignore # Keep the same table name
 
     # --- Common Fields ---
     # Ensure primary key is defined here or inherited correctly from Base
@@ -165,6 +166,18 @@ class StowRsBackendConfig(StorageBackendConfig):
     base_url: Mapped[str] = mapped_column(
         String(512), nullable=True,
         comment="Base URL of the STOW-RS service (e.g., https://dicom.server.com/dicomweb)."
+    )
+    username_secret_name: Mapped[Optional[str]] = mapped_column( # ADDED
+        String(512), nullable=True,
+        comment="Optional: Secret Manager resource name for the STOW-RS username."
+    )
+    password_secret_name: Mapped[Optional[str]] = mapped_column( # ADDED
+        String(512), nullable=True,
+        comment="Optional: Secret Manager resource name for the STOW-RS password."
+    )
+    tls_ca_cert_secret_name: Mapped[Optional[str]] = mapped_column( # ADDED
+        String(512), nullable=True,
+        comment="Optional: Secret Manager resource name for a custom CA certificate (PEM) to verify the STOW-RS server."
     )
     # auth_type: Mapped[Optional[str]] = mapped_column(...) # e.g., 'none', 'basic', 'oauth'
     # credentials_secret_name: Mapped[Optional[str]] = mapped_column(...) # For API keys, tokens etc.

@@ -1,6 +1,6 @@
 # app/api/api_v1/endpoints/config_crosswalk.py
 import logging
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Tuple # <-- ADD Tuple HERE
 
 # --- ADDED: Import JSONResponse ---
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, Response
@@ -19,14 +19,34 @@ try:
 except ImportError:
     logging.getLogger(__name__).warning("Crosswalk modules not found or import failed. Crosswalk API endpoints might be disabled or limited.")
     CROSSWALK_ENABLED = False
-    # Define dummy classes/functions if needed
-    class DummyTaskResult: id = "disabled"
-    class crosswalk_service: # type: ignore
+    # Define dummy modules/functions if needed
+    class DummyTaskResult: id = "disabled" # type: ignore
+    
+    # Create a dummy service CLASS
+    class _DummyCrosswalkServiceModule:
         @staticmethod
-        def test_connection(*args, **kwargs): return False, "Crosswalk feature disabled due to import error."
-    class crosswalk_tasks: # type: ignore
+        def test_connection(*args, **kwargs) -> Tuple[bool, str]:
+            return (False, "Crosswalk feature disabled due to import error.")
+        
+        # Add other methods from the real crosswalk_service if they are called elsewhere
+        # and need a dummy implementation. For example:
+        # @staticmethod
+        # def get_crosswalk_value_sync(*args, **kwargs) -> Optional[Dict[str, Any]]:
+        #     logger.warning("Dummy get_crosswalk_value_sync called because real service failed to import.")
+        #     return None
+
+    crosswalk_service = _DummyCrosswalkServiceModule() # Instantiate the dummy class
+    
+    # Create a dummy tasks module with the necessary structure
+    class _DummyTaskCallable:
         @staticmethod
-        def sync_crosswalk_source_task(): return type('obj', (object,), {'delay': lambda *args, **kwargs: DummyTaskResult()})()
+        def delay(*args, **kwargs) -> DummyTaskResult: # type: ignore
+            return DummyTaskResult()
+
+    class _DummyCrosswalkTasksModule:
+        sync_crosswalk_source_task = _DummyTaskCallable()
+
+    crosswalk_tasks = _DummyCrosswalkTasksModule()
 
 
 logger = logging.getLogger(__name__)
@@ -205,7 +225,7 @@ async def trigger_manual_sync(
     try:
         from app.worker.celery_app import app as celery_app_instance # Import the app instance
         logger.info(f"API attempting to send task using broker: {celery_app_instance.connection().as_uri(include_password=False)}") # Log without password
-        task_result = crosswalk_tasks.sync_crosswalk_source_task.delay(source_id)
+        task_result = crosswalk_tasks.sync_crosswalk_source_task.delay(source_id) # type: ignore
         return {"message": "Sync task queued successfully.", "task_id": task_result.id}
     except Exception as e:
         logger.error(f"Failed to queue sync task for source ID {source_id}: {e}", exc_info=True)

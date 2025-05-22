@@ -1,10 +1,12 @@
 # app/api/api_v1/endpoints/rules.py
 
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Sequence
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body # Added Body
 from sqlalchemy.orm import Session
 import pydicom
 from pydicom.errors import InvalidDicomError
+from pydicom.dataset import FileMetaDataset  # <-- Add this import
+from pydicom.uid import ImplicitVRLittleEndian, UID, generate_uid  # <-- Add this import and generate_uid
 # Use structlog consistently
 import structlog # type: ignore
 logger = structlog.get_logger(__name__)
@@ -20,7 +22,7 @@ from app.core.config import settings # Added import for settings
 from app.schemas.rule import ( 
     RuleSet, RuleSetCreate, RuleSetUpdate, Rule, RuleCreate, RuleUpdate, 
     MatchCriterion, AssociationMatchCriterion, TagModification, RuleSetExecutionMode)
-                        
+from app.cache.rules_cache import get_active_rulesets                       
 # --- CORRECTED: Import helpers from their new locations ---
 try:
     from app.worker.utils.dicom_utils import parse_dicom_tag
@@ -35,9 +37,9 @@ except ImportError as import_err:
     )
     WORKER_HELPERS_AVAILABLE = False
     # Define dummy functions if import fails to allow server startup, but endpoint will fail
-    def parse_dicom_tag(*args, **kwargs): raise NotImplementedError("Worker helper parse_dicom_tag not imported.")
-    def check_tag_criteria(*args, **kwargs): raise NotImplementedError("Worker helper check_tag_criteria not imported.")
-    def apply_standard_modifications(*args, **kwargs): raise NotImplementedError("Worker helper apply_standard_modifications not imported.")
+    def parse_dicom_tag(*args, **kwargs) -> Any: raise NotImplementedError("Worker helper parse_dicom_tag not imported.")
+    def check_tag_criteria(*args, **kwargs) -> bool: raise NotImplementedError("Worker helper check_tag_criteria not imported.")
+    def apply_standard_modifications(*args, **kwargs) -> bool: raise NotImplementedError("Worker helper apply_standard_modifications not imported.")
 # --- END CORRECTION ---
 
 # Import RuleSetExecutionMode enum if needed (it is used below)
@@ -227,17 +229,16 @@ def process_dicom_json(
 
     # 1. Convert JSON to pydicom Dataset
     try:
-        ds = pydicom.dataset.Dataset.from_json(original_json)
+        ds = pydicom.Dataset.from_json(original_json)
         if not hasattr(ds, 'file_meta'):
-             # Add minimal file_meta (same logic as before)
-             file_meta = pydicom.dataset.FileMetaDataset()
-             file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian 
+             file_meta = FileMetaDataset()
+             file_meta.TransferSyntaxUID = ImplicitVRLittleEndian 
              sop_class_uid_tag = '00080016'; sop_instance_uid_tag = '00080018'
              if sop_class_uid_tag in ds and hasattr(ds[sop_class_uid_tag], 'value') and ds[sop_class_uid_tag].value: file_meta.MediaStorageSOPClassUID = ds[sop_class_uid_tag].value[0] 
-             else: warnings.append("SOPClassUID missing/empty in JSON."); file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2" 
+             else: warnings.append("SOPClassUID missing/empty in JSON."); file_meta.MediaStorageSOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2") 
              if sop_instance_uid_tag in ds and hasattr(ds[sop_instance_uid_tag], 'value') and ds[sop_instance_uid_tag].value: file_meta.MediaStorageSOPInstanceUID = ds[sop_instance_uid_tag].value[0] 
-             else: warnings.append("SOPInstanceUID missing/empty in JSON."); file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid() 
-             file_meta.ImplementationClassUID = settings.PYDICOM_IMPLEMENTATION_UID # Use setting
+             else: warnings.append("SOPInstanceUID missing/empty in JSON."); file_meta.MediaStorageSOPInstanceUID = generate_uid() 
+             file_meta.ImplementationClassUID = UID(settings.PYDICOM_IMPLEMENTATION_UID) # Use setting and ensure correct type
              file_meta.ImplementationVersionName = settings.IMPLEMENTATION_VERSION_NAME # Use setting
              ds.file_meta = file_meta
              log.debug("Added default file_meta to dataset created from JSON.")
@@ -246,10 +247,10 @@ def process_dicom_json(
     except Exception as e:
         log.error("Error converting input JSON to pydicom Dataset", error_details=str(e), exc_info=True)
         errors.append(f"Invalid input JSON format or structure: {e}")
-        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
+        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors)
 
     # 2. Fetch Rules
-    rulesets_to_evaluate: List[models.RuleSet] = []
+    rulesets_to_evaluate: Sequence[models.RuleSet] = []
     try:
         if request_data.ruleset_id:
             log.debug("Fetching specific RuleSet", requested_ruleset_id=request_data.ruleset_id)
@@ -261,13 +262,14 @@ def process_dicom_json(
             else: errors.append(f"Specified RuleSet ID {request_data.ruleset_id} not found.")
         else:
             log.debug("Fetching active, ordered RuleSets...")
-            rulesets_to_evaluate = crud.ruleset.get_active_ordered(db=db) 
+            # Fetch ORM RuleSet objects directly from the database
+            rulesets_to_evaluate = crud.ruleset.get_active_ordered(db=db)
         if not rulesets_to_evaluate and not errors: # Only warn if no rulesets found AND no prior errors
             warnings.append("No applicable rulesets found for processing (specify an ID to test inactive ones).")
     except Exception as db_exc:
         log.error("Database error fetching rulesets", error_details=str(db_exc), exc_info=True)
         errors.append(f"Database error fetching rules: {db_exc}")
-        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors, warnings=warnings)
+        return schemas.JsonProcessResponse(original_json=original_json, morphed_json={}, source_identifier=json_api_source_identifier, applied_ruleset_id=None, applied_rule_ids=[], errors=errors)
 
     # 3. Apply Rules
     if not errors: 
@@ -282,7 +284,7 @@ def process_dicom_json(
                 rules_list = getattr(ruleset_obj, 'rules', [])
                 if not rules_list: ruleset_log.debug("RuleSet has no rules."); continue
 
-                ruleset_log.debug("Rules in set", rule_count=len(rules_list))
+                # ruleset_log.debug("Rules in set", rule_count=len(rules_list))
                 matched_rule_in_this_set = False
                 for rule_obj in rules_list:
                     rule_log = ruleset_log.bind(rule_id=rule_obj.id, rule_name=rule_obj.name)
@@ -382,8 +384,7 @@ def process_dicom_json(
         source_identifier=json_api_source_identifier, 
         applied_ruleset_id=applied_ruleset_id,
         applied_rule_ids=applied_rule_ids,
-        errors=errors,
-        warnings=warnings
+        errors=errors
     )
     log.info("Finished JSON processing request.", matched_rule_count=len(applied_rule_ids), error_count=len(errors), warning_count=len(warnings))
     return response

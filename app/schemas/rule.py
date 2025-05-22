@@ -1,6 +1,6 @@
-# filename: backend/app/schemas/rule.py
+# filename: app/schemas/rule.py
 
-from typing import List, Optional, Dict, Any, Union, Literal
+from typing import List, Optional, Dict, Any, Union, Literal, TYPE_CHECKING
 from pydantic import BaseModel, Field, field_validator, model_validator, StringConstraints, ConfigDict, ValidationInfo
 from typing_extensions import Annotated
 import enum
@@ -366,22 +366,19 @@ class RuleUpdate(BaseModel):
         return self
 
 # --- Schema for Reading Rules from DB (Base) ---
-class RuleInDBBase(RuleBase):
+class RuleSetInDBBase(BaseModel):
     id: int
-    ruleset_id: int
-    created_at: datetime
-    updated_at: Optional[datetime] = None # Should be datetime, not Optional[datetime] = None if nullable=False in DB
-    destinations: List[StorageBackendConfigRead] = []
-    schedule: Optional[ScheduleRead] = None
-    # --- FIELD CHANGE: ai_standardization_tags is GONE, ai_prompt_config_ids is INHERITED ---
-    # ai_standardization_tags: Optional[List[str]] = None # REMOVE THIS LINE (it's gone from RuleBase)
-    # ai_prompt_config_ids: Optional[List[int]] is inherited from RuleBase
-    # --- END FIELD CHANGE ---
+    name: str
+    description: Optional[str] = None
+    is_active: bool
+    priority: int
+    execution_mode: RuleSetExecutionMode
+    rule_count: int = Field(default=0)
+    rules: List["Rule"] = []  
+
     model_config = ConfigDict(from_attributes=True)
 
 # --- Schema for Reading a Single Rule ---
-class Rule(RuleInDBBase):
-    pass
 
 # --- Schemas for Rule Sets ---
 class RuleSetBase(BaseModel):
@@ -389,6 +386,7 @@ class RuleSetBase(BaseModel):
     description: Optional[str] = None
     is_active: bool = True
     priority: int = 0
+    rule_count: int = Field(default=0)
     execution_mode: RuleSetExecutionMode = RuleSetExecutionMode.FIRST_MATCH
 
 class RuleSetCreate(RuleSetBase):
@@ -401,15 +399,24 @@ class RuleSetUpdate(BaseModel):
     priority: Optional[int] = None
     execution_mode: Optional[RuleSetExecutionMode] = None
 
-class RuleSetInDBBase(RuleSetBase):
+class RuleInDBBase(BaseModel):
     id: int
+    name: str
+    description: Optional[str] = None
+    is_active: bool
+    priority: int
+    ruleset_id: int
+    match_criteria: List[Dict[str, Any]]
+    association_criteria: Optional[List[Dict[str, Any]]] = None
+    tag_modifications: List[Dict[str, Any]]
+    applicable_sources: Optional[List[str]] = None
+    schedule_id: Optional[int] = None
+    ai_prompt_config_ids: Optional[List[int]] = None
     created_at: datetime
-    updated_at: Optional[datetime] = None
-    rules: List[Rule] = [] # Reads populated rules
-    model_config = ConfigDict(from_attributes=True)
+    updated_at: datetime
+    destinations: List[StorageBackendConfigRead] = Field(default_factory=list)
 
-class RuleSet(RuleSetInDBBase):
-    pass
+    model_config = ConfigDict(from_attributes=True)
 
 class RuleSetSummary(BaseModel):
     id: int
@@ -418,8 +425,57 @@ class RuleSetSummary(BaseModel):
     is_active: bool
     priority: int
     execution_mode: RuleSetExecutionMode
-    rule_count: int = Field(...)
+    rule_count: int = Field(default=0)
+
     model_config = ConfigDict(from_attributes=True)
+
+class Rule(RuleInDBBase):
+    # Removed type overrides to avoid type conflicts with parent class
+    ruleset: Optional[RuleSetSummary] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+    
+    # We can convert the Dict types to proper model types at runtime
+    def get_typed_match_criteria(self) -> List[MatchCriterion]:
+        return [MatchCriterion.model_validate(item) for item in self.match_criteria]
+        
+    def get_typed_tag_modifications(self) -> List[TagModification]:
+        result = []
+        for item in self.tag_modifications:
+            action_str = item.get("action")
+            if action_str is None:
+                raise ValueError("Missing 'action' field in tag modification")
+                
+            try:
+                action_enum = ModifyAction(action_str)
+                model_class = {
+                    ModifyAction.SET: TagSetModification,
+                    ModifyAction.DELETE: TagDeleteModification,
+                    ModifyAction.PREPEND: TagPrependModification,
+                    ModifyAction.SUFFIX: TagSuffixModification,
+                    ModifyAction.REGEX_REPLACE: TagRegexReplaceModification,
+                    ModifyAction.COPY: TagCopyModification,
+                    ModifyAction.MOVE: TagMoveModification,
+                    ModifyAction.CROSSWALK: TagCrosswalkModification
+                }.get(action_enum)
+            except ValueError:
+                raise ValueError(f"Unknown action type: {action_str}")
+                
+            if model_class is None:
+                raise ValueError(f"Unknown action type: {action_str}")
+                
+            result.append(model_class.model_validate(item))
+        return result
+        
+    def get_typed_association_criteria(self) -> Optional[List[AssociationMatchCriterion]]:
+        if self.association_criteria is None:
+            return None
+        return [AssociationMatchCriterion.model_validate(item) for item in self.association_criteria]
+
+class RuleSet(RuleSetInDBBase):
+    rules: List[Rule] = []
+
+Rule.model_rebuild()
 
 # --- Schemas for JSON API Processing ---
 class JsonProcessRequest(BaseModel):

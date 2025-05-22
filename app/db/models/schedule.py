@@ -1,5 +1,5 @@
 # app/db/models/schedule.py
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, TYPE_CHECKING # Add TYPE_CHECKING
 from datetime import datetime
 
 from sqlalchemy import String, Boolean, Text, JSON, Integer
@@ -8,11 +8,14 @@ from sqlalchemy.sql import func
 
 from app.db.base import Base
 
+if TYPE_CHECKING:
+    from app.db.models.rule import Rule  # Import for type hinting
+
 class Schedule(Base):
     """
     Database model to store reusable schedule definitions for rules.
     """
-    __tablename__ = "schedules"
+    __tablename__ = "schedules" # type: ignore
 
     # Inherits id, created_at, updated_at from Base
 

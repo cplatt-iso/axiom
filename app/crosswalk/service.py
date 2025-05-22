@@ -1,6 +1,6 @@
 # app/crosswalk/service.py
 import logging
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, cast # Import cast
 import redis
 import json as pyjson # Use standard json library
 from sqlalchemy import create_engine, text, inspect as sql_inspect, Column, MetaData, Table # Import necessary SQLAlchemy components
@@ -15,10 +15,14 @@ logger = logging.getLogger(__name__)
 
 # --- Redis Connection ---
 try:
-    redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True) # decode_responses for string keys/values
-    redis_client.ping()
-    logger.info(f"Redis client connected successfully to {settings.REDIS_URL}")
-except redis.exceptions.ConnectionError as e:
+    if settings.REDIS_URL is None:
+        logger.error("REDIS_URL is not configured. Crosswalk caching will be unavailable.")
+        redis_client = None
+    else:
+        redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True) # decode_responses for string keys/values
+        redis_client.ping()
+        logger.info(f"Redis client connected successfully to {settings.REDIS_URL}")
+except redis.ConnectionError as e:
     logger.error(f"Failed to connect to Redis at {settings.REDIS_URL}: {e}. Crosswalk caching will be unavailable.")
     redis_client = None
 except Exception as e:
@@ -103,7 +107,8 @@ def fetch_data_from_source(config: models.CrosswalkDataSource) -> Tuple[Optional
             # WARNING: Still fetching ALL rows if called. Requires chunking in task.
             stmt = text(f"SELECT * FROM {config.target_table}") # Use model's target_table directly
             result = connection.execute(stmt)
-            fetched_data = [row._mapping for row in result]
+            # Convert RowMapping to dict
+            fetched_data: List[Dict[str, Any]] = [dict(row._mapping) for row in result]
         logger.info(f"Fetched {len(fetched_data)} rows from {config.name}:{config.target_table} for sync/pre-warming.")
         return fetched_data, None
     except SQLAlchemyError as e:
@@ -231,7 +236,7 @@ def update_cache(config: models.CrosswalkDataSource, data: List[Dict]) -> Tuple[
             err_msg = f"Cache pre-warming for source {config.id} finished with {failed_ops} pipeline errors and {errors_encountered} skipped/failed rows."; logger.warning(err_msg); return keys_added, err_msg
         else:
             logger.info(f"Successfully pre-warmed cache for source {config.id}. Added/Updated {keys_added} keys."); return keys_added, None
-    except redis.exceptions.RedisError as e: logger.error(f"Redis pipeline execution failed during pre-warming for source {config.id}: {e}"); return 0, f"Redis Error: {e}"
+    except redis.RedisError as e: logger.error(f"Redis pipeline execution failed during pre-warming for source {config.id}: {e}"); return 0, f"Redis Error: {e}"
     except Exception as e: logger.error(f"Unexpected error executing Redis pipeline during pre-warming for source {config.id}: {e}"); return 0, f"Unexpected Pipeline Error: {e}"
 
 
@@ -275,11 +280,14 @@ def get_crosswalk_value_sync(map_config: models.CrosswalkMap, match_values: Dict
     cache_hit = False
     if redis_client:
         try:
-            cached_data_str = redis_client.get(cache_key)
+            # Explicitly cast the result to what's expected for a sync client with decode_responses=True
+            result_from_get = redis_client.get(cache_key)
+            cached_data_str = cast(Optional[str], result_from_get)
+
             if cached_data_str is not None:
                 cache_hit = True
                 logger.debug(f"SYNC: Cache HIT for key {cache_key}")
-        except redis.exceptions.RedisError as e:
+        except redis.RedisError as e: # Changed from redis.exceptions.RedisError
             logger.error(f"SYNC: Redis error getting key {cache_key} for map '{map_config.name}': {e}")
             # Treat as cache miss, proceed based on policy
 
@@ -332,8 +340,8 @@ def get_crosswalk_value_sync(map_config: models.CrosswalkMap, match_values: Dict
                  return None
             # --- Adjust Quoting based on DB Type ---
             quote_char = '`' if data_source_config.db_type == models.CrosswalkDbType.MYSQL else '"'
-            select_clause = ", ".join([f'{quote_char}{col}{quote_char}' for col in select_cols_set])
             # --- End Adjustment ---
+            select_clause = ", ".join([f"{quote_char}{col}{quote_char}" for col in select_cols_set]) # Define select_clause here
 
             # Build WHERE clause
             where_conditions = []
@@ -406,7 +414,7 @@ def get_crosswalk_value_sync(map_config: models.CrosswalkMap, match_values: Dict
                     ttl = map_config.cache_ttl_seconds or DEFAULT_CACHE_TTL_SECONDS
                     redis_client.setex(cache_key, ttl, db_hit_result_str_for_cache)
                     logger.debug(f"SYNC: Cached DB lookup result for key {cache_key} with TTL {ttl}s.")
-                except redis.exceptions.RedisError as e:
+                except redis.RedisError as e: # Changed from redis.exceptions.RedisError
                     logger.error(f"SYNC: Failed to cache DB lookup result for key {cache_key}: {e}")
 
             return replacement_values

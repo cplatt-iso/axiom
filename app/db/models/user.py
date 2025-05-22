@@ -27,7 +27,7 @@ class Role(Base):
     User Role Model. Defines permissions/access levels.
     Inherits id, created_at, updated_at from Base.
     """
-    __tablename__ = 'roles'
+    __tablename__ = 'roles' # type: ignore
 
     # Implicitly has id, created_at, updated_at from Base
 
@@ -50,7 +50,7 @@ class User(Base):
     User Model. Represents a user who can log in and interact with the system.
     Inherits id, created_at, updated_at from Base.
     """
-    __tablename__ = 'users'
+    __tablename__ = 'users' # type: ignore
 
     # Implicitly has id, created_at, updated_at from Base
 

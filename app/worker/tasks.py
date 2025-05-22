@@ -44,6 +44,7 @@ def _move_to_error_dir(filepath: Path, task_id: str, context_log: Any):
     if not filepath.is_file():
          context_log.warning("Source path for error move is not a file or does not exist.", target_filepath=str(filepath))
          return
+    error_dir = None
     try:
         error_base_dir_str = getattr(settings, 'DICOM_ERROR_PATH', None)
         if error_base_dir_str: error_dir = Path(error_base_dir_str)
@@ -60,9 +61,10 @@ def _move_to_error_dir(filepath: Path, task_id: str, context_log: Any):
     except Exception as move_err:
         fallback_logger = logging.getLogger(__name__) # Standard logger as last resort
         current_logger = getattr(context_log, 'critical', fallback_logger.critical)
-        current_logger("CRITICAL - Could not move file to error dir", task_id=task_id, original_filepath=str(filepath),
-                       target_error_dir=str(error_dir) if 'error_dir' in locals() else 'UnknownErrorDir',
-                       error=str(move_err), exc_info=True)
+        current_logger("CRITICAL - Could not move file to error dir. "
+                       f"Task ID: {task_id}, Original Filepath: {str(filepath)}, "
+                       f"Target Error Dir: {str(error_dir) if 'error_dir' in locals() else 'UnknownErrorDir'}, "
+                       f"Error: {str(move_err)}", exc_info=True)
 
 def _handle_final_file_disposition(
     original_filepath: Path, was_successful: bool, rules_matched_and_triggered_actions: bool,
@@ -192,7 +194,7 @@ def process_dicom_file_task(
 async def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, series_uid: str, instance_uid: str):
     task_id = self.request.id
     log = logger.bind(task_id=task_id, task_name=self.name, source_id=source_id, instance_uid=instance_uid,
-                      source_type=ProcessedStudySourceType.DICOMWEB_POLLER.value)
+                      source_type=ProcessedStudySourceType.DICOMWEB.value) # Changed DICOMWEB_POLLER to DICOMWEB
     log.info("Task started: process_dicomweb_metadata_task")
     db: Optional[Session] = None
     final_status_code = "task_init_failed"
@@ -205,7 +207,7 @@ async def process_dicomweb_metadata_task(self, source_id: int, study_uid: str, s
         # No AI portal management needed with sync wrapper
 
         _, _, final_status_code, final_message, applied_rules_res, \
-        dest_statuses_res, _, source_name_res_from_exec = await execute_dicomweb_task(
+        dest_statuses_res, _, source_name_res_from_exec, _ = await execute_dicomweb_task(
             log, db, source_id, study_uid, series_uid, instance_uid, task_id,
             ai_portal=None # Pass None
         )

@@ -10,7 +10,7 @@ class JsonProcessRequest(BaseModel):
         ...,
         # Updated description and added example
         description="DICOM header represented as JSON (e.g., from pydicom.dataset.Dataset.to_json_dict)",
-        example={"00100010": {"vr": "PN", "Value": [{"Alphabetic": "Doe^John"}]}}
+        json_schema_extra={"example": {"00100010": {"vr": "PN", "Value": [{"Alphabetic": "Doe^John"}]}}}
     )
     ruleset_id: Optional[int] = Field(
         None,

@@ -1,5 +1,5 @@
 # app/schemas/token.py (New File)
-import time
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from typing import Optional, Any
 from .user import User # Assuming you have a User schema for response
@@ -31,6 +31,6 @@ class TokenPayload(BaseModel):
     def is_expired(self) -> bool:
         """Checks if the token's 'exp' claim indicates it has expired."""
         if self.exp is None:
-             return False # Token without expiration is considered non-expired by this check
+            return False  # Token without expiration is considered non-expired by this check
         # Compare expiration timestamp with current UTC timestamp
         return datetime.now(timezone.utc).timestamp() > self.exp

@@ -1,6 +1,6 @@
 # filename: backend/app/db/models/rule.py
 import enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, ClassVar, TYPE_CHECKING # Add TYPE_CHECKING
 from datetime import datetime
 
 from sqlalchemy import (
@@ -11,20 +11,24 @@ from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import JSONB # Use JSONB for better performance/indexing
 
 # --- ADDED: Import Schedule for type hinting ---
-from .schedule import Schedule
+# from .schedule import Schedule # Remove this line
 # --- END ADDED ---
 # --- ADDED: Import StorageBackendConfig for type hinting ---
-from .storage_backend_config import StorageBackendConfig
+# from .storage_backend_config import StorageBackendConfig # This might also need TYPE_CHECKING if it causes issues, but it's not in the current circular path
 # --- END ADDED ---
 
 from app.db.base import Base, rule_destination_association
+
+if TYPE_CHECKING:
+    from .schedule import Schedule
+    from .storage_backend_config import StorageBackendConfig # Keep this here too for consistency if it's only for type hints
 
 class RuleSetExecutionMode(str, enum.Enum):
     FIRST_MATCH = "FIRST_MATCH"
     ALL_MATCHES = "ALL_MATCHES"
 
 class RuleSet(Base):
-    __tablename__ = 'rule_sets'
+    __tablename__: ClassVar[str] = 'rule_sets'  # type: ignore
 
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -46,12 +50,17 @@ class RuleSet(Base):
         lazy="selectin", # Use selectin loading for rules when loading a ruleset
     )
 
+    @property
+    def rule_count(self) -> int:
+        # This relies on the 'rules' relationship being loaded.
+        # The crud.ruleset.get_active_ordered already uses selectinload for rules.
+        return len(self.rules) if self.rules else 0
+
     def __repr__(self):
         return f"<RuleSet(id={self.id}, name='{self.name}', is_active={self.is_active})>"
 
 
 class Rule(Base):
-    __tablename__ = 'rules'
 
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

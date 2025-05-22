@@ -141,17 +141,31 @@ async def store_instances(
                 logger.debug(f"Successfully parsed metadata for SOPInstanceUID: {sop_instance_uid}")
             except InvalidDicomError as e:
                 logger.warning(f"Invalid DICOM data received in part {i+1} (UID: {sop_instance_uid}): {e}")
-                failed_sops.append(FailedSOP(**{"00081150": sop_class_uid, "00081155": sop_instance_uid}, FailureReason=FailureReasonCode.ErrorCannotUnderstand, ReasonDetail=f"Invalid DICOM format: {e}"))
+                failed_sops.append(FailedSOP(
+                    **{
+                        "00081150": sop_class_uid,  # Alias for ReferencedSOPClassUID
+                        "00081155": sop_instance_uid, # Alias for ReferencedSOPInstanceUID
+                        "00081197": FailureReasonCode.ErrorCannotUnderstand, # Alias for FailureReason
+                    },
+                    ReasonDetail=f"Invalid DICOM format: {e}" # Field name, no alias
+                ))
                 continue
             except Exception as e:
                  logger.error(f"Error parsing DICOM metadata for part {i+1} (UID: {sop_instance_uid}): {e}", exc_info=True)
-                 failed_sops.append(FailedSOP(**{"00081150": sop_class_uid, "00081155": sop_instance_uid}, FailureReason=FailureReasonCode.ProcessingFailure, ReasonDetail=f"Error parsing DICOM metadata: {e}"))
+                 failed_sops.append(FailedSOP(
+                    **{
+                        "00081150": sop_class_uid,
+                        "00081155": sop_instance_uid,
+                        "00081197": FailureReasonCode.ProcessingFailure,
+                    },
+                    ReasonDetail=f"Error parsing DICOM metadata: {e}"
+                 ))
                  continue
 
             # 2c. Queue for Asynchronous Processing
             try:
                 # --- Pass association_info to the task ---
-                task_result = process_stow_instance_task.delay(
+                task_result = process_stow_instance_task.delay( # type: ignore[operator]
                     temp_filepath=temp_filepath,
                     association_info=association_info # Pass the dict here
                 )
@@ -162,12 +176,26 @@ async def store_instances(
 
             except Exception as e:
                 logger.error(f"Failed to queue STOW instance {sop_instance_uid} (path: {temp_filepath}): {e}", exc_info=True)
-                failed_sops.append(FailedSOP(**{"00081150": sop_class_uid, "00081155": sop_instance_uid}, FailureReason=FailureReasonCode.QueuingFailed, ReasonDetail=f"Failed to queue instance for processing: {e}"))
+                failed_sops.append(FailedSOP(
+                    **{
+                        "00081150": sop_class_uid,
+                        "00081155": sop_instance_uid,
+                        "00081197": FailureReasonCode.QueuingFailed,
+                    },
+                    ReasonDetail=f"Failed to queue instance for processing: {e}"
+                ))
 
         except Exception as e:
              logger.error(f"Unexpected error processing STOW part {i+1} (UID: {sop_instance_uid}): {e}", exc_info=True)
-             if not any(fs.ReferencedSOPInstanceUID == sop_instance_uid for fs in failed_sops):
-                 failed_sops.append(FailedSOP(**{"00081150": sop_class_uid, "00081155": sop_instance_uid}, FailureReason=FailureReasonCode.ProcessingFailure, ReasonDetail=f"Unexpected error during processing part: {e}"))
+             if not any(fs.ReferencedSOPInstanceUID == sop_instance_uid for fs in failed_sops): # This check uses field name, which is fine for instances
+                 failed_sops.append(FailedSOP(
+                    **{
+                        "00081150": sop_class_uid,
+                        "00081155": sop_instance_uid,
+                        "00081197": FailureReasonCode.ProcessingFailure,
+                    },
+                    ReasonDetail=f"Unexpected error during processing part: {e}"
+                 ))
 
     # Cleanup for files that failed BEFORE successful queuing
     for failed_path in temp_files_to_clean:
@@ -177,8 +205,11 @@ async def store_instances(
 
     # 3. Construct and Return Response
     stow_response = STOWResponse(
-        ReferencedSOPSequence=successful_sops if successful_sops else None,
-        FailedSOPSequence=failed_sops if failed_sops else None,
+        **{
+            "00081199": successful_sops if successful_sops else None, # Alias for ReferencedSOPSequence
+            "00081198": failed_sops if failed_sops else None,         # Alias for FailedSOPSequence
+            # "00081195": None # Optional: TransactionUID, can be omitted if not explicitly set
+        }
     )
     final_status_code = status.HTTP_200_OK
     if failed_sops and not successful_sops: logger.warning(f"STOW-RS request from {source_ip} resulted in all {len(failed_sops)} instances failing pre-processing or queuing.")

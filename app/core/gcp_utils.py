@@ -20,7 +20,8 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging # Fallback if structlog isn't there (should be, but defensive)
-    logger = logging.getLogger(__name__)
+    import structlog
+    logger = structlog.wrap_logger(logging.getLogger(__name__))
 
 # --- Custom Exceptions ---
 class SecretManagerError(Exception): pass

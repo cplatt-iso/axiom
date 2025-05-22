@@ -29,8 +29,8 @@ class GcsStorage(BaseStorageBackend):
         self.bucket = config.get("bucket") # Changed from bucket_name
         self.prefix = config.get("prefix", "").strip('/')
 
-        if storage is None:
-            raise StorageBackendError("GCS backend unavailable: google-cloud-storage library not installed.")
+        if storage is None or google_exceptions is None: # MODIFIED: Also check google_exceptions
+            raise StorageBackendError("GCS backend unavailable: google-cloud-storage or google-api-core library not installed.")
         if not self.bucket:
             raise ValueError("GCS storage configuration requires 'bucket'.")
 
@@ -47,6 +47,7 @@ class GcsStorage(BaseStorageBackend):
     def _validate_config(self):
         # Validation now checks instance attributes set in __init__
         # Example: Check if bucket seems accessible (optional)
+        assert google_exceptions is not None # ADDED: Assertion for Pylance
         try:
              # Quick check - does not guarantee write access
              self.client.get_bucket(self.bucket)
@@ -71,6 +72,7 @@ class GcsStorage(BaseStorageBackend):
         source_identifier: Optional[str] = None,
         **kwargs: Any
     ) -> str:
+        assert google_exceptions is not None # ADDED: Assertion for Pylance
         if not filename_context:
             raise StorageBackendError("GCS storage requires filename_context.")
 

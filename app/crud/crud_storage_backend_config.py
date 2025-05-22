@@ -123,8 +123,18 @@ class CRUDStorageBackendConfig:
             db.rollback()
             logger.error(f"Database integrity error during storage backend creation for '{obj_in.name}': {e}", exc_info=True)
             # Check if constraint name is available in the error object's details (DB dependent)
-            constraint_name = getattr(getattr(e, 'orig', None), 'diag', None) and getattr(e.orig.diag, 'constraint_name', None)
-            if constraint_name == 'uq_storage_backend_configs_name' or "uq_storage_backend_configs_name" in str(e.orig): # Adapt check as needed
+            constraint_name = None
+            # Safely extract constraint_name using getattr
+            _orig_exc = getattr(e, 'orig', None)
+            if _orig_exc is not None:
+                _diag_obj = getattr(_orig_exc, 'diag', None)
+                if _diag_obj is not None:
+                    _extracted_name = getattr(_diag_obj, 'constraint_name', None)
+                    if _extracted_name is not None:
+                        constraint_name = _extracted_name
+            
+            if constraint_name == 'uq_storage_backend_configs_name' or \
+               (isinstance(e.orig, Exception) and "uq_storage_backend_configs_name" in str(e.orig)): # Adapt check as needed
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Name '{obj_in.name}' already exists (commit conflict).")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error creating backend '{obj_in.name}'.")
         except HTTPException: # Re-raise HTTPExceptions from validation
@@ -223,8 +233,19 @@ class CRUDStorageBackendConfig:
         except IntegrityError as e:
              db.rollback()
              logger.error(f"Database integrity error during storage backend update for ID {db_obj.id}: {e}", exc_info=True)
-             constraint_name = getattr(getattr(e, 'orig', None), 'diag', None) and getattr(e.orig.diag, 'constraint_name', None)
-             if "name" in update_data and (constraint_name == 'uq_storage_backend_configs_name' or "uq_storage_backend_configs_name" in str(e.orig)):
+             constraint_name = None
+             # Safely extract constraint_name using getattr
+             _orig_exc = getattr(e, 'orig', None)
+             if _orig_exc is not None:
+                 _diag_obj = getattr(_orig_exc, 'diag', None)
+                 if _diag_obj is not None:
+                     _extracted_name = getattr(_diag_obj, 'constraint_name', None)
+                     if _extracted_name is not None:
+                         constraint_name = _extracted_name
+
+             if "name" in update_data and \
+                (constraint_name == 'uq_storage_backend_configs_name' or \
+                 (isinstance(e.orig, Exception) and "uq_storage_backend_configs_name" in str(e.orig))):
                  raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Name '{update_data['name']}' already exists (commit conflict).")
              raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error updating backend ID {db_obj.id}.")
         except HTTPException: # Re-raise validation errors

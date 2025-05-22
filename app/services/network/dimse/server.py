@@ -15,9 +15,11 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple, List
 
 # Third-party imports
-from pynetdicom import AE, StoragePresentationContexts, evt, ALL_TRANSFER_SYNTAXES, build_context
-from pynetdicom.sop_class import Verification
-from pynetdicom.presentation import PresentationContext
+from pynetdicom.ae import ApplicationEntity as AE # MODIFIED
+from pynetdicom.presentation import PresentationContext, build_context, StoragePresentationContexts # MODIFIED
+from pynetdicom.sop_class import Verification # MODIFIED (was VerificationServiceClass, add type ignore) # type: ignore[attr-defined]
+from pynetdicom import evt
+from pynetdicom._globals import ALL_TRANSFER_SYNTAXES # MODIFIED (as per Pylance suggestion, though typically internal)
 import structlog # type: ignore
 
 # SQLAlchemy Core imports
@@ -35,11 +37,14 @@ from app.db import models
 try:
     from app.core import gcp_utils # Import the module
     from app.core.gcp_utils import ( # Import specific exceptions if needed for handling
-        SecretManagerError,
-        SecretNotFoundError,
-        PermissionDeniedError
+        SecretManagerError as RealSecretManagerError, # Use aliases to avoid name clash
+        SecretNotFoundError as RealSecretNotFoundError,
+        PermissionDeniedError as RealPermissionDeniedError
     )
-    # We rely on gcp_utils.GCP_SECRET_MANAGER_AVAILABLE internally if needed
+    # Make the real exceptions available under the standard names if import succeeds
+    SecretManagerError = RealSecretManagerError # type: ignore[no-redef]
+    SecretNotFoundError = RealSecretNotFoundError # type: ignore[no-redef]
+    PermissionDeniedError = RealPermissionDeniedError # type: ignore[no-redef]
     GCP_UTILS_IMPORT_SUCCESS = True
 except ImportError as import_err:
     logging.getLogger("dicom_listener_startup").critical(
@@ -47,11 +52,17 @@ except ImportError as import_err:
         exc_info=True # Log traceback for import errors
         )
     GCP_UTILS_IMPORT_SUCCESS = False
-    # Define dummy exceptions if import failed, so later code doesn't break immediately
+    # Define dummy exceptions if import failed
     class SecretManagerError(Exception): pass
     class SecretNotFoundError(SecretManagerError): pass
     class PermissionDeniedError(SecretManagerError): pass
-# --- END CORRECTION ---
+    
+    # Define a dummy gcp_utils object
+    class _DummyGcpUtils:
+        def get_secret(self, *args, **kwargs):
+            raise RuntimeError("gcp_utils module not imported, cannot get_secret.")
+        # Add other methods if they are called and need dummy versions
+    gcp_utils = _DummyGcpUtils()
 
 
 # --- Logging Setup with Structlog (Keep Existing) ---
@@ -120,9 +131,10 @@ SUPPORTED_TRANSFER_SYNTAXES = [
 contexts = []
 for default_context in StoragePresentationContexts:
     sop_class_uid = default_context.abstract_syntax
-    new_context = build_context(sop_class_uid, SUPPORTED_TRANSFER_SYNTAXES)
-    contexts.append(new_context)
-contexts.append(build_context(Verification, SUPPORTED_TRANSFER_SYNTAXES)) # Ensure Verification is added
+    if sop_class_uid: # MODIFIED: Ensure sop_class_uid is not None
+        new_context = build_context(sop_class_uid, SUPPORTED_TRANSFER_SYNTAXES)
+        contexts.append(new_context)
+contexts.append(build_context(Verification, SUPPORTED_TRANSFER_SYNTAXES)) # MODIFIED: Use Verification (SOPClass instance)
 
 # --- Event Handlers (Keep Existing) ---
 def log_assoc_event(event, msg_prefix):
@@ -161,20 +173,19 @@ server_thread_exception = None
 # --- CORRECTED: Helper: Fetch Secret to Temp File ---
 def _fetch_and_write_secret(secret_id: str, version: str, project_id: Optional[str], suffix: str, log_context) -> str:
     """Fetches a secret using gcp_utils.get_secret and writes it to a secure temporary file."""
-    # Check if import succeeded first
-    if not GCP_UTILS_IMPORT_SUCCESS:
+    # Check if import succeeded first (gcp_utils will be the dummy if it failed)
+    if not GCP_UTILS_IMPORT_SUCCESS: # This check is still good for clarity and explicit error
         raise RuntimeError("Cannot fetch secret: GCP Utils module failed to import.")
 
     log = log_context.bind(secret_id=secret_id, version=version, project_id=project_id)
     log.debug("Fetching secret via gcp_utils.get_secret...")
     try:
-        # --- FIXED: Call the correct function ---
+        # Call gcp_utils.get_secret (will be real or dummy)
         secret_string = gcp_utils.get_secret(
             secret_id=secret_id,
             version=version,
-            project_id=project_id # Pass project ID used for construction
+            project_id=project_id
         )
-        # --- END FIX ---
         secret_bytes = secret_string.encode('utf-8')
 
         # Use a more explicit directory if possible, e.g., settings.TEMP_DIR
@@ -192,8 +203,7 @@ def _fetch_and_write_secret(secret_id: str, version: str, project_id: Optional[s
             except OSError as chmod_err:
                 log.warning("Could not set permissions on temp key file", error=str(chmod_err))
         return temp_path
-    except (SecretManagerError, SecretNotFoundError, PermissionDeniedError, ValueError) as sm_err: # Added ValueError
-        # These exceptions are now imported correctly (if import succeeded)
+    except (SecretManagerError, SecretNotFoundError, PermissionDeniedError, ValueError) as sm_err: # MODIFIED: These will now correctly catch real or dummy
         log.error("Failed to fetch secret using gcp_utils.get_secret", error=str(sm_err), exc_info=True)
         raise RuntimeError(f"Failed to fetch required TLS secret '{secret_id}': {sm_err}") from sm_err
     except (IOError, OSError) as file_err:

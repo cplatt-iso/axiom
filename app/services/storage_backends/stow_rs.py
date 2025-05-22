@@ -8,13 +8,13 @@ from urllib.parse import urljoin
 import uuid
 
 import requests
-from requests.auth import HTTPBasicAuth
+from requests.auth import HTTPBasicAuth, AuthBase # MODIFIED: Import AuthBase directly
 from pydicom.dataset import Dataset
 from pydicom.filewriter import dcmwrite
 
 from .base_backend import BaseStorageBackend, StorageBackendError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Assuming structlog is not configured here, fallback to standard logging
 
 StowAuthType = Literal["none", "basic", "bearer", "apikey"]
 
@@ -63,7 +63,7 @@ class StowRsStorage(BaseStorageBackend):
              raise ValueError(f"Unsupported auth_type for STOW-RS: '{self.auth_type}'")
         logger.info(f"STOW-RS backend validated for URL: {self.stow_url}, Auth: {self.auth_type}")
 
-    def _get_request_auth(self) -> Optional[requests.auth.AuthBase]:
+    def _get_request_auth(self) -> Optional[AuthBase]: # MODIFIED: Use directly imported AuthBase
         if self.auth_type == 'basic' and self.auth_config:
             username = self.auth_config.get('username'); password = self.auth_config.get('password')
             if isinstance(username, str) and isinstance(password, str): return HTTPBasicAuth(username, password)
@@ -121,7 +121,7 @@ class StowRsStorage(BaseStorageBackend):
                     elif error_json.get("Message"): error_details = error_json.get("Message")
                 except requests.exceptions.JSONDecodeError: pass
                 err_msg = (f"STOW-RS to {self.stow_url} failed for {log_identifier}. Status: {response.status_code}")
-                logger.error(err_msg, details=error_details[:500])
+                logger.error(err_msg, details=error_details[:500]) # type: ignore[call-arg]
                 raise StorageBackendError(f"{err_msg}, Details: {error_details[:500]}")
 
         except requests.exceptions.Timeout as e: raise StorageBackendError(f"Timeout during STOW-RS to {self.stow_url}") from e

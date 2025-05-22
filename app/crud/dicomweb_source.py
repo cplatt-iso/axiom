@@ -46,7 +46,7 @@ class DicomWebSourceCRUD:
         logger.debug(f"Querying multiple DICOMweb source configs (skip={skip}, limit={limit})")
         statement = (
             select(models.DicomWebSourceState)
-            .order_by(models.DicomWebSourceState.name) # Order by name for consistency
+            .order_by(models.DicomWebSourceState.source_name) # Order by source_name for consistency
             .offset(skip)
             .limit(limit)
         )
@@ -68,19 +68,22 @@ class DicomWebSourceCRUD:
              )
 
         # The Pydantic model handles validation of individual fields and auth logic
-        db_obj = models.DicomWebSourceState(**obj_in.model_dump())
+        create_data = obj_in.model_dump()
+        if "name" in create_data: # Map 'name' from schema to 'source_name' for the model
+            create_data["source_name"] = create_data.pop("name")
+        db_obj = models.DicomWebSourceState(**create_data)
 
         # Initialize state fields not present in the Create schema
         db_obj.last_successful_run = None
         db_obj.last_error_run = None
-        db_obj.last_error_message = None
+        db_obj.last_error_message = ""  # Use empty string instead of None
         db_obj.last_processed_timestamp = None # Or set to a specific initial value if needed
 
         db.add(db_obj)
         try:
             db.commit()
             db.refresh(db_obj)
-            logger.info(f"Successfully created DICOMweb source config with ID: {db_obj.id}, Name: {db_obj.name}")
+            logger.info(f"Successfully created DICOMweb source config with ID: {db_obj.id}, Name: {db_obj.source_name}")
             return db_obj
         except Exception as e:
             logger.error(f"Database error during DICOMweb source creation for '{obj_in.name}': {e}", exc_info=True)

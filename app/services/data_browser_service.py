@@ -1,409 +1,345 @@
-# app/services/data_browser_service.py
+# app/services/dicomweb_client.py
 
-import asyncio
 import logging
+import json
+from typing import List, Dict, Optional, Any, Tuple
+from urllib.parse import urljoin, urlencode
+from datetime import datetime, timedelta, date, timezone
 import re
-from typing import List, Dict, Any, Optional, Literal
-from datetime import date, timedelta, datetime, timezone
 
-from pydicom.dataset import Dataset as PydicomDataset
-from pydicom.tag import Tag
-from sqlalchemy.orm import Session
+import requests
+from requests.auth import HTTPBasicAuth, AuthBase # MODIFIED: Added AuthBase
 
-from app import crud
-from app.db import models
-from app.schemas.data_browser import (
-    DataBrowserQueryParam,
-    DataBrowserQueryResponse,
-    StudyResultItem,
-    QueryLevel
-)
+# Need access to the DB model for type hinting
+from app.db.models import DicomWebSourceState
 from app.core.config import settings
-from app.services import dicomweb_client # Keep this import style
-from app.worker.dimse_qr_poller import _resolve_dynamic_date_filter
-from app.services.network.dimse.scu_service import (
-    find_studies,
-    DimseScuError,
-    AssociationError,
-    DimseCommandError,
-    TlsConfigError
-)
-# --- CORRECTED IMPORT - Import functions directly ---
-from app.services.google_healthcare_service import (
-    search_for_studies, # Use correct name
-    search_for_series, # Use correct name
-    search_for_instances, # Use correct name
-    GoogleHealthcareQueryError
-)
-# --- END CORRECTION ---
-from pynetdicom.sop_class import (
-    StudyRootQueryRetrieveInformationModelFind,
-    PatientRootQueryRetrieveInformationModelFind
-)
 
-try:
-    import structlog # type: ignore
-    logger = structlog.get_logger(__name__)
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
+class DicomWebClientError(Exception):
+    """Custom exception for DICOMweb client errors."""
+    def __init__(self, message: str, status_code: Optional[int] = None, url: Optional[str] = None):
+        self.status_code = status_code
+        self.url = url
+        super().__init__(f"{message} (URL: {url or 'N/A'}, Status: {status_code or 'N/A'})")
 
-class QueryServiceError(Exception):
-    def __init__(self, message: str, source_type: Optional[str] = None, source_id: Optional[int] = None):
-        self.source_type = source_type
-        self.source_id = source_id
-        super().__init__(f"{source_type or 'Unknown Source'} (ID: {source_id or 'N/A'}): {message}")
+# --- Auth Helper (_get_auth) ---
+def _get_auth(config: DicomWebSourceState) -> Optional[AuthBase]: # MODIFIED: Changed to AuthBase
+    """Helper to get requests Auth object based on DicomWebSourceState."""
+    auth_type_val = getattr(config, 'auth_type', None)
+    auth_config_val = getattr(config, 'auth_config', None)
+    source_name_val = getattr(config, 'source_name', 'UnknownSource')
 
-class SourceNotFoundError(QueryServiceError): pass
-class InvalidParameterError(QueryServiceError): pass
-class RemoteConnectionError(QueryServiceError): pass
-class RemoteQueryError(QueryServiceError): pass
-
-
-def _build_find_identifier(query_params: List[DataBrowserQueryParam], query_level: QueryLevel) -> PydicomDataset:
-    identifier = PydicomDataset()
-    identifier.QueryRetrieveLevel = query_level.value
-    log = logger.bind(query_level=query_level.value) if hasattr(logger, 'bind') else logger
-    if query_level == QueryLevel.STUDY:
-        default_return_keys = [
-            "PatientID", "PatientName", "StudyInstanceUID", "StudyDate", "StudyTime",
-            "AccessionNumber", "ModalitiesInStudy", "ReferringPhysicianName",
-            "PatientBirthDate", "StudyDescription", "NumberOfStudyRelatedSeries",
-            "NumberOfStudyRelatedInstances", "InstitutionName"
-        ]
-    elif query_level == QueryLevel.SERIES:
-         default_return_keys = ["SeriesInstanceUID", "SeriesNumber", "Modality", "SeriesDescription", "NumberOfSeriesRelatedInstances", "StudyInstanceUID", "InstitutionName"]
-    elif query_level == QueryLevel.INSTANCE:
-         default_return_keys = ["SOPInstanceUID", "InstanceNumber", "SOPClassUID", "StudyInstanceUID", "SeriesInstanceUID", "InstitutionName"]
-    else: default_return_keys = []
-
-    filter_keys_used = set()
-    for param in query_params:
-        value_to_set = str(param.value) if param.value is not None else ""
-        if param.field.lower() == "studydate":
-            resolved_value = _resolve_dynamic_date_filter(param.value)
-            if resolved_value is None: log.warning("C-FIND: Skipping invalid dynamic date filter", field=param.field, value=param.value); continue
-            value_to_set = resolved_value
-        try:
-            keyword = param.field
-            try:
-                 if re.match(r"^[0-9a-fA-F]{8}$", keyword.replace(",", "")): tag = Tag(f"({keyword[:4]},{keyword[4:]})"); keyword = tag.keyword or keyword
-                 elif not Tag(keyword).is_valid: raise ValueError("Not a valid keyword")
-            except Exception: log.warning("C-FIND: Field not standard DICOM keyword/tag, using as provided.", field=param.field)
-            setattr(identifier, keyword, value_to_set)
-            filter_keys_used.add(keyword)
-            log.debug("C-FIND Filter Added", keyword=keyword, value=value_to_set)
-        except Exception as e: log.warning("C-FIND: Error setting filter attribute", field=param.field, value=value_to_set, error=str(e))
-
-    for key in default_return_keys:
-        if key not in filter_keys_used:
-            try: setattr(identifier, key, "")
-            except Exception as e: log.warning("C-FIND: Could not set return key", key=key, error=str(e))
-
-    log.debug("Constructed C-FIND Identifier", identifier_str=str(identifier))
-    return identifier
-
-
-def _build_qido_params(query_params: List[DataBrowserQueryParam]) -> Dict[str, str]:
-    qido_dict: Dict[str, str] = {}
-    for param in query_params:
-        value_to_set = str(param.value) if param.value is not None else ""
-        if param.field.lower() == "studydate":
-            resolved_value = _resolve_dynamic_date_filter(param.value)
-            if resolved_value is None: logger.warning("QIDO: Skipping invalid dynamic date filter", field=param.field, value=param.value); continue
-            value_to_set = resolved_value
-        qido_dict[param.field] = value_to_set
-    logger.debug("Constructed QIDO parameters", qido_params=qido_dict)
-    return qido_dict
-
-
-async def _execute_cfind_query(
-    source_config: models.DimseQueryRetrieveSource,
-    query_identifier: PydicomDataset,
-    query_level: QueryLevel
-) -> List[Dict[str, Any]]:
-    log = logger.bind(
-        remote_ae=source_config.remote_ae_title,
-        source_name=source_config.name,
-        source_id=source_config.id,
-        query_level=query_level.value,
-        tls_enabled=source_config.tls_enabled
-    ) if hasattr(logger, 'bind') else logger
-    log.info("Executing C-FIND via scu_service")
-
-    results: List[Dict[str, Any]] = []
-
-    scu_config_dict = {
-        "remote_host": source_config.remote_host,
-        "remote_port": source_config.remote_port,
-        "remote_ae_title": source_config.remote_ae_title,
-        "local_ae_title": source_config.local_ae_title,
-        "tls_enabled": source_config.tls_enabled,
-        "tls_ca_cert_secret_name": source_config.tls_ca_cert_secret_name,
-        "tls_client_cert_secret_name": source_config.tls_client_cert_secret_name,
-        "tls_client_key_secret_name": source_config.tls_client_key_secret_name,
-    }
-
-    if query_level == QueryLevel.STUDY:
-        find_sop_class = StudyRootQueryRetrieveInformationModelFind
+    if auth_type_val == 'basic':
+        if isinstance(auth_config_val, dict) and 'username' in auth_config_val and 'password' in auth_config_val:
+            username = auth_config_val.get('username')
+            password = auth_config_val.get('password')
+            if isinstance(username, str) and isinstance(password, str):
+                 return HTTPBasicAuth(username, password)
+            else:
+                 # Keep warnings
+                 logger.warning(f"Basic auth configured for '{source_name_val}' but username/password in auth_config are not strings.")
+                 return None
+        else:
+            logger.warning(f"Basic auth configured for '{source_name_val}' but auth_config is missing, not a dict, or lacks keys.")
+            return None
+    elif auth_type_val in ['bearer', 'apikey', 'none']:
+        # Bearer/APIKey handled in headers
+        return None
     else:
-        log.warning("C-FIND query level is Series/Instance, using StudyRootQueryRetrieveInformationModelFind SOP Class.", requested_level=query_level.value)
-        find_sop_class = StudyRootQueryRetrieveInformationModelFind
+        logger.warning(f"Unsupported auth type configured for '{source_name_val}': {auth_type_val}")
+        return None
 
+# --- Headers Helper (_get_headers) ---
+def _get_headers(config: DicomWebSourceState) -> Dict[str, str]:
+    """Builds request headers including auth and custom headers based on DicomWebSourceState."""
+    headers = {"Accept": "application/dicom+json"} # Default accept header
+    auth_type_val = getattr(config, 'auth_type', None)
+    auth_config_val = getattr(config, 'auth_config', None)
+    source_name_val = getattr(config, 'source_name', 'UnknownSource')
+
+    if auth_type_val == 'bearer':
+        if isinstance(auth_config_val, dict) and 'token' in auth_config_val:
+            token = auth_config_val.get('token')
+            if isinstance(token, str) and token:
+                headers['Authorization'] = f"Bearer {token}"
+            else:
+                 logger.warning(f"Bearer auth configured for '{source_name_val}' but token in auth_config is missing or not a string.")
+        else:
+             logger.warning(f"Bearer auth configured for '{source_name_val}' but auth_config is missing or not a dict.")
+    elif auth_type_val == 'apikey':
+        if isinstance(auth_config_val, dict) and 'header_name' in auth_config_val and 'key' in auth_config_val:
+            header_name = auth_config_val.get('header_name')
+            key_value = auth_config_val.get('key')
+            if isinstance(header_name, str) and header_name.strip() and isinstance(key_value, str) and key_value:
+                 headers[header_name.strip()] = key_value
+                 # Optional: Keep debug log if useful
+                 # logger.debug(f"Using API Key Header '{header_name.strip()}' for source '{source_name_val}'")
+            else:
+                 logger.warning(f"API Key auth configured for '{source_name_val}' but header_name or key in auth_config are invalid/empty.")
+        else:
+             logger.warning(f"API Key auth configured for '{source_name_val}' but auth_config is missing, not a dict, or lacks 'header_name'/'key'.")
+
+    return headers
+
+# --- Dynamic Query Param Resolver (_resolve_dynamic_query_params) ---
+def _resolve_dynamic_query_params(params: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Resolves special values like '-N'd, 'TODAY', 'YESTERDAY' for dates.
+    Returns string dictionary suitable for requests params.
+    """
+    if not params:
+        return {}
+
+    resolved_params: Dict[str, str] = {}
+    today = date.today()
+
+    for key, value in params.items():
+         str_key = str(key)
+         str_value = str(value).strip() if value is not None else ""
+
+         if str_key.lower() == "studydate" and str_value:
+             val_upper = str_value.upper()
+             resolved_date_value: Optional[str] = None
+
+             if val_upper == "TODAY":
+                 resolved_date_value = today.strftime('%Y%m%d')
+             elif val_upper == "YESTERDAY":
+                 yesterday = today - timedelta(days=1)
+                 resolved_date_value = yesterday.strftime('%Y%m%d')
+             else:
+                 match_days_ago = re.match(r"^-(\d+)D$", val_upper)
+                 if match_days_ago:
+                     try:
+                         days = int(match_days_ago.group(1))
+                         if days >= 0:
+                             start_date = today - timedelta(days=days)
+                             resolved_date_value = f"{start_date.strftime('%Y%m%d')}-"
+                         else:
+                             logger.warning(f"Invalid negative number of days in date filter: {str_value}")
+                     except (ValueError, OverflowError):
+                         logger.warning(f"Invalid number of days in date filter: {str_value}")
+                 elif re.match(r"^\d{8}$", val_upper): resolved_date_value = val_upper
+                 elif re.match(r"^\d{8}-$", val_upper): resolved_date_value = val_upper
+                 elif re.match(r"^\d{8}-\d{8}$", val_upper): resolved_date_value = val_upper
+                 else:
+                      logger.warning(f"Unsupported dynamic date format for '{str_key}': '{str_value}'. Skipping.")
+
+             if resolved_date_value:
+                 resolved_params[str_key] = resolved_date_value
+                 # Optional: Keep debug log if useful
+                 # logger.debug(f"Resolved dynamic date '{str_value}' to '{resolved_date_value}' for key '{str_key}'")
+             # If unresolved, skip adding it
+
+         elif str_value: # Add other non-empty params
+             resolved_params[str_key] = str_value
+
+    return resolved_params
+
+
+# --- MODIFIED query_qido ---
+def query_qido(
+    config: DicomWebSourceState,
+    level: str = "STUDY",
+    custom_params: Optional[Dict[str, Any]] = None,
+    prioritize_custom_params: bool = False # <-- ADDED FLAG
+) -> List[Dict[str, Any]]:
+    """
+    Performs a QIDO-RS query using DicomWebSourceState config.
+
+    Args:
+        config: The source configuration.
+        level: The query level ('STUDY', 'SERIES', 'INSTANCE').
+        custom_params: Additional parameters from the caller (e.g., Data Browser).
+        prioritize_custom_params: If True, parameters in custom_params will
+                                 overwrite those from config.search_filters.
+                                 Set to True for Data Browser calls.
+    """
+    base_url_val = getattr(config, 'base_url', None)
+    source_name_val = getattr(config, 'source_name', 'UnknownSource')
+
+    if not (isinstance(base_url_val, str) and base_url_val.strip()): # Check if it's a non-empty string
+        raise ValueError(f"Base URL is not configured or is not a string for source '{source_name_val}'")
+
+    # URL Construction
+    base_url_with_slash = base_url_val if base_url_val.endswith('/') else base_url_val + '/'
+    
+    qido_prefix_val = getattr(config, 'qido_prefix', '') # Default to empty string if not present or None
+    qido_prefix_str = qido_prefix_val if isinstance(qido_prefix_val, str) else '' # Ensure it's a string
+
+    service_base_url = urljoin(base_url_with_slash, qido_prefix_str)
+    service_base_url_with_slash = service_base_url if service_base_url.endswith('/') else service_base_url + '/'
+    level_map = {"study": "studies", "series": "series", "instance": "instances"}
+    path_segment = level_map.get(level.lower())
+    if not path_segment:
+        raise ValueError(f"Unsupported QIDO query level: {level}")
+    url = urljoin(service_base_url_with_slash, path_segment)
+
+    # --- CORRECTED Parameter Merging Logic ---
+    query_params: Dict[str, Any] = {}
+    
+    config_filters_val = getattr(config, 'search_filters', None)
+    if isinstance(config_filters_val, dict):
+        query_params = config_filters_val.copy()
+        logger.debug(f"QIDO {level}: Started with config search_filters: {query_params}")
+    else:
+        logger.debug(f"QIDO {level}: No base search_filters found in config or not a dict.")
+
+    if custom_params:
+        logger.debug(f"QIDO {level}: Merging with custom_params: {custom_params}, Priority: {'Custom' if prioritize_custom_params else 'Config'}")
+        for key, value in custom_params.items():
+            if key in query_params and prioritize_custom_params:
+                # Overwrite config value if prioritizing custom params
+                logger.info(f"QIDO {level}: Overwriting config filter '{key}={query_params[key]}' with custom param '{key}={value}'")
+                query_params[key] = value
+            elif key not in query_params:
+                # Add custom param if not present in config
+                query_params[key] = value
+            # else: implicit - key exists in config, but not prioritizing custom -> keep config value
+            # Optional: Add log for ignored custom param if needed
+            # elif key in query_params and not prioritize_custom_params:
+            #      logger.debug(f"QIDO {level}: Ignoring custom param '{key}={value}', using config value.")
+
+    # Resolve dynamic values AFTER merging
+    resolved_params = _resolve_dynamic_query_params(query_params)
+
+    # Set default limit if not provided
+    resolved_params.setdefault('limit', str(settings.DICOMWEB_POLLER_QIDO_LIMIT))
+
+    # Auth and Headers (No changes needed here)
+    auth = _get_auth(config)
+    headers = _get_headers(config)
+
+    # Prepare request for logging URL (No changes needed here)
     try:
-        log.info("Calling scu_service.find_studies", find_sop_class=str(find_sop_class))
-        found_datasets: List[PydicomDataset] = find_studies(
-            config=scu_config_dict,
-            identifier=query_identifier,
-            find_sop_class=find_sop_class
+        prepared_request = requests.Request('GET', url, params=resolved_params).prepare()
+        final_url_for_request = prepared_request.url
+        logger.info(f"Constructed QIDO URL: {final_url_for_request}")
+        logger.debug(f"QIDO Query - Final Params: {resolved_params}, Auth: {auth is not None}, Headers: {list(headers.keys())}")
+    except Exception as prep_e:
+         logger.error(f"Error preparing QIDO request URL for {source_name_val}: {prep_e}")
+         final_url_for_request = url
+
+    # Request execution and error handling
+    response: Optional[requests.Response] = None # Initialize response
+    try:
+        response = requests.get(
+            url,
+            params=resolved_params,
+            headers=headers,
+            auth=auth,
+            timeout=60
         )
-        log.info("scu_service.find_studies completed", result_count=len(found_datasets))
+        response.raise_for_status()
 
-        for ds in found_datasets:
-            try:
-                result_dict = ds.to_json_dict()
-                result_dict["source_id"] = source_config.id
-                result_dict["source_name"] = source_config.name
-                result_dict["source_type"] = "dimse-qr"
-                results.append(result_dict)
-            except Exception as json_err:
-                log.warning("Failed to convert C-FIND result dataset to JSON", error=str(json_err), dataset_info=str(ds)[:200])
+        content_type = response.headers.get('Content-Type', '')
+        if not ('application/dicom+json' in content_type or 'application/json' in content_type):
+            logger.warning(f"Unexpected QIDO response Content-Type: {content_type} from {url}. Attempting to parse as JSON.")
 
+        results = response.json()
+        if not isinstance(results, list):
+             logger.error(f"QIDO response from {config.source_name} was not a JSON list. Response text: {response.text[:500]}")
+             raise DicomWebClientError("QIDO response was not a JSON list", url=final_url_for_request, status_code=response.status_code)
+
+        logger.info(f"QIDO Query successful for {config.source_name} ({level}): Found {len(results)} results.")
         return results
-
-    except (TlsConfigError, AssociationError, DimseCommandError) as scu_err:
-        log.error("DIMSE SCU service failed during C-FIND", error=str(scu_err), exc_info=True)
-        if isinstance(scu_err, TlsConfigError): raise QueryServiceError(f"TLS Configuration Error: {scu_err}", source_type="dimse-qr", source_id=source_config.id) from scu_err
-        elif isinstance(scu_err, AssociationError): raise RemoteConnectionError(f"Association Error: {scu_err}", source_type="dimse-qr", source_id=source_config.id) from scu_err
-        elif isinstance(scu_err, DimseCommandError): raise RemoteQueryError(f"Remote Query Error: {scu_err}", source_type="dimse-qr", source_id=source_config.id) from scu_err
-        else: raise QueryServiceError(f"DIMSE SCU Error: {scu_err}", source_type="dimse-qr", source_id=source_config.id) from scu_err
-    except ValueError as val_err:
-        log.error("Value error during C-FIND via service", error=str(val_err), exc_info=True)
-        raise InvalidParameterError(f"Configuration or Parameter Error: {val_err}", source_type="dimse-qr", source_id=source_config.id) from val_err
+    except requests.exceptions.Timeout as e:
+        logger.error(f"QIDO Timeout for {config.source_name}: {e}")
+        raise DicomWebClientError(f"Timeout connecting to QIDO endpoint: {e}", url=final_url_for_request) from e
+    except requests.exceptions.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else None
+        response_text = e.response.text[:500] if e.response is not None else "N/A"
+        logger.error(f"QIDO Request failed for {source_name_val}: {e}, Status: {status_code}, Response: {response_text}")
+        raise DicomWebClientError(f"QIDO request failed: {e}. Response: {response_text}", status_code=status_code, url=final_url_for_request) from e
+    except json.JSONDecodeError as e:
+        resp_status_code = response.status_code if response is not None else None
+        resp_text = response.text[:500] if response is not None else "No response text"
+        logger.error(f"Failed to decode QIDO JSON response from {source_name_val}: {e}. Response text: {resp_text}")
+        raise DicomWebClientError(f"Invalid JSON response from QIDO endpoint: {e}", url=final_url_for_request, status_code=resp_status_code) from e
     except Exception as e:
-        log.error("Unexpected error executing C-FIND via service", error=str(e), exc_info=True)
-        raise QueryServiceError(f"Unexpected C-FIND Error: {e}", source_type="dimse-qr", source_id=source_config.id) from e
+        resp_status_code = response.status_code if response is not None else None
+        resp_text = response.text[:500] if response is not None else "No response text"
+        logger.error(f"Unexpected error during QIDO query for {source_name_val}: {e}. Response: {resp_text}", exc_info=True)
+        raise DicomWebClientError(f"Unexpected QIDO error: {e}. Response: {resp_text}", url=final_url_for_request, status_code=resp_status_code) from e
 
 
-async def _execute_qido_query(
-    source_config: models.DicomWebSourceState,
-    query_params: Dict[str, str],
-    query_level: QueryLevel,
-    prioritize_custom_params: bool = False
-) -> List[Dict[str, Any]]:
-    log = logger.bind(source_name=source_config.source_name, source_id=source_config.id, base_url=source_config.base_url, query_level=query_level.value) if hasattr(logger, 'bind') else logger
-    log.info("Attempting DICOMweb QIDO query")
+# --- retrieve_instance_metadata (Keep as is) ---
+def retrieve_instance_metadata(config: DicomWebSourceState, study_uid: str, series_uid: str, instance_uid: str) -> Optional[Dict[str, Any]]:
+    """Retrieves instance metadata via WADO-RS."""
+    base_url_val = getattr(config, 'base_url', None)
+    source_name_val = getattr(config, 'source_name', 'UnknownSource')
 
-    # Note: Removed include_fields map and parameter from the call below
+    if not (isinstance(base_url_val, str) and base_url_val.strip()): # Check if it's a non-empty string
+        raise ValueError(f"Base URL is not configured or is not a string for source '{source_name_val}'")
 
+    base_url_with_slash = base_url_val if base_url_val.endswith('/') else base_url_val + '/'
+    
+    wado_prefix_val = getattr(config, 'wado_prefix', '') # Default to empty string
+    wado_prefix_str = wado_prefix_val if isinstance(wado_prefix_val, str) else '' # Ensure it's a string
+
+    service_base_url = urljoin(base_url_with_slash, wado_prefix_str)
+    service_base_url_with_slash = service_base_url if service_base_url.endswith('/') else service_base_url + '/'
+
+    instance_path = f"studies/{study_uid}/series/{series_uid}/instances/{instance_uid}/metadata"
+    url = urljoin(service_base_url_with_slash, instance_path)
+
+    auth = _get_auth(config)
+    headers = _get_headers(config)
+
+    # Optional: Keep prep request logging if useful
+    # try:
+    #     prepared_request = requests.Request('GET', url).prepare()
+    #     final_url_for_request = prepared_request.url
+    #     logger.info(f"Constructed WADO Metadata URL: {final_url_for_request}")
+    #     logger.debug(f"WADO Metadata Request - URL Base: {url}, Auth: {auth is not None}, Headers: {list(headers.keys())}")
+    # except Exception as prep_e:
+    #     logger.error(f"Error preparing WADO request URL for {instance_uid} at {source_name_val}: {prep_e}")
+    final_url_for_request = url # Simplified for now
+
+    response: Optional[requests.Response] = None # Initialize response
     try:
-        qido_results = await asyncio.to_thread(
-             dicomweb_client.query_qido,
-             config=source_config,
-             level=query_level.value,
-             custom_params=query_params,
-             # include_fields=include_fields, # REMOVED THIS ARGUMENT
-             prioritize_custom_params=prioritize_custom_params
-        )
-        log.info("QIDO query successful.", result_count=len(qido_results))
-        for result in qido_results:
-             result["source_id"] = source_config.id
-             result["source_name"] = source_config.source_name
-             result["source_type"] = "dicomweb"
-        return qido_results
-    except dicomweb_client.DicomWebClientError as e:
-         log.error("Error during QIDO query", status_code=e.status_code, error=str(e), exc_info=False)
-         if e.status_code and 400 <= e.status_code < 500: raise InvalidParameterError(f"QIDO Error ({e.status_code}): {e}", source_type="dicomweb", source_id=source_config.id) from e
-         elif e.status_code and e.status_code >= 500: raise RemoteQueryError(f"QIDO Remote Error ({e.status_code}): {e}", source_type="dicomweb", source_id=source_config.id) from e
-         else: raise RemoteConnectionError(f"QIDO Connection Error: {e}", source_type="dicomweb", source_id=source_config.id) from e
-    except TypeError as te: # Catch the specific TypeError
-         log.error("Type error calling query_qido (likely unexpected argument)", error=str(te), exc_info=True)
-         raise InvalidParameterError(f"Internal configuration error calling QIDO function: {te}", source_type="dicomweb", source_id=source_config.id) from te
-    except Exception as e:
-         log.error("Unexpected error during QIDO query", error=str(e), exc_info=True)
-         raise QueryServiceError(f"QIDO Error: {e}", source_type="dicomweb", source_id=source_config.id) from e
-
-
-async def _execute_google_healthcare_query(
-    source_config: models.GoogleHealthcareSource,
-    query_params: Dict[str, str],
-    query_level: QueryLevel
-) -> List[Dict[str, Any]]:
-    log = logger.bind(source_name=source_config.name, source_id=source_config.id, query_level=query_level.value) if hasattr(logger, 'bind') else logger
-    log.info("Attempting Google Healthcare QIDO query")
-
-    default_fields_map = {
-         QueryLevel.STUDY: ["00100010", "00100020", "0020000D", "00080020", "00080030", "00080050", "00080061", "00080090", "00100030", "00081030", "00201206", "00201208", "00080080"],
-         QueryLevel.SERIES: ["0020000E", "00080060", "00200011", "0008103E", "00201209"],
-         QueryLevel.INSTANCE: ["00080018", "00080016", "00200013"]
-    }
-    include_fields = default_fields_map.get(query_level, [])
-
-    try:
-        # --- Use correct function names ---
-        if query_level == QueryLevel.STUDY:
-            raw_results = await search_for_studies( # Corrected name
-                gcp_project_id=source_config.gcp_project_id,
-                gcp_location=source_config.gcp_location,
-                gcp_dataset_id=source_config.gcp_dataset_id,
-                gcp_dicom_store_id=source_config.gcp_dicom_store_id,
-                query_params=query_params,
-                fields=include_fields
-            )
-        elif query_level == QueryLevel.SERIES:
-            study_uid_filter = query_params.get("StudyInstanceUID") or query_params.get("0020000D")
-            raw_results = await search_for_series( # Corrected name
-                gcp_project_id=source_config.gcp_project_id,
-                gcp_location=source_config.gcp_location,
-                gcp_dataset_id=source_config.gcp_dataset_id,
-                gcp_dicom_store_id=source_config.gcp_dicom_store_id,
-                study_instance_uid=study_uid_filter,
-                query_params=query_params,
-                fields=include_fields
-            )
-        elif query_level == QueryLevel.INSTANCE:
-            study_uid_filter = query_params.get("StudyInstanceUID") or query_params.get("0020000D")
-            series_uid_filter = query_params.get("SeriesInstanceUID") or query_params.get("0020000E")
-            if not study_uid_filter or not series_uid_filter:
-                 raise InvalidParameterError("StudyInstanceUID and SeriesInstanceUID filters required for INSTANCE level query on Google Healthcare source.", source_type="google_healthcare", source_id=source_config.id)
-            raw_results = await search_for_instances( # Corrected name
-                gcp_project_id=source_config.gcp_project_id,
-                gcp_location=source_config.gcp_location,
-                gcp_dataset_id=source_config.gcp_dataset_id,
-                gcp_dicom_store_id=source_config.gcp_dicom_store_id,
-                study_instance_uid=study_uid_filter,
-                series_instance_uid=series_uid_filter,
-                query_params=query_params,
-                fields=include_fields
-            )
-        # --- End correction ---
+        response = requests.get(url, headers=headers, auth=auth, timeout=30)
+        if response.status_code == 404:
+            logger.warning(f"Instance metadata not found (404) for {instance_uid} at {config.source_name}")
+            return None
+        response.raise_for_status()
+        content_type = response.headers.get('Content-Type', '')
+        if not ('application/dicom+json' in content_type or 'application/json' in content_type):
+            logger.warning(f"Unexpected WADO metadata response Content-Type: {content_type} from {url}. Attempting to parse as JSON.")
+        metadata_list = response.json()
+        if isinstance(metadata_list, list) and len(metadata_list) > 0:
+            if len(metadata_list) > 1:
+                logger.warning(f"WADO metadata response for {instance_uid} at {config.source_name} contained {len(metadata_list)} items, using first.")
+            instance_data = metadata_list[0]
+            if not isinstance(instance_data, dict):
+                 logger.error(f"WADO metadata response item from {config.source_name} was not a JSON object: {instance_data}")
+                 raise DicomWebClientError("WADO metadata response list item was not a JSON object", url=final_url_for_request, status_code=response.status_code)
+            logger.debug(f"WADO metadata successfully retrieved for {instance_uid} from {config.source_name}")
+            return instance_data
+        elif isinstance(metadata_list, dict):
+             # Handle cases where server might return single object directly
+             logger.warning(f"WADO metadata response for {instance_uid} from {config.source_name} was a single object, not a list. Using it directly.")
+             return metadata_list
         else:
-             raise InvalidParameterError(f"Unsupported query level '{query_level.value}' for Google Healthcare.", source_type="google_healthcare", source_id=source_config.id)
-
-        log.info("Google Healthcare QIDO query successful", result_count=len(raw_results))
-        for result in raw_results:
-             result["source_id"] = source_config.id
-             result["source_name"] = source_config.name
-             result["source_type"] = "google_healthcare"
-        return raw_results
-
-    except GoogleHealthcareQueryError as e:
-        log.error("Error during Google Healthcare QIDO query", error=str(e), exc_info=False)
-        raise RemoteQueryError(f"Google Healthcare Query Error: {e}", source_type="google_healthcare", source_id=source_config.id) from e
-    except InvalidParameterError as e: raise e
+             logger.error(f"WADO metadata response from {config.source_name} was not a list or object. Response text: {response.text[:500]}")
+             raise DicomWebClientError(f"WADO metadata response was not a list or object ({type(metadata_list)})", url=final_url_for_request, status_code=response.status_code)
+    except requests.exceptions.Timeout as e:
+        logger.error(f"WADO Metadata Timeout for {instance_uid} at {config.source_name}: {e}")
+        raise DicomWebClientError(f"Timeout connecting to WADO endpoint: {e}", url=final_url_for_request) from e
+    except requests.exceptions.RequestException as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None # Treat 404 as not found, not an error here
+        status_code = e.response.status_code if e.response is not None else None
+        response_text = e.response.text[:500] if e.response is not None else "N/A"
+        logger.error(f"WADO Metadata Request failed for {instance_uid} at {config.source_name}: {e}, Status: {status_code}, Response: {response_text}")
+        raise DicomWebClientError(f"WADO metadata request failed: {e}. Response: {response_text}", status_code=status_code, url=final_url_for_request) from e
+    except json.JSONDecodeError as e:
+        resp_status_code = response.status_code if response is not None else None
+        resp_text = response.text[:500] if response is not None else "No response text"
+        logger.error(f"Failed to decode WADO metadata JSON response for {instance_uid} from {config.source_name}: {e}. Response text: {resp_text}")
+        raise DicomWebClientError(f"Invalid JSON response from WADO endpoint: {e}", url=final_url_for_request, status_code=resp_status_code) from e
     except Exception as e:
-        log.error("Unexpected error during Google Healthcare QIDO query", error=str(e), exc_info=True)
-        raise QueryServiceError(f"Google Healthcare Error: {e}", source_type="google_healthcare", source_id=source_config.id) from e
-
-
-def get_source_info_for_response(db: Session, source_id: int, source_type: Literal["dicomweb", "dimse-qr", "google_healthcare"]) -> Dict[str, Any]:
-    info = {"name": "Unknown", "type": source_type, "id": source_id}
-    try:
-        if source_type == "dimse-qr": config = crud.crud_dimse_qr_source.get(db, id=source_id); info["name"] = config.name if config else "Unknown"
-        elif source_type == "dicomweb": config = crud.dicomweb_source.get(db, id=source_id); info["name"] = config.source_name if config else "Unknown"
-        elif source_type == "google_healthcare": config = crud.google_healthcare_source.get(db, id=source_id); info["name"] = config.name if config else "Unknown"
-        else: logger.warning("get_source_info called with invalid source_type", provided_type=source_type, source_id=source_id); info["type"] = "Unknown"
-    except Exception as e: logger.error("Failed to retrieve source info for error response", source_id=source_id, source_type=source_type, error=str(e))
-    return info
-
-
-async def execute_query(
-    db: Session,
-    source_id: int,
-    source_type: Literal["dicomweb", "dimse-qr", "google_healthcare"],
-    query_params: List[DataBrowserQueryParam],
-    query_level: QueryLevel
-) -> DataBrowserQueryResponse:
-    source_config: Any = None
-    source_name = "Unknown"
-    log = logger.bind(source_id=source_id, source_type=source_type, query_level=query_level.value) if hasattr(logger, 'bind') else logger
-    log.info("Executing data browser query")
-
-    try:
-        if source_type == "dimse-qr":
-            source_config = crud.crud_dimse_qr_source.get(db, id=source_id)
-            if source_config: source_name = source_config.name
-        elif source_type == "dicomweb":
-            source_config = crud.dicomweb_source.get(db, id=source_id)
-            if source_config: source_name = source_config.source_name
-        elif source_type == "google_healthcare":
-            source_config = crud.google_healthcare_source.get(db, id=source_id)
-            if source_config: source_name = source_config.name
-        else:
-            raise InvalidParameterError(f"Unsupported source_type: {source_type}", source_type=source_type, source_id=source_id)
-
-        if source_config is None:
-            raise SourceNotFoundError(f"Source configuration not found.", source_type=source_type, source_id=source_id)
-
-        log = logger.bind(source_name=source_name) if hasattr(logger, 'bind') else logger
-        log.debug("Source configuration found")
-
-        if not source_config.is_enabled:
-             log.warning("Query attempt on disabled source")
-             return DataBrowserQueryResponse(query_status="success", message="Source is disabled, no query performed.", source_id=source_id, source_name=source_name, source_type=source_type, results=[])
-
-    except (SourceNotFoundError, InvalidParameterError) as e: raise e
-    except Exception as db_exc:
-        log.error("Database error fetching source configuration", error=str(db_exc), exc_info=True)
-        raise QueryServiceError("Failed to fetch source configuration from database", source_type=source_type, source_id=source_id) from db_exc
-
-    results_list: List[Dict[str, Any]] = []
-    message = "Query executed successfully."
-    query_status: Literal["success", "error", "partial"] = "success"
-
-    try:
-        if source_type == "dimse-qr":
-             log.debug("Preparing C-FIND identifier")
-             find_identifier = _build_find_identifier(query_params, query_level)
-             if not isinstance(source_config, models.DimseQueryRetrieveSource): raise TypeError("Config type mismatch for DIMSE QR")
-             results_list = await _execute_cfind_query(source_config, find_identifier, query_level)
-        elif source_type == "dicomweb":
-            log.debug("Preparing QIDO parameters")
-            qido_params = _build_qido_params(query_params)
-            if not isinstance(source_config, models.DicomWebSourceState):
-                log.error("Configuration type mismatch for DICOMweb source", actual_type=type(source_config))
-                raise TypeError("Config type mismatch for DICOMweb")
-            results_list = await _execute_qido_query(
-                source_config, qido_params, query_level, prioritize_custom_params=True
-            )
-        elif source_type == "google_healthcare":
-            log.debug("Preparing QIDO parameters for Google Healthcare")
-            qido_params = _build_qido_params(query_params)
-            if not isinstance(source_config, models.GoogleHealthcareSource): raise TypeError("Config type mismatch for Google Healthcare")
-            results_list = await _execute_google_healthcare_query(
-                 source_config, qido_params, query_level
-            )
-
-    except (QueryServiceError, RemoteConnectionError, RemoteQueryError, InvalidParameterError, SourceNotFoundError) as e:
-        query_status = "error"
-        message = str(e)
-        results_list = []
-    except Exception as e:
-        query_status = "error"
-        message = f"Unexpected error during query execution: {e}"
-        results_list = []
-        log.exception("Unexpected error during query execution")
-
-    formatted_results: List[StudyResultItem] = []
-    log.debug("Formatting results for response", raw_result_count=len(results_list))
-    for result_dict in results_list:
-        try:
-            # Add source info before validation if not already present
-            if "source_id" not in result_dict: result_dict["source_id"] = source_id
-            if "source_name" not in result_dict: result_dict["source_name"] = source_name
-            if "source_type" not in result_dict: result_dict["source_type"] = source_type
-            formatted_item = StudyResultItem.model_validate(result_dict)
-            formatted_results.append(formatted_item)
-        except Exception as validation_err:
-            log.warning("Failed to validate/format result item", validation_error=str(validation_err), raw_item=str(result_dict)[:500], exc_info=True)
-
-    log.info("Query execution complete", final_status=query_status, formatted_result_count=len(formatted_results))
-    return DataBrowserQueryResponse(
-        query_status=query_status,
-        message=message if query_status != "success" else None,
-        source_id=source_id,
-        source_name=source_name,
-        source_type=source_type,
-        results=formatted_results
-    )
+        resp_status_code = response.status_code if response is not None else None
+        resp_text = response.text[:500] if response is not None else "No response text"
+        logger.error(f"Unexpected error during WADO metadata retrieval for {instance_uid} at {config.source_name}: {e}. Response: {resp_text}", exc_info=True)
+        raise DicomWebClientError(f"Unexpected WADO metadata error: {e}. Response: {resp_text}", url=final_url_for_request, status_code=resp_status_code) from e

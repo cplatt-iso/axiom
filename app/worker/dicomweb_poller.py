@@ -35,13 +35,13 @@ def poll_all_dicomweb_sources() -> Dict[str, Any]:
 
         # Filter for sources that are BOTH enabled AND active
         sources_to_poll = [
-            s for s in all_sources if s.is_enabled and s.is_active
+            s for s in all_sources if s.is_enabled and s.is_active # type: ignore[misc]
         ]
         logger.info(f"Found {len(sources_to_poll)} enabled and active DICOMweb sources in database to poll.")
 
         for source_config in sources_to_poll: # Iterate over the filtered list
              # Optional: Add check here too, in case state changed mid-cycle
-             if not source_config.is_enabled or not source_config.is_active:
+             if not source_config.is_enabled or not source_config.is_active: # type: ignore[misc]
                  logger.debug(f"Skipping DICOMweb source '{source_config.source_name}' (ID: {source_config.id}) as it became disabled/inactive.")
                  continue
 
@@ -56,7 +56,7 @@ def poll_all_dicomweb_sources() -> Dict[str, Any]:
                  try:
                       crud.dicomweb_state.update_run_status(
                           db,
-                          source_name=source_config.source_name,
+                          source_name=source_config.source_name, # type: ignore[arg-type]
                           last_error_run=datetime.now(timezone.utc),
                           last_error_message=str(e)[:1024] # Store truncated error
                       )
@@ -129,7 +129,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
                 already_processed = crud.crud_processed_study_log.check_exists(
                     db=db,
                     source_type=ProcessedStudySourceType.DICOMWEB,
-                    source_id=source_id_str, # Pass string ID
+                    source_id=source_id_str, # type: ignore[arg-type] # Pass string ID
                     study_instance_uid=study_uid
                 )
                 if already_processed: logger.debug(f"{config.source_name}: Study UID {study_uid} already logged. Skipping."); continue
@@ -168,7 +168,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
                             logger.info(f"{config.source_name}: Queueing instance {instance_uid}.")
                             try:
                                 # Task call already uses config.id (integer) which is correct for this task
-                                process_dicomweb_metadata_task.delay(
+                                process_dicomweb_metadata_task.delay( # type: ignore[operator]
                                     source_id=config.id, # Pass the integer source ID
                                     study_uid=study_uid,
                                     series_uid=series_uid,
@@ -184,7 +184,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
                             log_created = crud.crud_processed_study_log.create_log_entry(
                                 db=db,
                                 source_type=ProcessedStudySourceType.DICOMWEB,
-                                source_id=source_id_str, # Pass string ID
+                                source_id=source_id_str, # type: ignore[arg-type] # Pass string ID
                                 study_instance_uid=study_uid,
                                 commit=False
                             )
@@ -198,7 +198,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
             # --- Increment Found Count (Total for Run) ---
             if total_instances_found_this_run_for_db > 0:
                  try:
-                     if crud.dicomweb_state.increment_found_count(db=db, source_name=config.source_name, count=total_instances_found_this_run_for_db):
+                     if crud.dicomweb_state.increment_found_count(db=db, source_name=config.source_name, count=total_instances_found_this_run_for_db): # type: ignore[arg-type]
                          logger.info(f"Incremented found count for '{config.source_name}' by {total_instances_found_this_run_for_db}")
                      else:
                           logger.warning(f"Failed to increment found count for '{config.source_name}'")
@@ -207,7 +207,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
                       # Continue processing state update even if counter fails
             # --- End Increment ---
 
-            if all_processed_timestamps: last_processed_in_batch = max(all_processed_timestamps); logger.info(f"{config.source_name}: Latest timestamp: {last_processed_in_batch.isoformat()}")
+            if all_processed_timestamps: last_processed_in_batch = max(all_processed_timestamps); logger.info(f"{config.source_name}: Latest timestamp: {last_processed_in_batch.isoformat()}") # type: ignore[union-attr]
             last_successful_run_for_update = datetime.now(timezone.utc)
 
         # Update source state
@@ -219,7 +219,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
         # --- Increment Queued Count ---
         if newly_queued_instance_count > 0:
              try:
-                 if crud.dicomweb_state.increment_queued_count(db=db, source_name=config.source_name, count=newly_queued_instance_count):
+                 if crud.dicomweb_state.increment_queued_count(db=db, source_name=config.source_name, count=newly_queued_instance_count): # type: ignore[arg-type]
                      logger.info(f"Incremented queued count for '{config.source_name}' by {newly_queued_instance_count}")
                  else:
                       logger.warning(f"Failed to increment queued count for '{config.source_name}'")
@@ -228,7 +228,7 @@ def poll_source(db: Session, config: DicomWebSourceState):
                   # Continue processing state update even if counter fails
         # --- End Increment ---
 
-        crud.dicomweb_state.update_run_status(db, source_name=config.source_name, **update_payload)
+        crud.dicomweb_state.update_run_status(db, source_name=config.source_name, **update_payload) # type: ignore[arg-type]
 
     except client.DicomWebClientError as client_err: logger.error(f"{config.source_name}: Client error: {client_err}"); raise client_err
     except Exception as poll_err: logger.error(f"{config.source_name}: Unexpected error: {poll_err}", exc_info=True); raise poll_err

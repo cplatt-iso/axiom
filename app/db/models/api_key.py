@@ -13,7 +13,7 @@ class ApiKey(Base):
     """
     API Key Model. Represents an API key associated with a user.
     """
-    __tablename__ = 'api_keys'
+    __tablename__ = 'api_keys' # type: ignore
 
     # Inherits id, created_at, updated_at from Base
 

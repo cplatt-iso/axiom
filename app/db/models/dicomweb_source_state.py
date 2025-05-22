@@ -8,6 +8,7 @@ from sqlalchemy.sql import func # For server-side default timestamps if needed
 # --- Need datetime for type hints if using them, but not required for Column syntax ---
 from datetime import datetime
 from typing import Optional, Dict, Any
+from sqlalchemy.orm import Mapped, mapped_column
 # --- End Imports ---
 
 from app.db.base import Base # Use your specific Base import path
@@ -19,7 +20,7 @@ class DicomWebSourceState(Base):
     NOTE: This model currently mixes configuration and state, which is not ideal.
           Refactoring to separate these is recommended for future maintainability.
     """
-    __tablename__ = "dicomweb_source_state"
+    __tablename__ = "dicomweb_source_state"  # type: ignore
 
     # --- Configuration Fields (Original Column syntax) ---
     source_name = Column(String, unique=True, index=True, nullable=False)
@@ -48,10 +49,10 @@ class DicomWebSourceState(Base):
     search_filters = Column(JSONB, nullable=True)
 
     # --- State Fields (Original Column syntax) ---
-    last_processed_timestamp = Column(DateTime(timezone=True), nullable=True)
-    last_successful_run = Column(DateTime(timezone=True), nullable=True)
-    last_error_run = Column(DateTime(timezone=True), nullable=True)
-    last_error_message = Column(Text, nullable=True)
+    last_processed_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_successful_run: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_run: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # --- ADDED Metrics (Using Column syntax) ---
     found_instance_count = Column(

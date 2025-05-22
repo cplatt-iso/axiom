@@ -6,7 +6,7 @@ from app.db.base import Base
 from datetime import datetime
 
 class DimseListenerState(Base):
-    __tablename__ = "dimse_listener_state"
+    __tablename__ = "dimse_listener_state" # type: ignore
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True) # Use Mapped
     listener_id: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
