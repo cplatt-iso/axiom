@@ -22,6 +22,7 @@ from app.api.api_v1.endpoints import (
     data_browser, 
     config_google_healthcare_sources,
     config_ai_prompts,
+    dicom_exceptions,
 )
 
 api_router = APIRouter()
@@ -37,6 +38,7 @@ api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboar
 api_router.include_router(dicomweb.router, prefix="/dicomweb", tags=["DICOMweb"])
 api_router.include_router(ai_assist.router, prefix="/ai-assist", tags=["AI Assist"])
 api_router.include_router(data_browser.router, prefix="/data-browser", tags=["Data Browser"])
+api_router.include_router(dicom_exceptions.router, prefix="/exceptions", tags=["DICOM Processing Exceptions"])
 
 # Add route for new system config area if needed (using placeholder endpoint)
 # api_router.include_router(system_config_placeholder.router, prefix="/admin/system-config", tags=["System Configuration"])

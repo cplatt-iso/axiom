@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, exists
 
 # Import the model and Enum
-from app.db.models import ProcessedStudyLog, ProcessedStudySourceType
+from app.db.models import ProcessedStudyLog
+from app.schemas.enums import ProcessedStudySourceType
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,5 @@
 # app/worker/celery_app.py
+from datetime import timedelta
 import logging
 import sys
 import traceback 
@@ -14,7 +15,7 @@ log_level_str = getattr(settings, 'LOG_LEVEL', "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
 
 # Flag to prevent configuring structlog multiple times in the same process
-_STRUCTLOG_CONFIGURED = False
+_STRUCTLOG_CONFIGURED = True
 
 class IgnoreCeleryAppTraceFilter(logging.Filter):
     def filter(self, record):
@@ -208,6 +209,14 @@ app.conf.beat_schedule = {
     'poll-all-google-healthcare-sources-every-five-minutes': { # Adjust name/interval as needed
         'task': 'poll_all_google_healthcare_sources', # Name of the SCHEDULER task (we need to create this)
         'schedule': 300.0, # Example: Run every 5 minutes
+    },
+    "retry-exceptions": {
+        "task": "retry_pending_exceptions_task", # CHANGED: Use the explicit name from the decorator
+        "schedule": timedelta(minutes=settings.EXCEPTION_RETRY_INTERVAL_MINUTES), # e.g., every 5 mins
+    },
+        "cleanup-stale-exception-data": {
+        "task": "app.worker.tasks.cleanup_stale_exception_data_task",
+        "schedule": timedelta(hours=settings.CLEANUP_STALE_DATA_INTERVAL_HOURS),
     },
     # 'cleanup-old-files-every-day': {
     #     'task': 'app.worker.tasks.cleanup_task',

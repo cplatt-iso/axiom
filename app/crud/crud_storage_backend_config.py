@@ -148,32 +148,24 @@ class CRUDStorageBackendConfig:
         self,
         db: Session,
         *,
-        db_obj: StorageBackendConfig, # Input is the specific subclass instance from get()
+        db_obj: StorageBackendConfig, 
         obj_in: Union[schemas_storage.StorageBackendConfigUpdate, Dict[str, Any]]
     ) -> StorageBackendConfig:
-        """
-        Update an existing storage backend configuration.
-        Handles updating common fields and fields specific to the object's type.
-        Does NOT support changing the backend_type.
-        """
         logger.info(f"Attempting to update storage backend config ID: {db_obj.id}, Name: {db_obj.name}, Type: {db_obj.backend_type}")
 
         if isinstance(obj_in, dict):
             update_data = obj_in
         else:
-            # Use exclude_unset=True for proper PATCH semantics
             update_data = obj_in.model_dump(exclude_unset=True)
 
         if not update_data:
              logger.warning(f"Update request for storage backend config ID {db_obj.id} contained no data.")
-             return db_obj # Return unchanged object
+             return db_obj 
 
-        # --- Prevent backend_type change ---
         if "backend_type" in update_data:
             logger.warning(f"Attempted to change backend_type for ID {db_obj.id}. This is not allowed. Ignoring.")
             del update_data["backend_type"]
 
-        # --- Check Name Uniqueness (if changed) ---
         if "name" in update_data and update_data["name"] != db_obj.name:
             existing_name = self.get_by_name(db, name=update_data["name"])
             if existing_name and existing_name.id != db_obj.id:
@@ -181,16 +173,12 @@ class CRUDStorageBackendConfig:
 
         logger.debug(f"Updating fields for storage backend ID {db_obj.id}: {list(update_data.keys())}")
 
-        # --- Apply updates ---
-        # Iterate through the update data and set attributes on the db_obj
-        # This works because db_obj is already the correct subclass instance
         updated_fields = []
-        current_values = {} # Store current values for validation if needed
-        mapper = inspect(db_obj.__class__) # Get mapper for the specific subclass
+        current_values = {} 
+        mapper = inspect(db_obj.__class__) 
 
         for field, value in update_data.items():
-            if field in mapper.attrs: # Check if the field exists on the current model instance
-                # Store current value before update for validation checks
+            if field in mapper.attrs: 
                 current_values[field] = getattr(db_obj, field, None)
                 setattr(db_obj, field, value)
                 updated_fields.append(field)
@@ -201,40 +189,82 @@ class CRUDStorageBackendConfig:
              logger.warning(f"Update request for storage backend config ID {db_obj.id} contained no valid fields for type '{db_obj.backend_type}'.")
              return db_obj
 
-        # --- Specific Post-Update Validation (Example for CStore TLS) ---
-        # Needs careful checking as we only have partial data in update_data
+        # --- Specific Post-Update Validation ---
         if isinstance(db_obj, CStoreBackendConfig):
-             # Check if tls_enabled is now True but CA is missing
-             if getattr(db_obj,'tls_enabled', False) and not getattr(db_obj, 'tls_ca_cert_secret_name', None):
-                  # Rollback potential attribute change before raising
-                  # This logic gets complicated quickly with PATCH.
-                  # Simpler might be to validate in the service layer or endpoint.
-                  # For now, let's assume Pydantic's model validator on CStoreConfig handles creation logic,
-                  # and updates need careful handling. Re-adding the check:
-                  if db_obj.tls_enabled and not db_obj.tls_ca_cert_secret_name:
-                      db.rollback() # Avoid committing invalid state
-                      raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="C-STORE: CA Cert Secret Name is required when TLS is enabled.")
+             if db_obj.tls_enabled and not db_obj.tls_ca_cert_secret_name:
+                 db.rollback() 
+                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="C-STORE: CA Cert Secret Name is required when TLS is enabled.")
 
-             # Check if only one of client cert/key is provided
-             cert_provided = 'tls_client_cert_secret_name' in update_data or getattr(db_obj, 'tls_client_cert_secret_name', None)
-             key_provided = 'tls_client_key_secret_name' in update_data or getattr(db_obj, 'tls_client_key_secret_name', None)
-             if cert_provided != key_provided: # If one is true and the other false
+             cert_provided_in_update = 'tls_client_cert_secret_name' in update_data
+             key_provided_in_update = 'tls_client_key_secret_name' in update_data
+             
+             current_cert = current_values.get('tls_client_cert_secret_name', db_obj.tls_client_cert_secret_name)
+             current_key = current_values.get('tls_client_key_secret_name', db_obj.tls_client_key_secret_name)
+
+             final_cert = update_data.get('tls_client_cert_secret_name', current_cert)
+             final_key = update_data.get('tls_client_key_secret_name', current_key)
+
+             if (final_cert and not final_key) or (not final_cert and final_key):
                  db.rollback()
                  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="C-STORE: Provide both Client Cert and Key Secret Names for mTLS, or neither.")
+        
+        # +++ ADDED VALIDATION FOR STOW-RS ON UPDATE +++
+        if isinstance(db_obj, StowRsBackendConfig):
+            # Use db_obj.auth_type as it reflects the value after setattr
+            # This means if auth_type is part of update_data, db_obj.auth_type is the NEW type.
+            # If auth_type was not in update_data, db_obj.auth_type is the original type.
+            
+            auth_type_to_validate = db_obj.auth_type # This is the state after setattr
+            
+            # Retrieve current values for secret names BEFORE potential nulling
+            # to check if they were provided in this update if auth_type changes to one that needs them.
+            # Or, more simply, just check the state of db_obj after all setattrs.
 
+            if auth_type_to_validate == "basic":
+                if not db_obj.basic_auth_username_secret_name or not db_obj.basic_auth_password_secret_name:
+                    db.rollback()
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="STOW-RS: If auth_type is 'basic', both username and password secret names are required.")
+            elif auth_type_to_validate == "bearer":
+                if not db_obj.bearer_token_secret_name:
+                    db.rollback()
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="STOW-RS: If auth_type is 'bearer', bearer_token_secret_name is required.")
+            elif auth_type_to_validate == "apikey":
+                if not db_obj.api_key_secret_name or not db_obj.api_key_header_name_override:
+                    db.rollback()
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="STOW-RS: If auth_type is 'apikey', api_key_secret_name and api_key_header_name_override are required.")
+            elif auth_type_to_validate == "none" or auth_type_to_validate is None: # If auth_type is being set to "none" or cleared
+                # Null out other auth fields if changing to "none" or if auth_type is removed (becomes None)
+                # This ensures DB consistency if auth_type is explicitly set to "none" in the update.
+                fields_to_null = [
+                    'basic_auth_username_secret_name', 'basic_auth_password_secret_name',
+                    'bearer_token_secret_name', 'api_key_secret_name', 'api_key_header_name_override'
+                ]
+                nulled_any = False
+                for field_name in fields_to_null:
+                    if getattr(db_obj, field_name, None) is not None:
+                        # Only set to None if it was not ALREADY None and auth_type is now "none"
+                        # This check is implicitly handled by setattr if `value` is None in `update_data`
+                        # The explicit check is more about enforcing that if auth_type is "none", these *must* be None.
+                        # However, the current loop only sets what's in update_data.
+                        # So, if auth_type becomes "none", we should ensure these are nulled.
+                        if update_data.get('auth_type') == "none" or update_data.get('auth_type') is None and field_name not in update_data : # if auth_type is set to none/null in update
+                             setattr(db_obj, field_name, None) # Force null these fields
+                             nulled_any = True
+                if nulled_any:
+                    logger.info(f"Nulled STOW-RS auth secret names for ID {db_obj.id} due to auth_type change to '{auth_type_to_validate}'.")
+        # +++ END ADDED VALIDATION +++
 
-        # --- Add to session and commit ---
-        db.add(db_obj) # Add the modified object back to the session
+        db.add(db_obj)
         try:
             db.commit()
             db.refresh(db_obj)
             logger.info(f"Successfully updated storage backend config ID: {db_obj.id}")
             return db_obj
         except IntegrityError as e:
+            # ... (existing integrity error handling) ...
              db.rollback()
              logger.error(f"Database integrity error during storage backend update for ID {db_obj.id}: {e}", exc_info=True)
              constraint_name = None
-             # Safely extract constraint_name using getattr
              _orig_exc = getattr(e, 'orig', None)
              if _orig_exc is not None:
                  _diag_obj = getattr(_orig_exc, 'diag', None)
@@ -248,13 +278,12 @@ class CRUDStorageBackendConfig:
                  (isinstance(e.orig, Exception) and "uq_storage_backend_configs_name" in str(e.orig))):
                  raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Name '{update_data['name']}' already exists (commit conflict).")
              raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error updating backend ID {db_obj.id}.")
-        except HTTPException: # Re-raise validation errors
+        except HTTPException: 
              raise
         except Exception as e:
              db.rollback()
              logger.error(f"Unexpected error during storage backend update for ID {db_obj.id}: {e}", exc_info=True)
              raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unexpected error updating backend ID {db_obj.id}.")
-
 
     def remove(self, db: Session, *, id: int) -> StorageBackendConfig:
         """Delete a storage backend configuration by ID."""

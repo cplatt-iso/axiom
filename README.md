@@ -10,14 +10,14 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
 *   **DICOM Polling/Querying:**
     *   Poll DICOMweb sources (QIDO-RS) for new studies/instances.
     *   Poll DIMSE sources (C-FIND) for new studies/instances.
-    *   **Poll Google Healthcare DICOM Stores (QIDO-RS) for new studies.**
+    *   Poll Google Healthcare DICOM Stores (QIDO-RS) for new studies.
 *   **DICOM Retrieval:**
     *   Retrieve DICOM metadata/instances via DICOMweb WADO-RS (used by DICOMweb poller).
     *   Initiate DICOM retrieval via DIMSE C-MOVE (triggered by DIMSE Q/R poller).
-    *   **(GHC Poller currently retrieves metadata only, full instance retrieval TBD).**
+    *   (GHC Poller currently retrieves metadata only, full instance retrieval TBD).
 *   **Rule Engine:**
     *   Apply complex matching criteria based on DICOM tags (equality, comparison, existence, contains, regex, list membership) and DICOM association details (Calling AE, Called AE, Source IP - *IP matching logic pending*).
-    *   Match rules against specific input sources (DICOMweb, DIMSE Listener, DIMSE Q/R, **Google Healthcare**, STOW-RS) or apply globally.
+    *   Match rules against specific input sources (DICOMweb, DIMSE Listener, DIMSE Q/R, Google Healthcare, STOW-RS) or apply globally.
     *   Support `FIRST_MATCH` or `ALL_MATCHES` execution modes per ruleset.
     *   **Scheduling:** Rules can be optionally linked to reusable Schedule definitions, activating them only during specified time windows (days of week, start/end times, handles overnight). Rules without a schedule are considered always active (if enabled).
 *   **Tag Morphing & Crosswalking:**
@@ -32,15 +32,23 @@ Next-generation DICOM tag morphing, rule engine, and routing system designed for
     *   Google Cloud Healthcare DICOM Store (via STOW-RS)
     *   Generic DICOMweb STOW-RS endpoints
     *   Rules link to Storage Backends via a Many-to-Many relationship.
+*   **AI Integration:**
+    *   Rule generation suggestions (OpenAI).
+    *   DICOM vocabulary standardization (e.g., BodyPartExamined) using OpenAI and Google Vertex AI Gemini models.
+*   **Exception Handling & Management (New/In Progress):**
+    *   Dedicated exception queue in the database (`DicomExceptionLog`) to track processing failures.
+    *   Capture detailed error information, including DICOM identifiers, failure stage, error messages, and source/destination context.
+    *   Automated retry mechanism for transient errors (e.g., destination send failures) via Celery beat.
+    *   Backend API for UI to query, view details, and manage exceptions (manual retry, archive, potential tag editing for re-submission).
 *   **Scalability:** Designed for high throughput using asynchronous task processing (Celery/RabbitMQ) and containerization (Docker).
-*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R, **Google Healthcare Sources**), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Schedules, Rulesets, Rules, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
+*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R, Google Healthcare Sources), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Schedules, Rulesets, Rules, AI Prompt Configurations, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
 *   **Security:**
     *   User authentication via Google OAuth 2.0 (backend validates Google token, issues JWT).
     *   API Key authentication (prefix + secret, hashed storage, scoped to user).
     *   Role-Based Access Control (RBAC): Admin/User roles seeded, API endpoints protected via dependencies (configurable, e.g., superuser or admin role).
     *   **TLS Support:** Implemented for outgoing DIMSE SCU operations (C-FIND, C-MOVE, C-STORE Storage Backend) and incoming DIMSE SCP (Listener). Configured via GCP Secret Manager secrets.
 *   **Monitoring:** API endpoints provide status for core components, pollers (DICOMweb, DIMSE Q/R), listeners, and crosswalk sync jobs, including metrics (found, queued, processed counts).
-*   **Data Browser API:** Endpoint (`/data-browser/query`) supports querying enabled DICOMweb, DIMSE Q/R, and **Google Healthcare** sources.
+*   **Data Browser API:** Endpoint (`/data-browser/query`) supports querying enabled DICOMweb, DIMSE Q/R, and Google Healthcare sources.
 *   **Database:** Uses PostgreSQL with SQLAlchemy 2.x ORM and Alembic for migrations.
 
 ## Technology Stack
@@ -137,29 +145,40 @@ Interactive API documentation (Swagger UI) is available at `/api/v1/docs`. ReDoc
 
 *   Core architecture functional.
 *   Authentication (Google, API Key) and RBAC implemented.
-*   All planned input sources (C-STORE, STOW-RS, DICOMweb Poll, DIMSE Q/R Poll, **GHC Poll**) implemented.
+*   All planned input sources (C-STORE, STOW-RS, DICOMweb Poll, DIMSE Q/R Poll, GHC Poll) implemented.
 *   All planned output destinations implemented (Filesystem, C-STORE, GCS, GHC STOW, DICOMweb STOW). TLS supported for C-STORE SCU.
-*   Rule engine supports tag/association matching (IP Ops pending), **scheduling**, and tag modifications (`set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`).
+*   Rule engine supports tag/association matching (IP Ops pending), scheduling, and tag modifications (`set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`).
 *   Crosswalk feature fully implemented.
 *   Scheduling feature fully implemented.
-*   **Google Healthcare polling and basic metadata processing task implemented.**
-*   **Data Browser API supports querying DICOMweb, DIMSE Q/R, and Google Healthcare sources.**
+*   AI integration for rule suggestions and vocabulary standardization (OpenAI, Vertex AI Gemini) functional.
+*   Google Healthcare polling and basic metadata processing task implemented.
+*   Data Browser API supports querying DICOMweb, DIMSE Q/R, and Google Healthcare sources.
 *   Configuration via API available for all major components.
 *   Monitoring endpoints functional.
 *   Original Attributes Sequence logging framework in place (needs verification).
 *   Secrets management via GCP Secret Manager integrated for TLS.
+*   **Initial backend implementation for Exception Handling mechanism in progress:**
+    *   Database model (`DicomExceptionLog`) and Pydantic schemas defined.
+    *   Basic CRUD operations for exception log implemented.
+    *   Integration points in task executors and processing orchestrator for capturing exceptions being developed.
+    *   Design for retry mechanism (Celery beat task) and API for UI management underway.
 
 ## Next Steps / Future Goals
 
-*   **Implement IP Matching (Backend):** Logic for association criteria.
+*   **Complete Exception Handling Mechanism:**
+    *   Finalize integration of exception capturing across all relevant processing stages.
+    *   Implement and test the Celery beat task for automated retries.
+    *   Develop and test all API endpoints for UI management of exceptions (list, details, manual retry, archive, status update).
+    *   Consider advanced features like tag editing for errored instances via the exceptions UI.
+*   **Implement IP Matching (Backend):** Logic for association criteria in the rule engine.
 *   **Verify Original Attributes Logging (Backend):** Test across all modification types.
 *   **Enhance GHC Poller Processing:** Implement full study retrieval (WADO?) or instance-level processing based on polled metadata.
 *   **Seed/Dump Script Overhaul:** Make config seeding/dumping robust.
-*   **Testing:** Develop comprehensive backend (pytest) and frontend test suites.
-*   **UI Refinements:** Rule testing feature, dashboard visuals.
+*   **Testing:** Develop comprehensive backend (pytest) and frontend test suites, including tests for the new exception handling.
+*   **UI Refinements:** Rule testing feature, dashboard visuals, **Exception Management UI integration**.
 *   **Logging Improvements:** Route all logs via Fluentd, fix Uvicorn/Postgres text logs.
-*   **Documentation:** Add API examples, deployment guides.
-*   **Longer-Term:** C-GET support, AI integration (Gemini?), Kubernetes.
+*   **Documentation:** Add API examples, deployment guides, **document exception handling workflows**.
+*   **Longer-Term:** C-GET support, further AI integrations, Kubernetes deployment.
 
 ## Contributing
 

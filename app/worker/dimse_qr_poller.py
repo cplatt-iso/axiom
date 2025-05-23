@@ -19,7 +19,7 @@ from celery import shared_task
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.db import models
-from app.db.models import ProcessedStudySourceType
+from app.schemas.enums import ProcessedStudySourceType
 from app import crud
 from .dimse_qr_retriever import trigger_dimse_cmove_task
 # Import the SCU service

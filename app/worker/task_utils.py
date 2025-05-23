@@ -1,158 +1,286 @@
-# backend/app/worker/task_utils.py
+# app/worker/task_utils.py
 
-import logging
-from typing import Optional, Dict, Any, Union
+from pathlib import Path
+import traceback
+import uuid
+from typing import Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+# import json # Not strictly needed if specific_config is not used this way
+
+import pydicom
+from pydicom.multival import MultiValue
+from pydicom.dataelem import DataElement
+import pydicom.uid # Import the pydicom.uid module
+from pydicom.valuerep import PersonName
+from sqlalchemy.orm import Session
 import structlog
+from pydantic import TypeAdapter
 
-from app.db.models.storage_backend_config import (
-    StorageBackendConfig as DBStorageBackendConfigModel,
-    FileSystemBackendConfig,
-    GcsBackendConfig,
-    CStoreBackendConfig,
-    GoogleHealthcareBackendConfig,
-    StowRsBackendConfig
+from app import crud
+# Specific model imports
+from app.db.models.storage_backend_config import StorageBackendConfig as DBStorageBackendConfigModel
+from app.db.models.dicom_exception_log import DicomExceptionLog
+# Correct import for StorageBackendType enum
+from app.services.storage_backends.base_backend import StorageBackendError, StorageBackendType as EnumStorageBackendType # <--- CORRECTED IMPORT
+
+# Pydantic schemas for validation and serialization
+from app.schemas.dicom_exception_log import DicomExceptionLogCreate
+# Import the *discriminated union* for reading storage backend configs
+from app.schemas.storage_backend_config import StorageBackendConfigRead # <--- IMPORT THE UNION
+from app.schemas.enums import (
+    ProcessedStudySourceType,
+    ExceptionProcessingStage,
+    ExceptionStatus
 )
-from app.services.storage_backends.base_backend import StorageBackendType # For enum comparison
+from app.core.config import settings
+
+EXECUTOR_LEVEL_RETRYABLE_STORAGE_ERRORS = (
+    StorageBackendError, # Or more specific subtypes if you define them, e.g. NetworkStorageError
+    # DicomWebClientError, # If it can be raised by a storage backend or similar context
+    ConnectionRefusedError, # These can also be caught directly by executors
+    TimeoutError,
+)
 
 logger = structlog.get_logger(__name__)
+logger_task_utils = structlog.get_logger("app.worker.task_utils")
 
-def build_storage_backend_config_dict(
-    db_storage_backend_model: DBStorageBackendConfigModel,
-    task_id: Optional[str] = "N/A", # Optional task_id for better logging context
-    destination_name_override: Optional[str] = None # For cases like GHC source processing where dest name is different
-) -> Optional[Dict[str, Any]]:
-    """
-    Builds the configuration dictionary required by get_storage_backend 
-    from a database StorageBackendConfig model instance.
-
-    This function centralizes the logic for converting polymorphic SQLAlchemy models
-    into the flat dictionary format expected by the storage backend factory.
-
-    Args:
-        db_storage_backend_model: The SQLAlchemy model instance (e.g., GcsBackendConfig).
-        task_id: Optional task ID for logging.
-        destination_name_override: Optional name to use in the config dict, 
-                                   useful if the db_storage_backend_model.name is not the desired runtime name.
-
-
-    Returns:
-        A dictionary suitable for get_storage_backend, or None if an error occurs.
-    """
-    log = logger.bind(
-        task_id=task_id,
-        db_model_id=getattr(db_storage_backend_model, 'id', 'UnknownID'),
-        db_model_name=getattr(db_storage_backend_model, 'name', 'UnknownName'),
-        db_model_type=type(db_storage_backend_model).__name__
-    )
-
-    if not db_storage_backend_model:
-        log.error("build_storage_backend_config_dict: Received None for db_storage_backend_model.")
-        return None
-
-    actual_storage_config_dict: Dict[str, Any] = {}
+def _safe_get_dicom_value(ds: Optional[pydicom.Dataset], tag_keyword: str, default: Optional[str] = None) -> Optional[str]:
+    if not ds:
+        return default
+    
+    retrieved_item = None
+    vr = "N/A" # Default VR if we can't get it
 
     try:
-        # 1. Resolve backend_type to a string
-        backend_type_value_from_db_model = db_storage_backend_model.backend_type
-        resolved_backend_type_for_config: Optional[str] = None
+        retrieved_item = ds.get(tag_keyword) 
 
-        if isinstance(backend_type_value_from_db_model, str):
-            resolved_backend_type_for_config = backend_type_value_from_db_model
-        elif isinstance(backend_type_value_from_db_model, StorageBackendType): # Check against enum
-            resolved_backend_type_for_config = backend_type_value_from_db_model.value
-        elif hasattr(backend_type_value_from_db_model, 'value') and isinstance(getattr(backend_type_value_from_db_model, 'value', None), str):
-            # Fallback for other enum-like objects
-            resolved_backend_type_for_config = backend_type_value_from_db_model.value
+        if retrieved_item is None: 
+            return default
+        
+        # Determine the actual value and VR
+        if isinstance(retrieved_item, DataElement):
+            val = retrieved_item.value
+            vr = retrieved_item.VR
         else:
-            log.error(
-                "DB model 'backend_type' is invalid or not a string/enum.value.",
-                raw_backend_type=backend_type_value_from_db_model,
-                type_of_raw=type(backend_type_value_from_db_model).__name__
-            )
-            return None
+            # If ds.get() returns the bare value (e.g., in some test mocks or older pydicom versions for some cases)
+            val = retrieved_item
+            # We can't easily get the VR if it's not a DataElement, so vr remains "N/A"
+            # or we could try to infer it, but that's complex.
 
-        if resolved_backend_type_for_config is None: # Should have been caught by else above
-            log.error("Failed to resolve backend_type for config dict construction.")
-            return None
+        if val is None: # Tag exists but has no value, or bare value is None
+            return default
 
-        actual_storage_config_dict['type'] = resolved_backend_type_for_config
-        actual_storage_config_dict['name'] = destination_name_override or db_storage_backend_model.name
+        # Process val (the actual value)
+        if isinstance(val, MultiValue):
+            if not val: # Empty MultiValue list
+                return default 
+            return "\\".join(map(str, val))
+        elif isinstance(val, (PersonName, pydicom.uid.UID)):
+            return str(val)
+        elif isinstance(val, bytes):
+            try:
+                return val.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    return val.decode('latin-1') 
+                except UnicodeDecodeError:
+                    logger_task_utils.warning("Failed to decode bytes for tag", tag=tag_keyword, vr_log=vr, value_repr=repr(val))
+                    return f"<bytes_undecodable_{len(val)}>"
+        elif isinstance(val, list): 
+            if not val: return default
+            return "\\".join(map(str, val))
+        
+        return str(val)
 
-        # 2. Populate type-specific fields by DIRECTLY accessing attributes
-        #    of db_storage_backend_model, which is an instance of the correct subclass thanks to SQLAlchemy's polymorphic loading.
+    except Exception as e:
+        # Log with the VR if we managed to get it
+        logger_task_utils.warning(
+            "Error accessing/converting DICOM tag in _safe_get_dicom_value",
+            tag=tag_keyword,
+            vr_log=vr, 
+            error_str=str(e),
+            # exc_info=True # Consider adding for debug if errors persist
+        )
+        return default
 
-        if resolved_backend_type_for_config == StorageBackendType.FILESYSTEM.value: # Compare with enum value
-            if isinstance(db_storage_backend_model, FileSystemBackendConfig):
-                actual_storage_config_dict['path'] = db_storage_backend_model.path
+def build_storage_backend_config_dict(
+    db_storage_model: DBStorageBackendConfigModel,
+    task_id: Optional[str] = "N/A"
+) -> Optional[Dict[str, Any]]:
+    log = logger.bind(storage_backend_id=db_storage_model.id, storage_backend_name=db_storage_model.name, task_id=task_id)
+    log.debug(f"Attempting to build config dict for backend type from DB: {db_storage_model.backend_type}")
+
+    try:
+        adapter = TypeAdapter(StorageBackendConfigRead) 
+        pydantic_read_model = adapter.validate_python(db_storage_model, from_attributes=True)
+        log.debug("Validated DB model to Pydantic model.", pydantic_model_type=type(pydantic_read_model).__name__, pydantic_model_attrs=dir(pydantic_read_model))
+
+
+        backend_type_value: Optional[str] = None
+        if hasattr(pydantic_read_model, 'backend_type'):
+            log.debug("Pydantic model has 'backend_type' attribute.", backend_type_attr_type=type(pydantic_read_model.backend_type), backend_type_attr_value=str(pydantic_read_model.backend_type))
+            if isinstance(pydantic_read_model.backend_type, EnumStorageBackendType):
+                backend_type_value = pydantic_read_model.backend_type.value
+                log.debug("Derived backend_type_value from Enum.", derived_value=backend_type_value)
             else:
-                log.error("Type mismatch: Expected FileSystemBackendConfig.")
-                return None
-
-        elif resolved_backend_type_for_config == StorageBackendType.GCS.value:
-            if isinstance(db_storage_backend_model, GcsBackendConfig):
-                actual_storage_config_dict['bucket'] = db_storage_backend_model.bucket
-                actual_storage_config_dict['prefix'] = db_storage_backend_model.prefix
-                # gcp_credentials_secret_name is handled by get_storage_backend using settings
-            else:
-                log.error("Type mismatch: Expected GcsBackendConfig.")
-                return None
-
-        elif resolved_backend_type_for_config == StorageBackendType.CSTORE.value:
-            if isinstance(db_storage_backend_model, CStoreBackendConfig):
-                actual_storage_config_dict['remote_ae_title'] = db_storage_backend_model.remote_ae_title
-                actual_storage_config_dict['remote_host'] = db_storage_backend_model.remote_host
-                actual_storage_config_dict['remote_port'] = db_storage_backend_model.remote_port
-                actual_storage_config_dict['local_ae_title'] = db_storage_backend_model.local_ae_title
-                actual_storage_config_dict['tls_enabled'] = db_storage_backend_model.tls_enabled
-                actual_storage_config_dict['tls_ca_cert_secret_name'] = db_storage_backend_model.tls_ca_cert_secret_name
-                actual_storage_config_dict['tls_client_cert_secret_name'] = db_storage_backend_model.tls_client_cert_secret_name
-                actual_storage_config_dict['tls_client_key_secret_name'] = db_storage_backend_model.tls_client_key_secret_name
-            else:
-                log.error("Type mismatch: Expected CStoreBackendConfig.")
-                return None
-
-        elif resolved_backend_type_for_config == StorageBackendType.GOOGLE_HEALTHCARE.value:
-            if isinstance(db_storage_backend_model, GoogleHealthcareBackendConfig):
-                actual_storage_config_dict['gcp_project_id'] = db_storage_backend_model.gcp_project_id
-                actual_storage_config_dict['gcp_location'] = db_storage_backend_model.gcp_location
-                actual_storage_config_dict['gcp_dataset_id'] = db_storage_backend_model.gcp_dataset_id
-                actual_storage_config_dict['gcp_dicom_store_id'] = db_storage_backend_model.gcp_dicom_store_id
-                # gcp_credentials_secret_name is handled by get_storage_backend using settings
-            else:
-                log.error("Type mismatch: Expected GoogleHealthcareBackendConfig.")
-                return None
-
-        elif resolved_backend_type_for_config == StorageBackendType.STOW_RS.value:
-             if isinstance(db_storage_backend_model, StowRsBackendConfig):
-                actual_storage_config_dict['base_url'] = db_storage_backend_model.base_url
-                actual_storage_config_dict['username_secret_name'] = db_storage_backend_model.username_secret_name
-                actual_storage_config_dict['password_secret_name'] = db_storage_backend_model.password_secret_name
-                actual_storage_config_dict['tls_ca_cert_secret_name'] = db_storage_backend_model.tls_ca_cert_secret_name
-             else:
-                log.error("Type mismatch: Expected StowRsBackendConfig.")
-                return None
+                # Fallback if it's already a string or some other type that can be stringified
+                backend_type_value = str(pydantic_read_model.backend_type)
+                log.debug("Derived backend_type_value via str() fallback.", derived_value=backend_type_value)
         else:
+            log.warning("Pydantic model does NOT have 'backend_type' attribute.")
+            # Attempt to infer from db_storage_model.backend_type as a last resort if schema is inconsistent
+            if db_storage_model.backend_type and isinstance(db_storage_model.backend_type, EnumStorageBackendType):
+                 backend_type_value = db_storage_model.backend_type.value
+                 log.info("Falling back to db_storage_model.backend_type for backend_type_value.", derived_value=backend_type_value)
+            elif db_storage_model.backend_type: # if it's already a string in DB model
+                 backend_type_value = str(db_storage_model.backend_type)
+                 log.info("Falling back to str(db_storage_model.backend_type) for backend_type_value.", derived_value=backend_type_value)
+
+
+        if not backend_type_value:
             log.error(
-                "Unknown resolved_backend_type_for_config for building specific config.",
-                type_val=resolved_backend_type_for_config
+                "Critical: Could not determine backend_type value from Pydantic model or DB fallback. 'backend_type' attribute missing or invalid.",
+                pydantic_model_type=type(pydantic_read_model).__name__,
+                pydantic_model_dict=pydantic_read_model.model_dump() if pydantic_read_model else "N/A"
             )
-            return None
+            return None # If backend_type_value is not found, this function returns None
 
-        log.debug("Successfully built storage backend config dict.", config_dict=actual_storage_config_dict)
-        return actual_storage_config_dict
+        config_dict = pydantic_read_model.model_dump(exclude_none=True)
+        log.debug("Initial model_dump before adding 'type'", initial_dict_keys=list(config_dict.keys()))
 
-    except AttributeError as attr_err:
+        # Ensure the 'type' key required by get_storage_backend is present in the config_dict.
+        config_dict['type'] = backend_type_value
+        
+        log.debug("Successfully built storage backend config dict.", final_config_keys=list(config_dict.keys()), type_value_set=config_dict.get('type'))
+        return config_dict
+    except Exception as e:
         log.error(
-            "Attribute error building specific config dict from DB model. "
-            "A field expected for the backend type was missing on the model instance.",
-            error=str(attr_err),
+            "Failed to build storage backend config dict from DB model.",
+            error=str(e),
+            backend_type_from_db=db_storage_model.backend_type,
             exc_info=True
         )
         return None
-    except Exception as config_build_err:
-        log.error(
-            "Generic error building specific config dict from DB model.",
-            error=str(config_build_err),
+
+def _serialize_result(result_val: Any) -> Any:
+    """Safely serializes common result types for Celery task return."""
+    if isinstance(result_val, (dict, str, int, float, list, bool, type(None))):
+        return result_val
+    elif isinstance(result_val, Path):
+        return str(result_val)
+    # ... (other specific type handling if needed) ...
+    else:
+        try:
+            return str(result_val)
+        except Exception:
+            return f"<{type(result_val).__name__} Instance (Unserializable)>"
+
+
+def create_exception_log_entry(
+    db: Session,
+    *,
+    exc: Exception,
+    processing_stage: ExceptionProcessingStage,
+    dataset: Optional[pydicom.Dataset] = None,
+    study_instance_uid_str: Optional[str] = None,
+    series_instance_uid_str: Optional[str] = None,
+    sop_instance_uid_str: Optional[str] = None,
+    failed_filepath: Optional[str] = None,
+    original_source_type: Optional[ProcessedStudySourceType] = None,
+    original_source_identifier: Optional[str] = None,
+    calling_ae_title: Optional[str] = None,
+    target_destination_db_model: Optional[DBStorageBackendConfigModel] = None,
+    celery_task_id: Optional[str] = None,
+    custom_error_message: Optional[str] = None,
+    initial_status: ExceptionStatus = ExceptionStatus.NEW,
+    retryable: bool = False,
+    retry_delay_seconds: Optional[int] = None,
+    commit_on_success: bool = False
+) -> Optional[DicomExceptionLog]:
+    # ... (this function's body remains the same as the last fully corrected version,
+    # as its Pylance issues were related to type hints that should now be resolved
+    # by the more specific DicomExceptionLog and DBStorageBackendConfigModel imports)
+    log = logger.bind(
+        celery_task_id=celery_task_id,
+        processing_stage_log=processing_stage.value
+    )
+    if not db:
+        log.critical("CRITICAL: No DB session provided to create_exception_log_entry")
+        return None
+
+    error_message = custom_error_message if custom_error_message else str(exc)
+    capped_error_message = error_message[:2000]
+    if exc.__traceback__: # NEW - Check if traceback exists
+        error_details_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    else: # If no traceback (e.g. exception created but not raised) provide basic info
+        error_details_str = f"{type(exc).__name__}: {exc}"
+    capped_error_details = error_details_str[:65530] if error_details_str else None
+
+    final_study_uid = study_instance_uid_str if study_instance_uid_str is not None else _safe_get_dicom_value(dataset, "StudyInstanceUID")
+    final_series_uid = series_instance_uid_str if series_instance_uid_str is not None else _safe_get_dicom_value(dataset, "SeriesInstanceUID")
+    final_sop_uid = sop_instance_uid_str if sop_instance_uid_str is not None else _safe_get_dicom_value(dataset, "SOPInstanceUID")
+
+    log_create_data = DicomExceptionLogCreate(
+        study_instance_uid=final_study_uid, # Use the resolved UID
+        series_instance_uid=final_series_uid, # Use the resolved UID
+        sop_instance_uid=final_sop_uid, # Use the resolved UID
+        patient_name=_safe_get_dicom_value(dataset, "PatientName"),
+        patient_id=_safe_get_dicom_value(dataset, "PatientID"),
+        accession_number=_safe_get_dicom_value(dataset, "AccessionNumber"),
+        modality=_safe_get_dicom_value(dataset, "Modality"),
+        processing_stage=processing_stage,
+        error_message=capped_error_message,
+        error_details=capped_error_details,
+        failed_filepath=failed_filepath,
+        original_source_type=original_source_type,
+        original_source_identifier=original_source_identifier,
+        calling_ae_title=calling_ae_title,
+        target_destination_id=target_destination_db_model.id if target_destination_db_model else None,
+        target_destination_name=target_destination_db_model.name if target_destination_db_model else None,
+        status=initial_status,
+        retry_count=0,
+        next_retry_attempt_at=None,
+        last_retry_attempt_at=None,
+        resolved_at=None,
+        resolved_by_user_id=None,
+        resolution_notes=None,
+        celery_task_id=celery_task_id,
+    )
+
+    if retryable and initial_status == ExceptionStatus.RETRY_PENDING:
+        delay = retry_delay_seconds if retry_delay_seconds is not None else settings.CELERY_TASK_RETRY_DELAY
+        log_create_data.next_retry_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        log.info("Exception marked as retryable, next attempt scheduled.", next_attempt_at=log_create_data.next_retry_attempt_at)
+
+    try:
+        db_exception_log = crud.dicom_exception_log.create(db=db, obj_in=log_create_data)
+        log.info(
+            "DicomExceptionLog entry created in DB session.",
+            exception_log_id_temp=db_exception_log.id,
+            exception_uuid_temp=db_exception_log.exception_uuid
+        )
+        if commit_on_success:
+            try:
+                db.commit()
+                log.info("DicomExceptionLog entry committed.", exception_log_id=db_exception_log.id)
+                db.refresh(db_exception_log)
+            except Exception as db_commit_err:
+                log.critical("Failed to commit DicomExceptionLog to DB after creation!", error=str(db_commit_err), exc_info=True)
+                if db.is_active:
+                    db.rollback()
+                return None
+        return db_exception_log
+    except Exception as db_exc:
+        log.critical(
+            "CRITICAL DB ERROR: Failed to create DicomExceptionLog entry in DB session.",
+            error=str(db_exc),
+            original_exception_message=error_message,
+            log_data_preview=log_create_data.model_dump(exclude_none=True, exclude_defaults=True),
             exc_info=True
         )
+        if db.is_active:
+            try:
+                db.rollback()
+            except Exception:
+                pass
         return None

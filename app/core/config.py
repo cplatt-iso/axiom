@@ -46,24 +46,27 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "dicom_processor_user"
     POSTGRES_PASSWORD: SecretStr = SecretStr("changeme")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     POSTGRES_DB: str = "dicom_processor_db"
     SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None
+
+    STALE_DATA_CLEANUP_AGE_DAYS: int = 30 # For general old data, not used yet by this task directly for files
+    STALE_RETRY_IN_PROGRESS_AGE_HOURS: int = 6 # How long before a RETRY_IN_PROGRESS is considered stuck
+    CLEANUP_BATCH_SIZE: int = 100 # How many records to process per cleanup run
+    CLEANUP_STALE_DATA_INTERVAL_HOURS: int = 24 # How often to run the cleanup task (e.g., daily)
+
+    CELERY_RESULT_BACKEND: Optional[str] = None
+    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    CELERY_TASK_MAX_RETRIES: int = 3
+    CELERY_TASK_RETRY_DELAY: int = 60
+    CELERY_WORKER_CONCURRENCY: int = 4         # Default concurrency
+    CELERY_PREFETCH_MULTIPLIER: int = 1        # Default prefetch multiplier
+    CELERY_ACKS_LATE: bool = True              # Default ack setting
+
+    EXCEPTION_RETRY_BATCH_SIZE: int = 10
+    EXCEPTION_RETRY_MAX_BACKOFF_SECONDS: int = 3600 # 1 hour
+    EXCEPTION_RETRY_INTERVAL_MINUTES: int = 5 # For Celery Beat schedule
+    EXCEPTION_MAX_RETRIES: int = CELERY_TASK_MAX_RETRIES # Defaults to Celery's max retries
+    EXCEPTION_RETRY_DELAY_SECONDS: int = CELERY_TASK_RETRY_DELAY # Defaults to Celery's base delay
 
     @field_validator("SQLALCHEMY_DATABASE_URI", mode='before')
     @classmethod
@@ -138,19 +141,12 @@ class Settings(BaseSettings):
     AI_VOCAB_CACHE_TTL_SECONDS: int = int(os.getenv("AI_VOCAB_CACHE_TTL_SECONDS", 60 * 60 * 24 * 30)) # Default 30 days
     AI_VOCAB_CACHE_KEY_PREFIX: str = os.getenv("AI_VOCAB_CACHE_KEY_PREFIX", "ax_ai_vocab")
 
-    CELERY_RESULT_BACKEND: Optional[str] = None
-    CELERY_TASK_DEFAULT_QUEUE: str = "default"
-    CELERY_TASK_MAX_RETRIES: int = 3
-    CELERY_TASK_RETRY_DELAY: int = 60
-    CELERY_WORKER_CONCURRENCY: int = 4         # Default concurrency
-    CELERY_PREFETCH_MULTIPLIER: int = 1        # Default prefetch multiplier
-    CELERY_ACKS_LATE: bool = True              # Default ack setting
-
     LISTENER_HOST: str = "0.0.0.0"
 
     DICOM_STORAGE_PATH: Path = Path("/dicom_data/incoming")
     DICOM_ERROR_PATH: Path = Path("/dicom_data/errors")
     FILESYSTEM_STORAGE_PATH: Path = Path("/dicom_data/processed")
+    DICOM_RETRY_STAGING_PATH: Path = Path("/dicom_data/retry_staging")
     TEMP_DIR: Optional[Path] = None
     DELETE_ON_SUCCESS: bool = True
     DELETE_UNMATCHED_FILES: bool = False
@@ -201,7 +197,7 @@ class Settings(BaseSettings):
         return sorted(list(combined))
 
 
-    def model_post_init(self, __context: Any) -> None:
+    def model_post_init(self, __context: Any) -> None:        
         if self.CELERY_BROKER_URL is None:
             try:
                 user = self.RABBITMQ_USER
@@ -230,7 +226,7 @@ class Settings(BaseSettings):
         elif self.CELERY_RESULT_BACKEND is None:
              logger.error("Could not build Celery Result Backend URL (Redis URL missing/invalid)")
 
-        paths_to_create = [self.DICOM_STORAGE_PATH, self.DICOM_ERROR_PATH]
+        paths_to_create = [self.DICOM_STORAGE_PATH, self.DICOM_ERROR_PATH, self.DICOM_RETRY_STAGING_PATH]
         if self.TEMP_DIR: paths_to_create.append(self.TEMP_DIR)
         for path in paths_to_create:
             if path:

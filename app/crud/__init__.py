@@ -13,3 +13,4 @@ from .crud_crosswalk import crud_crosswalk_data_source, crud_crosswalk_map
 from .crud_schedule import crud_schedule
 from .crud_google_healthcare_source import google_healthcare_source
 from .crud_ai_prompt_config import crud_ai_prompt_config
+from .crud_dicom_exception_log import dicom_exception_log

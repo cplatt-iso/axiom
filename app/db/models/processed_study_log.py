@@ -11,16 +11,17 @@ from typing import ClassVar
 from datetime import datetime
 # --- END ADDED ---
 
+from app.schemas.enums import ProcessedStudySourceType
 from app.db.base import Base # Import your Base class
 
 # Enum for source types
-class ProcessedStudySourceType(str, enum.Enum):
-    DICOMWEB = "DICOMWEB"
-    DIMSE_QR = "DIMSE_QR"
-    DIMSE_LISTENER = "DIMSE_LISTENER" # Added for C-STORE SCP input
-    STOW_RS = "STOW_RS"               # Added for STOW-RS input
-    GOOGLE_HEALTHCARE = "GOOGLE_HEALTHCARE" # Added for Google Healthcare input
-    FILE_UPLOAD = "FILE_UPLOAD" # Added for File Upload input
+#class ProcessedStudySourceType(str, enum.Enum):
+#    DICOMWEB = "DICOMWEB"
+#    DIMSE_QR = "DIMSE_QR"
+#    DIMSE_LISTENER = "DIMSE_LISTENER" # Added for C-STORE SCP input
+#    STOW_RS = "STOW_RS"               # Added for STOW-RS input
+#    GOOGLE_HEALTHCARE = "GOOGLE_HEALTHCARE" # Added for Google Healthcare input
+#    FILE_UPLOAD = "FILE_UPLOAD" # Added for File Upload input
     # Add other source types as needed
 
 class ProcessedStudyLog(Base):

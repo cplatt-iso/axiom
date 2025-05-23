@@ -17,7 +17,7 @@ from app.worker.tasks import process_dicom_file_task
 from app.worker.celery_app import app as current_celery_app
 from app import crud
 from app.db.session import SessionLocal
-from app.db.models import ProcessedStudySourceType
+from app.schemas.enums import ProcessedStudySourceType
 
 # Get logger instance (should inherit config from server.py)
 logger = structlog.get_logger("dicom_listener.handlers")

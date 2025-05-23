@@ -14,7 +14,8 @@ from celery import shared_task
 from app.db.session import SessionLocal
 from app import crud
 from app.services.storage_backends.google_healthcare import GoogleHealthcareDicomStoreStorage, StorageBackendError
-from app.db.models.processed_study_log import ProcessedStudySourceType, ProcessedStudyLog
+from app.db.models.processed_study_log import ProcessedStudyLog
+from app.schemas.enums import ProcessedStudySourceType
 from app.db.models.google_healthcare_source import GoogleHealthcareSource
 from app.worker.tasks import process_google_healthcare_metadata_task
 

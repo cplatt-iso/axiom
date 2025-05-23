@@ -2,9 +2,9 @@
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, Text, JSON, Integer, ForeignKey # Added ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship, validates # Added validates
-from sqlalchemy.sql import expression # Added expression
+from sqlalchemy import String, Boolean, Text, JSON, Integer, ForeignKey 
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates 
+from sqlalchemy.sql import expression 
 
 # Import Base and the centrally defined association table
 from app.db.base import Base, rule_destination_association
@@ -27,9 +27,6 @@ class StorageBackendConfig(Base):
     __tablename__ = "storage_backend_configs" # type: ignore # Keep the same table name
 
     # --- Common Fields ---
-    # Ensure primary key is defined here or inherited correctly from Base
-    # If Base doesn't define id, uncomment the next line:
-    # id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(
         String(100), unique=True, index=True, nullable=False,
         comment="Unique, user-friendly name for this storage backend configuration."
@@ -48,7 +45,6 @@ class StorageBackendConfig(Base):
     )
 
     # Relationship to Rules (remains on the base class)
-    # Ensure "Rule" is correctly defined or use forward reference if needed
     rules: Mapped[List["Rule"]] = relationship(
         "Rule",
         secondary=rule_destination_association,
@@ -57,19 +53,17 @@ class StorageBackendConfig(Base):
 
     # --- SQLAlchemy Inheritance Configuration ---
     __mapper_args__ = {
-        "polymorphic_identity": "storage_backend_config", # Identity of the base class (optional but good practice)
-        "polymorphic_on": backend_type, # Column used to determine the subclass
+        "polymorphic_identity": "storage_backend_config", 
+        "polymorphic_on": backend_type, 
     }
 
     @validates('backend_type')
     def validate_backend_type(self, key, value):
         if value not in ALLOWED_BACKEND_TYPES:
-             # This validation helps at the Python level but doesn't add a DB constraint
             raise ValueError(f"Invalid backend_type '{value}'. Allowed types: {ALLOWED_BACKEND_TYPES}")
         return value
 
     def __repr__(self):
-        # Use self.__class__.__name__ to show the actual subclass name
         return (f"<{self.__class__.__name__}(id={self.id}, name='{self.name}', "
                 f"type='{self.backend_type}', enabled={self.is_enabled})>")
 
@@ -78,15 +72,11 @@ class StorageBackendConfig(Base):
 
 class FileSystemBackendConfig(StorageBackendConfig):
     """Configuration for Filesystem storage backend."""
-    # Inherits fields from StorageBackendConfig
     path: Mapped[str] = mapped_column(
-        String(512), nullable=True, # Nullable because it only applies to this type
+        String(512), nullable=True, 
         comment="Path to the directory for storing files."
     )
-
-    __mapper_args__ = {
-        "polymorphic_identity": "filesystem", # Value in 'backend_type' column for this subclass
-    }
+    __mapper_args__ = {"polymorphic_identity": "filesystem"}
     __table_args__ = {'extend_existing': True}
 
 class GcsBackendConfig(StorageBackendConfig):
@@ -99,11 +89,7 @@ class GcsBackendConfig(StorageBackendConfig):
         String(512), nullable=True,
         comment="Optional prefix (folder path) within the bucket."
     )
-    # credentials_secret_name: Mapped[Optional[str]] = mapped_column(...) # If needed later
-
-    __mapper_args__ = {
-        "polymorphic_identity": "gcs",
-    }
+    __mapper_args__ = {"polymorphic_identity": "gcs"}
     __table_args__ = {'extend_existing': True}
 
 class CStoreBackendConfig(StorageBackendConfig):
@@ -124,10 +110,8 @@ class CStoreBackendConfig(StorageBackendConfig):
         String(16), nullable=True, default="AXIOM_STORE_SCU",
         comment="AE Title OUR SCU will use when associating."
     )
-
-    # --- TLS Configuration (SCU) ---
     tls_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=True, default=False, server_default=expression.false(), # Nullable, default False
+        Boolean, nullable=True, default=False, server_default=expression.false(), 
         comment="Enable TLS for outgoing connections to the remote peer."
     )
     tls_ca_cert_secret_name: Mapped[Optional[str]] = mapped_column(
@@ -142,10 +126,7 @@ class CStoreBackendConfig(StorageBackendConfig):
         String(512), nullable=True,
         comment="Optional (for mTLS): Secret Manager resource name for OUR client private key (PEM)."
     )
-
-    __mapper_args__ = {
-        "polymorphic_identity": "cstore",
-    }
+    __mapper_args__ = {"polymorphic_identity": "cstore"}
     __table_args__ = {'extend_existing': True}
 
 class GoogleHealthcareBackendConfig(StorageBackendConfig):
@@ -154,11 +135,7 @@ class GoogleHealthcareBackendConfig(StorageBackendConfig):
     gcp_location: Mapped[str] = mapped_column(String(100), nullable=True)
     gcp_dataset_id: Mapped[str] = mapped_column(String(100), nullable=True)
     gcp_dicom_store_id: Mapped[str] = mapped_column(String(100), nullable=True)
-    # credentials_secret_name: Mapped[Optional[str]] = mapped_column(...) # If needed later
-
-    __mapper_args__ = {
-        "polymorphic_identity": "google_healthcare",
-    }
+    __mapper_args__ = {"polymorphic_identity": "google_healthcare"}
     __table_args__ = {'extend_existing': True}
 
 class StowRsBackendConfig(StorageBackendConfig):
@@ -167,27 +144,40 @@ class StowRsBackendConfig(StorageBackendConfig):
         String(512), nullable=True,
         comment="Base URL of the STOW-RS service (e.g., https://dicom.server.com/dicomweb)."
     )
-    username_secret_name: Mapped[Optional[str]] = mapped_column( # ADDED
-        String(512), nullable=True,
-        comment="Optional: Secret Manager resource name for the STOW-RS username."
+    
+    # --- NEW/UPDATED STOW-RS Authentication Fields ---
+    auth_type: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, # Stores "none", "basic", "bearer", "apikey"
+        comment="Authentication type for the STOW-RS endpoint."
     )
-    password_secret_name: Mapped[Optional[str]] = mapped_column( # ADDED
+    basic_auth_username_secret_name: Mapped[Optional[str]] = mapped_column(
         String(512), nullable=True,
-        comment="Optional: Secret Manager resource name for the STOW-RS password."
+        comment="GCP Secret Manager name for Basic Auth username. Required if auth_type is 'basic'."
     )
-    tls_ca_cert_secret_name: Mapped[Optional[str]] = mapped_column( # ADDED
+    basic_auth_password_secret_name: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True,
+        comment="GCP Secret Manager name for Basic Auth password. Required if auth_type is 'basic'."
+    )
+    bearer_token_secret_name: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True,
+        comment="GCP Secret Manager name for Bearer token. Required if auth_type is 'bearer'."
+    )
+    api_key_secret_name: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True,
+        comment="GCP Secret Manager name for the API key. Required if auth_type is 'apikey'."
+    )
+    api_key_header_name_override: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, # Standard HTTP header names are not excessively long
+        comment="Header name for the API key (e.g., 'X-API-Key'). Required if auth_type is 'apikey'."
+    )
+    # --- End NEW/UPDATED STOW-RS Authentication Fields ---
+
+    tls_ca_cert_secret_name: Mapped[Optional[str]] = mapped_column( # This one was already present in your provided context
         String(512), nullable=True,
         comment="Optional: Secret Manager resource name for a custom CA certificate (PEM) to verify the STOW-RS server."
     )
-    # auth_type: Mapped[Optional[str]] = mapped_column(...) # e.g., 'none', 'basic', 'oauth'
-    # credentials_secret_name: Mapped[Optional[str]] = mapped_column(...) # For API keys, tokens etc.
 
     __mapper_args__ = {
         "polymorphic_identity": "stow_rs",
     }
     __table_args__ = {'extend_existing': True}
-
-# --- IMPORTANT ---
-# Ensure your app.db.base.Base class correctly defines id, created_at, updated_at
-# or adjust the subclasses if they need to define these explicitly.
-# Also ensure the "Rule" relationship target is correct.
