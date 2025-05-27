@@ -12,13 +12,17 @@ from sqlalchemy.orm import Session
 
 # Corrected imports for crud, schemas, and models
 from app import crud # Assuming app.crud is set up via app/crud/__init__.py
-from app.db import models # <--- CORRECTED: Import models from app.db
+from app.db import models 
 from app.api import deps
 # Import specific schemas directly
-from app.schemas.dicom_exception_log import ( # <--- CORRECTED: Direct schema imports
+from app.schemas.dicom_exception_log import ( 
     DicomExceptionLogListResponse,
     DicomExceptionLogRead,
-    DicomExceptionLogUpdate
+    DicomExceptionLogUpdate,
+    DicomExceptionBulkActionRequest,
+    BulkActionResponse,
+    BulkActionSetStatusPayload, # For type checking payload
+    BulkActionRequeueRetryablePayload
 )
 from app.schemas.enums import ExceptionStatus, ExceptionProcessingStage, ProcessedStudySourceType
 
@@ -157,3 +161,121 @@ def update_dicom_exception(
 
     updated_exception = crud.dicom_exception_log.update(db, db_obj=db_exception, obj_in=update_data)
     return updated_exception
+
+@router.post(
+    "/bulk-actions",
+    response_model=BulkActionResponse,
+    summary="Perform Bulk Actions on DICOM Processing Exceptions",
+    dependencies=[Depends(deps.get_current_active_user)] # Ensure user is authenticated
+)
+def bulk_dicom_exception_actions(
+    request: DicomExceptionBulkActionRequest,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_active_user) # Get current user for logging/audit
+) -> Any:
+    logger.info("Bulk action request received.", action_type=request.action_type, scope=request.scope.model_dump_json())
+
+    # Validate scope: at least one scope identifier must be present
+    if not (request.scope.study_instance_uid or request.scope.series_instance_uid or request.scope.exception_uuids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid scope: Must provide study_instance_uid, series_instance_uid, or a list of exception_uuids."
+        )
+
+    # Fetch the exception logs based on the scope
+    # Pass current_user.id if your CRUD method uses it for permissions, etc.
+    exception_logs = crud.dicom_exception_log.get_many_by_scope(db, scope=request.scope)
+
+    if not exception_logs:
+        return BulkActionResponse(
+            action_type=request.action_type,
+            processed_count=0,
+            successful_count=0,
+            failed_count=0,
+            message="No matching exception logs found for the given scope."
+        )
+
+    processed_count = len(exception_logs)
+    log_ids_to_update = [log.id for log in exception_logs]
+    successful_count = 0
+    action_details = [] # For specific messages, e.g., per-item failures if not batch DB update
+    eligible_log_ids_for_requeue: List[int] = [] # Initialize here
+
+    if request.action_type == "SET_STATUS":
+        if not isinstance(request.payload, BulkActionSetStatusPayload):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid payload for SET_STATUS action.")
+        
+        payload: BulkActionSetStatusPayload = request.payload
+        
+        # Determine if file cleanup should happen based on settings and new status
+        # Example: settings.CLEANUP_STAGED_FILES_ON_BULK_RESOLVE (you'd add this to config)
+        # For now, let's assume true if status is RESOLVED/ARCHIVED
+        should_cleanup_files = payload.new_status in [ExceptionStatus.RESOLVED_MANUALLY, ExceptionStatus.RESOLVED_BY_RETRY, ExceptionStatus.ARCHIVED]
+
+        successful_count = crud.dicom_exception_log.bulk_update_status(
+            db=db,
+            exception_log_ids=log_ids_to_update,
+            new_status=payload.new_status,
+            resolution_notes=payload.resolution_notes,
+            resolved_by_user_id=current_user.id if payload.new_status == ExceptionStatus.RESOLVED_MANUALLY else None,
+            clear_next_retry_attempt_at=payload.clear_next_retry_attempt_at if payload.clear_next_retry_attempt_at is not None else False,
+            cleanup_staged_files_on_resolve=should_cleanup_files
+        )
+        action_details.append(f"Attempted to set status to '{payload.new_status.value}' for {processed_count} logs.")
+
+    elif request.action_type == "REQUEUE_RETRYABLE":
+        # For REQUEUE_RETRYABLE, we effectively set status to RETRY_PENDING
+        # and nullify next_retry_attempt_at.
+        # We can also add more sophisticated filtering here if needed (e.g., only re-queue if not FAILED_PERMANENTLY)
+        # The CRUD method handles this logic for RETRY_PENDING.
+        
+        # Filter logs that are eligible for re-queue (example: not already in a terminal state)
+        eligible_log_ids_for_requeue = [
+            log.id for log in exception_logs 
+            if log.status not in [
+                ExceptionStatus.FAILED_PERMANENTLY, 
+                ExceptionStatus.ARCHIVED,
+                ExceptionStatus.RESOLVED_MANUALLY,
+                ExceptionStatus.RESOLVED_BY_RETRY
+            ]
+        ]
+        
+        if not eligible_log_ids_for_requeue:
+            return BulkActionResponse(
+                action_type=request.action_type,
+                processed_count=processed_count, # Total logs in scope
+                successful_count=0, # None were eligible/updated
+                failed_count=0,
+                message="No logs eligible for re-queue in the given scope (e.g., all are already resolved/failed)."
+            )
+
+        successful_count = crud.dicom_exception_log.bulk_update_status(
+            db=db,
+            exception_log_ids=eligible_log_ids_for_requeue,
+            new_status=ExceptionStatus.RETRY_PENDING,
+            clear_next_retry_attempt_at=True,
+            # No specific resolution notes or resolver for re-queue typically
+        )
+        action_details.append(f"Attempted to re-queue {len(eligible_log_ids_for_requeue)} eligible logs (out of {processed_count} in scope).")
+
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported bulk action_type: {request.action_type}")
+
+    # Commit changes after all operations for the request are queued with SQLAlchemy
+    try:
+        db.commit()
+        logger.info("Bulk action committed.", action_type=request.action_type, successful_count=successful_count, processed_count=processed_count)
+    except Exception as e:
+        db.rollback()
+        logger.error("Error during bulk action commit, rolled back.", exc_info=True, action_type=request.action_type)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error during bulk action: {str(e)}")
+
+
+    return BulkActionResponse(
+        action_type=request.action_type,
+        processed_count=processed_count, # Total items identified by scope
+        successful_count=successful_count, # Actual items updated by CRUD
+        failed_count= (len(log_ids_to_update) if request.action_type == "SET_STATUS" else len(eligible_log_ids_for_requeue) if request.action_type == "REQUEUE_RETRYABLE" else processed_count) - successful_count,
+        message=f"Bulk action '{request.action_type}' processed.",
+        details=action_details
+    )

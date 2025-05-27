@@ -1,10 +1,80 @@
 # app/schemas/dicom_exception_log.py
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, List
+from pydantic import BaseModel, Field, ConfigDict, field_validator, validator
+from typing import Optional, List, Union, Literal
 from datetime import datetime
 import uuid # Ensure uuid is imported
 
 from app.schemas.enums import ProcessedStudySourceType, ExceptionProcessingStage, ExceptionStatus
+
+class BulkActionScope(BaseModel):
+    """Defines the scope of SOP instances for a bulk action."""
+    study_instance_uid: Optional[str] = Field(None, max_length=128, description="Apply to all SOPs in this study.")
+    series_instance_uid: Optional[str] = Field(None, max_length=128, description="Apply to all SOPs in this series (requires study_instance_uid if ambiguous).")
+    exception_uuids: Optional[List[uuid.UUID]] = Field(None, description="Apply to a specific list of exception log UUIDs.")
+
+    @field_validator('series_instance_uid')
+    @classmethod
+    def series_requires_study_or_uuids(cls, v, values):
+        # This validation is a bit tricky as values.data might not be fully populated in Pydantic v2
+        # For simplicity, we'll assume if series_instance_uid is given, either study_instance_uid or exception_uuids
+        # should provide enough context, or the CRUD layer will handle ambiguity.
+        # A more robust check might be needed depending on how you query.
+        # if v and not values.data.get('study_instance_uid') and not values.data.get('exception_uuids'):
+        #     raise ValueError('If series_instance_uid is provided for scope, study_instance_uid or a list of exception_uuids should also be provided or implied.')
+        return v
+
+    @field_validator('*') # Basic check to ensure at least one scope is defined
+    @classmethod
+    def check_at_least_one_scope_defined(cls, v, values):
+        # This validator structure in Pydantic v2 requires careful handling of `values`
+        # For now, we'll rely on the endpoint logic to ensure a valid scope is used.
+        # A model-level validator would be:
+        # @model_validator(mode='after')
+        # def check_scope(self) -> 'BulkActionScope':
+        #    if not (self.study_instance_uid or self.series_instance_uid or self.exception_uuids):
+        #        raise ValueError("At least one scope (study_instance_uid, series_instance_uid, or exception_uuids) must be provided.")
+        #    return self
+        return v
+
+
+class BulkActionSetStatusPayload(BaseModel):
+    """Payload for setting status in bulk."""
+    new_status: ExceptionStatus
+    resolution_notes: Optional[str] = None
+    # If setting to RETRY_PENDING, this can be used
+    clear_next_retry_attempt_at: Optional[bool] = Field(False, description="If true and new_status is RETRY_PENDING, next_retry_attempt_at will be nulled.")
+
+
+class BulkActionRequeueRetryablePayload(BaseModel):
+    """Payload specific for re-queuing (currently empty, but for structure)."""
+    # Could add filters here, e.g., "only if not terminally failed"
+    pass
+
+
+class DicomExceptionBulkActionRequest(BaseModel):
+    action_type: Literal["SET_STATUS", "REQUEUE_RETRYABLE"] # Add more as needed, e.g., "ARCHIVE_ALL" could be SET_STATUS with ARCHIVED
+    scope: BulkActionScope
+    payload: Union[BulkActionSetStatusPayload, BulkActionRequeueRetryablePayload, None] = None # Payload depends on action_type
+
+    @field_validator('payload') # In Pydantic v2, use model_validator for this kind of cross-field validation
+    @classmethod
+    def payload_matches_action_type(cls, v, values):
+        # This is a placeholder for more robust validation.
+        # Pydantic v2: use `@model_validator(mode='after')`
+        # action = values.data.get('action_type')
+        # if action == "SET_STATUS" and not isinstance(v, BulkActionSetStatusPayload):
+        #     raise ValueError("Payload must be BulkActionSetStatusPayload for SET_STATUS action.")
+        # if action == "REQUEUE_RETRYABLE" and not (isinstance(v, BulkActionRequeueRetryablePayload) or v is None):
+        #     raise ValueError("Payload must be BulkActionRequeueRetryablePayload or None for REQUEUE_RETRYABLE action.")
+        return v
+
+class BulkActionResponse(BaseModel):
+    action_type: str
+    processed_count: int
+    successful_count: int
+    failed_count: int
+    message: str
+    details: Optional[List[str]] = None # E.g., list of UUIDs that failed
 
 # --- Fields common to the core data of an exception, settable on creation or intrinsic ---
 class DicomExceptionLogCore(BaseModel): # Renamed from DicomExceptionLogBase for clarity

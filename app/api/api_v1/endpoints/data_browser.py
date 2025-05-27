@@ -1,6 +1,6 @@
 # backend/app/api/api_v1/endpoints/data_browser.py
 
-from typing import Any, List, Literal
+from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ from app.db import models # Import models module explicitly
 
 from app.api import deps
 from app.services import data_browser_service
-from app.schemas.data_browser import DataBrowserQueryResponse, DataBrowserQueryRequest, QueryLevel
+from app.schemas.data_browser import DataBrowserQueryResponse, DataBrowserQueryRequest, QueryLevel, DataBrowserQueryParam # Added DataBrowserQueryParam
 
 router = APIRouter()
 
@@ -49,12 +49,18 @@ async def run_data_browser_query(
 
     try:
         log.info("Received data browser query request")
-        # This line assumes data_browser_service.execute_query is defined.
-        response = await data_browser_service.execute_query( # type: ignore
+
+        # The service's execute_query expects List[DataBrowserQueryParam],
+        # and its internal helpers _build_qido_params/_build_find_identifier
+        # also expect List[DataBrowserQueryParam].
+        # So, we pass query_request.query_parameters directly.
+        # The transformation to Dict[str, Any] was incorrect for the current service signature.
+
+        response = await data_browser_service.execute_query(
             db=db,
             source_id=query_request.source_id,
             source_type=query_request.source_type,
-            query_params=query_request.query_parameters,
+            query_params=query_request.query_parameters, # MODIFIED: Pass the list directly
             query_level=query_request.query_level or QueryLevel.STUDY
         )
         log.info("Data browser query execution finished in service")
