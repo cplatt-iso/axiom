@@ -3,7 +3,7 @@ import logging
 import structlog
 from pathlib import Path
 import uuid
-from typing import List, Optional, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone # <--- CORRECTED: Added timezone import
 from app.core.config import settings
 
@@ -25,6 +25,7 @@ from app.schemas.dicom_exception_log import (
     BulkActionRequeueRetryablePayload
 )
 from app.schemas.enums import ExceptionStatus, ExceptionProcessingStage, ProcessedStudySourceType
+from app.worker.tasks import retry_pending_exceptions_task 
 
 log_level_str = getattr(settings, 'LOG_LEVEL', "INFO").upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
@@ -279,3 +280,45 @@ def bulk_dicom_exception_actions(
         message=f"Bulk action '{request.action_type}' processed.",
         details=action_details
     )
+
+@router.post(
+    "/trigger-retry-cycle",
+    summary="Manually Trigger a DICOM Exception Retry Cycle",
+    status_code=status.HTTP_202_ACCEPTED, # 202 Accepted is good for async task submissions
+    dependencies=[Depends(deps.get_current_active_superuser)] # Or get_current_active_user if non-admins can trigger
+)
+def trigger_exception_retry_cycle(
+    # No body needed for this request, it's just a trigger
+    current_user: models.User = Depends(deps.get_current_active_user) 
+) -> Dict[str, str]:
+    """
+    Manually initiates a Celery task to process pending DICOM exceptions.
+    This is the same task that runs on a schedule.
+    """
+    try:
+        # Enqueue the Celery task
+        # .delay() is a shortcut for .apply_async()
+        task_result = retry_pending_exceptions_task.delay()  # type: ignore[operator]
+        
+        logger.info(
+            "Manual DICOM exception retry cycle triggered by user.", 
+            user_id=current_user.id, 
+            user_email=current_user.email,
+            celery_task_id=task_result.id
+        )
+        return {
+            "message": "DICOM exception retry cycle initiated.",
+            "celery_task_id": task_result.id
+        }
+    except Exception as e:
+        logger.error(
+            "Failed to trigger manual DICOM exception retry cycle.",
+            user_id=current_user.id,
+            user_email=current_user.email,
+            error=str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enqueue exception retry task: {str(e)}"
+        )
