@@ -36,7 +36,9 @@ services:
         fluentd-max-retries: "60"
 
   rabbitmq:
-    image: rabbitmq # Use specific version with management UI
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq
     container_name: dicom_processor_rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
@@ -44,7 +46,7 @@ services:
       # RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
     ports:
       - "${RABBITMQ_PORT:-5672}:5672"   # AMQP port
-      - "15672:15672" # Management UI port
+      - "15672:15672" 
     healthcheck:
         test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
         interval: 10s
@@ -53,6 +55,7 @@ services:
         start_period: 10s
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq/
+    #  - ./my-rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
     restart: unless-stopped
     networks:
       - default

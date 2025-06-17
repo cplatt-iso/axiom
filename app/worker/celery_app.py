@@ -184,12 +184,12 @@ app.conf.update(
     result_serializer='json',
     timezone='UTC',
     enable_utc=True,
-    worker_concurrency=settings.CELERY_WORKER_CONCURRENCY, # Use setting
-    worker_prefetch_multiplier=settings.CELERY_PREFETCH_MULTIPLIER, # Use setting
-    task_acks_late=settings.CELERY_ACKS_LATE, # Use setting
-    task_default_queue = settings.CELERY_TASK_DEFAULT_QUEUE,
+    worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,  # Use setting
+    worker_prefetch_multiplier=settings.CELERY_PREFETCH_MULTIPLIER,  # Use setting
+    task_acks_late=settings.CELERY_ACKS_LATE,  # Use setting
+    task_default_queue=settings.CELERY_TASK_DEFAULT_QUEUE,
     # Important: Tell Celery not to mess with our root logger configuration
-    worker_hijack_root_logger=False, # Keep this!
+    worker_hijack_root_logger=False,  # Keep this!
 )
 
 # --- Beat Schedule ---

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "DEBUG"
 
-    SECRET_KEY: SecretStr = SecretStr("09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
+    SECRET_KEY: SecretStr
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
     ALGORITHM: str = "HS256"
     SECRET_CACHE_MAX_SIZE: int = int(os.getenv("SECRET_CACHE_MAX_SIZE", 100))
@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp/axiom-flow-gcs-key.json")
     VERTEX_AI_PROJECT: Optional[str] = None # Your GCP Project ID
     VERTEX_AI_LOCATION: Optional[str] = "us-central1" # Default, but make configurable
-    VERTEX_AI_MODEL_NAME: str = "gemini-2.5-flash-preview-04-17" # Or gemini-1.0-pro, etc.
+    VERTEX_AI_MODEL_NAME: str = "gemini-2.5-flash-preview-05-20" # Or gemini-1.0-pro, etc.
     VERTEX_AI_CREDENTIALS_SECRET_ID: Optional[str] = None # Optional: GCP Secret Manager ID for Service Account JSON key
     VERTEX_AI_CREDENTIALS_JSON_PATH: Optional[str] = None # Optional: Path to local Service Account JSON key file (less secure, useful for local dev)
     VERTEX_AI_MAX_OUTPUT_TOKENS_VOCAB: int = 150
@@ -233,7 +233,7 @@ class Settings(BaseSettings):
                 try: path.mkdir(parents=True, exist_ok=True); logger.debug(f"Ensured directory exists: {path}")
                 except Exception as e: logger.error(f"Error creating directory {path}: {e}")
 
-settings = Settings()
+settings = Settings() # type: ignore[call-arg]
 
 # ... (rest of the logging remains the same) ...
 logger.info("--- Axiom Flow Configuration Loaded ---")
@@ -252,4 +252,4 @@ logger.info(f"DIMSE Q/R Max Sources: {settings.DIMSE_QR_POLLER_MAX_SOURCES}") # 
 logger.info(f"Vertex AI Configured: {'Yes' if settings.VERTEX_AI_PROJECT else 'No'}")
 logger.info(f"AI Invocation Counting Enabled: {settings.AI_INVOCATION_COUNTER_ENABLED}")
 logger.info("---------------------------------------")
- 
+

@@ -235,3 +235,4 @@ Thumbs.db
 venv/
 orthanc/
 axiom-flow-gcs-key.json
+my-rabbitmq.conf

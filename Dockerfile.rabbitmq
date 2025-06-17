@@ -1,0 +1,16 @@
+# Use the official RabbitMQ management image as a base
+FROM rabbitmq 
+# Or whatever specific version tag you prefer, e.g., rabbitmq:3.12-management-alpine
+
+# Enable the management plugin by default
+# This command runs when the image is built.
+RUN rabbitmq-plugins enable rabbitmq_management
+
+# Optional: If you also need to ensure guest user can connect from non-loopback for AMQP/Management
+# AND you don't want to manage a rabbitmq.conf for just this one setting,
+# you could copy a pre-configured rabbitmq.conf or enabled_plugins file.
+# For example, if you also want loopback_users = none:
+# COPY rabbitmq.conf /etc/rabbitmq/rabbitmq.conf
+# (You'd need to have a rabbitmq.conf file with "loopback_users = none" next to your Dockerfile)
+
+# The default entrypoint and cmd from the base image will still be used.

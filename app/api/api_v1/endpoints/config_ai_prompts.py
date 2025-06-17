@@ -234,7 +234,7 @@ def get_vertex_generative_models_placeholder() -> List[Dict[str, str]]:
     """
     logger.debug("Using placeholder list for available Vertex AI models.")
     return [
-        {"id": "gemini-2.5-flash-preview-04-17", "display_name": "Gemini 2.5 Flash Preview", "description": "Gemini 2.5 models are thinking models, capable of reasoning through their thoughts before responding, resulting in enhanced performance and improved accuracy."},
+        {"id": "gemini-2.5-flash-preview-05-20", "display_name": "Gemini 2.5 Flash Preview", "description": "Gemini 2.5 models are thinking models, capable of reasoning through their thoughts before responding, resulting in enhanced performance and improved accuracy."},
         {"id": "gemini-2.0-flash-001 ", "display_name": "Gemini 2.0 Flash", "description": "Gemini 2.0 Flash is a workhorse model that delivers strong overall performance and provides low-latency support for real-time streaming."},
         {"id": "gemini-1.5-pro-001", "display_name": "Gemini 1.5 Pro", "description": "Next generation model that achieves Pro-level quality at a lower cost than 1.0 Pro, with improved instruction following, editing, and more."},
         {"id": "gemini-1.0-pro-002", "display_name": "Gemini 1.0 Pro", "description": "Mid-size multimodal model, performs well at a variety of multimodal tasks."},
