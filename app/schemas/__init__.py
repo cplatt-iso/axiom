@@ -163,6 +163,14 @@ from .ai_prompt_config import (
     AIPromptConfigSummary,
     AIPromptConfigInDBBase 
 )
+
+from .imaging_order import (
+    ImagingOrderBase,               # Read model
+    ImagingOrderCreate,        # Create model
+    ImagingOrderUpdate,        # Update model
+    OrderStatus,               # Enum for order status
+    ImagingOrderRead
+)
 # --- Data Browser Schemas (if defined) ---
 # from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
 
@@ -214,4 +222,9 @@ __all__ = [
     "AIPromptConfigRead",
     "AIPromptConfigSummary",
     "AIPromptConfigInDBBase",
+    "ImagingOrderBase",               # Read model
+    "ImagingOrderCreate",        # Create model
+    "ImagingOrderUpdate",    
+    "ImagingOrderRead",    # Update model
+    "OrderStatus", 
 ]

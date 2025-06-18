@@ -99,6 +99,7 @@ services:
       - .env
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+      - PYTHONPATH=/app
     depends_on:
       db:
         condition: service_healthy
@@ -111,6 +112,7 @@ services:
     volumes:
       - ./app:/app/app # Mount code for reload
       - ./alembic.ini:/app/alembic.ini
+      - ./pytest.ini:/app/pytest.ini
       - ./alembic:/app/alembic
       # Read-only mounts for data directories if API needs to read them
       - dicom_incoming:/dicom_data/incoming:ro
@@ -274,6 +276,27 @@ services:
       - dicom_incoming:/dicom_data/incoming
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
     restart: unless-stopped
+
+  mllp-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -u app/services/mllp_listener.py
+    container_name: axiom-mllp-listener
+    ports:
+      - "2575:2575" # Standard MLLP port
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - default
+      - shared # Added shared for potential external access/consistency
 
 # --- Volumes ---
 # Defines named volumes used by services in THIS compose file

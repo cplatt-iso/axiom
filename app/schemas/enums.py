@@ -40,3 +40,11 @@ class ExceptionStatus(str, enum.Enum):
     RESOLVED_MANUALLY = "RESOLVED_MANUALLY"  # Resolved by manual action (e.g., UI intervention, data correction)
     FAILED_PERMANENTLY = "FAILED_PERMANENTLY" # All retry attempts exhausted, or deemed unresolvable
     ARCHIVED = "ARCHIVED"                    # Exception record is archived, no longer active
+
+class OrderStatus(str, enum.Enum):
+    SCHEDULED = "SCHEDULED"
+    IN_PROGRESS = "IN_PROGRESS"
+    CANCELED = "CANCELED"
+    COMPLETED = "COMPLETED"
+    DISCONTINUED = "DISCONTINUED" # Different from canceled
+    UNKNOWN = "UNKNOWN"
