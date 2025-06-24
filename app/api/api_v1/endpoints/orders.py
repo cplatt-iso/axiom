@@ -1,7 +1,8 @@
 # backend/app/api/api_v1/endpoints/orders.py
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import models
@@ -10,25 +11,33 @@ from app.api import deps
 
 router = APIRouter()
 
-@router.get("/", response_model=List[schemas.ImagingOrderRead])
+@router.get("/", response_model=schemas.ImagingOrderReadResponse)
 def read_imaging_orders(
     db: Session = Depends(deps.get_db),
+    # --- Look at these beautiful, functional parameters! ---
     skip: int = 0,
     limit: int = 100,
-    accession_number: Optional[str] = None,
-    # TODO: Add more filters like patient_id, modality, date range etc.
-    current_user: models.User = Depends(deps.get_current_active_user), # Secure the endpoint
+    search: Optional[str] = None,
+    modalities: Optional[List[str]] = Query(None, description="List of modalities to filter by."),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    current_user: models.User = Depends(deps.get_current_active_user),
 ):
     """
-    Retrieve imaging orders.
+    Retrieve imaging orders with robust filtering, searching, and pagination.
+    This is the primary endpoint for the Orders/Worklist UI.
     """
-    # This is a shit implementation of filtering, but it's a start.
-    if accession_number:
-        order = crud.imaging_order.get_by_accession_number(db, accession_number=accession_number)
-        return [order] if order else []
+    orders, total_count = crud.imaging_order.get_orders_paginated(
+        db,
+        skip=skip,
+        limit=limit,
+        search=search,
+        modalities=modalities,
+        start_date=start_date,
+        end_date=end_date,
+    )
     
-    orders = crud.imaging_order.get_multi(db, skip=skip, limit=limit)
-    return orders
+    return {"items": orders, "total": total_count}
 
 
 @router.get("/{order_id}", response_model=schemas.ImagingOrderRead)
@@ -39,6 +48,7 @@ def read_imaging_order(
 ):
     """
     Get a specific imaging order by its database ID.
+    (This was already fine, so I'm leaving it the fuck alone.)
     """
     db_order = crud.imaging_order.get(db, id=order_id)
     if db_order is None:

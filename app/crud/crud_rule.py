@@ -50,16 +50,19 @@ def get_active_rulesets_ordered(db: Session) -> list[RuleSet]:
     )
 
 def create_ruleset(db: Session, ruleset: RuleSetCreate) -> RuleSet:
+    # Exclude 'rule_count' as it's a read-only property on the model
+    create_data = ruleset.model_dump(exclude={'rule_count'})
     try:
-        db_ruleset = RuleSet(**ruleset.model_dump())
+        db_ruleset = RuleSet(**create_data)
         db.add(db_ruleset)
         db.commit()
         db.refresh(db_ruleset)
         return db_ruleset
     except IntegrityError as e:
         db.rollback()
-        if "unique constraint" in str(e).lower() and "name" in ruleset.model_dump():
-             raise ValueError(f"RuleSet with name '{ruleset.name}' already exists.")
+        # Use create_data dict to check for name to avoid re-calling model_dump
+        if "unique constraint" in str(e).lower() and "name" in create_data:
+             raise ValueError(f"RuleSet with name '{create_data['name']}' already exists.")
         raise 
 
 def update_ruleset(db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) -> Optional[RuleSet]:
@@ -67,7 +70,8 @@ def update_ruleset(db: Session, ruleset_id: int, ruleset_update: RuleSetUpdate) 
     if not db_ruleset:
         return None
 
-    update_data = ruleset_update.model_dump(exclude_unset=True)
+    # Exclude 'rule_count' as it's a read-only property
+    update_data = ruleset_update.model_dump(exclude_unset=True, exclude={'rule_count'})
     if not update_data:
          return db_ruleset
 

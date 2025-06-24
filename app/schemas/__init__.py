@@ -169,7 +169,8 @@ from .imaging_order import (
     ImagingOrderCreate,        # Create model
     ImagingOrderUpdate,        # Update model
     OrderStatus,               # Enum for order status
-    ImagingOrderRead
+    ImagingOrderRead,
+    ImagingOrderReadResponse
 )
 # --- Data Browser Schemas (if defined) ---
 # from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
@@ -226,5 +227,6 @@ __all__ = [
     "ImagingOrderCreate",        # Create model
     "ImagingOrderUpdate",    
     "ImagingOrderRead",    # Update model
+    "ImagingOrderReadResponse",  # Assuming this is a response model for the Orders API
     "OrderStatus", 
 ]

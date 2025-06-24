@@ -5,19 +5,28 @@ import uuid
 import re
 from pathlib import Path
 from typing import Optional, Dict, Any
+from datetime import date, datetime, time
 
 # Use structlog for logging
 import structlog # type: ignore
 
 from pydicom import dcmread
 from pydicom.errors import InvalidDicomError
+from pydicom.dataset import Dataset
+# CORRECTED IMPORT: Import from the main sop_class module, not a submodule
+
 
 from app.core.config import settings
 from app.worker.tasks import process_dicom_file_task
 from app.worker.celery_app import app as current_celery_app
 from app import crud
 from app.db.session import SessionLocal
-from app.schemas.enums import ProcessedStudySourceType
+from app.schemas.enums import ProcessedStudySourceType, OrderStatus
+
+from app.crud.crud_imaging_order import imaging_order
+from app.db.models.imaging_order import ImagingOrder
+
+DMWL_SOP_CLASS_UID = "1.2.840.10008.5.1.4.31"
 
 # Get logger instance (should inherit config from server.py)
 logger = structlog.get_logger("dicom_listener.handlers")
@@ -166,3 +175,140 @@ def handle_store(event):
             try: filepath.unlink(); log.info("Cleaned up potentially partial file after error")
             except OSError as unlink_err: log.error("Could not delete file after error", error=str(unlink_err))
         return 0xA900 # Processing Failure
+
+def _parse_dicom_date_range(date_str: str) -> tuple[Optional[date], Optional[date]]:
+    """Parses a DICOM date string (YYYYMMDD or YYYYMMDD-YYYYMMDD) into start and end dates."""
+    if not date_str:
+        return None, None
+    
+    parts = date_str.split('-')
+    try:
+        start_dt = datetime.strptime(parts[0].strip(), '%Y%m%d').date()
+        if len(parts) > 1 and parts[1].strip():
+            end_dt = datetime.strptime(parts[1].strip(), '%Y%m%d').date()
+            return start_dt, end_dt
+        return start_dt, start_dt  # If only one date, the range is that single day
+    except (ValueError, IndexError):
+        logger.warn("DMWL_INVALID_DATE_FORMAT", provided_date=date_str)
+        return None, None
+
+def _imaging_order_to_dmwl_dataset(order: ImagingOrder) -> Dataset:
+    """Converts our ImagingOrder model into a pydicom Dataset for a DMWL response."""
+    ds = Dataset()
+
+    # Patient Level
+    ds.PatientName = order.patient_name
+    ds.PatientID = order.patient_id
+    if order.patient_dob:
+        # Use string conversion to ensure compatibility with date or string types
+        ds.PatientBirthDate = str(order.patient_dob).replace('-', '')
+    ds.PatientSex = order.patient_sex
+
+    # Study Level
+    ds.AccessionNumber = order.accession_number
+    ds.StudyInstanceUID = order.study_instance_uid or '' # Must not be None
+    ds.RequestingPhysician = order.requesting_physician
+    ds.ReferringPhysicianName = order.referring_physician
+    
+    # Scheduled Procedure Step Sequence (the most important part)
+    sps_item = Dataset()
+    sps_item.ScheduledStationAETitle = order.scheduled_station_ae_title
+    sps_item.ScheduledStationName = order.scheduled_station_name
+    if order.scheduled_procedure_step_start_datetime:
+        sps_item.ScheduledProcedureStepStartDate = order.scheduled_procedure_step_start_datetime.strftime('%Y%m%d')
+        sps_item.ScheduledProcedureStepStartTime = order.scheduled_procedure_step_start_datetime.strftime('%H%M%S')
+    sps_item.Modality = order.modality
+    sps_item.ScheduledPerformingPhysicianName = '' # Placeholder
+    sps_item.ScheduledProcedureStepDescription = order.requested_procedure_description
+    
+    # The sequence itself must be a list of datasets
+    ds.ScheduledProcedureStepSequence = [sps_item]
+    
+    # Required but often empty
+    ds.RequestedProcedureID = ''
+    ds.RequestedProcedureDescription = order.requested_procedure_description # Can be at top level too
+    
+    # Add the Specific Character Set
+    ds.SpecificCharacterSet = "ISO_IR 100"
+
+    return ds
+
+# --- C-FIND Handler (The new star of the show) ---
+def handle_c_find(event):
+    """Handle a C-FIND request event."""
+    log = logger.bind(
+        assoc_id=event.assoc.native_id,
+        calling_ae=event.assoc.requestor.ae_title,
+        called_ae=event.assoc.acceptor.ae_title,
+        source_ip=event.assoc.requestor.address,
+        event_type="C-FIND"
+    )
+    log.info("C_FIND_REQUEST_RECEIVED")
+
+    # CORRECTED: The SOP Class UID is in the `abstract_syntax` attribute of the context.
+    if event.context.abstract_syntax != DMWL_SOP_CLASS_UID:
+        log.warn("C_FIND_UNSUPPORTED_SOP_CLASS", sop_class=event.context.abstract_syntax)
+        # Yield success with no data for unsupported types
+        yield 0x0000, None
+        return
+
+    log.info("C_FIND_DMWL_QUERY_DETECTED")
+    query_dataset = event.identifier
+    
+    # Extract query parameters from the ScheduledProcedureStepSequence
+    # This is how a DMWL query is structured.
+    sps_query = query_dataset.ScheduledProcedureStepSequence[0]
+    
+    modality = sps_query.get("Modality", None)
+    ae_title = sps_query.get("ScheduledStationAETitle", None)
+    
+    # Extract and parse the date range
+    date_str = sps_query.get("ScheduledProcedureStepStartDate", "")
+    start_date, end_date = _parse_dicom_date_range(date_str)
+    
+    # Extract top-level patient identifiers
+    patient_name = query_dataset.get("PatientName", None)
+    patient_id = query_dataset.get("PatientID", None)
+
+    log.info(
+        "C_FIND_DMWL_QUERY_PARAMS",
+        modality=modality,
+        ae_title=ae_title,
+        date_range=date_str,
+        patient_name=patient_name,
+        patient_id=patient_id,
+    )
+    
+    db = None
+    try:
+        db = SessionLocal()
+        # Use our glorious CRUD function
+        worklist_items = imaging_order.get_worklist(
+            db,
+            modality=modality,
+            scheduled_station_ae_title=ae_title,
+            patient_name=patient_name,
+            patient_id=patient_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        log.info("C_FIND_DMWL_QUERY_FOUND_RESULTS", count=len(worklist_items))
+
+        # Yield each matching item as a Pending response
+        for item in worklist_items:
+            response_ds = _imaging_order_to_dmwl_dataset(item)
+            yield (0xFF00, response_ds) # 0xFF00 = Pending
+
+        log.info("C_FIND_DMWL_QUERY_COMPLETED")
+        # After sending all matches, send a final Success response
+        yield (0x0000, None)
+
+    except Exception as e:
+        log.error("C_FIND_DMWL_HANDLER_ERROR", error=str(e), exc_info=True)
+        # Yield a failure status
+        yield (0xA900, None) # Processing Failure
+    finally:
+        if db:
+            db.close()
+            log.debug("C_FIND_DB_SESSION_CLOSED")

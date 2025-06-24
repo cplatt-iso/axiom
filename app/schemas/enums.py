@@ -48,3 +48,11 @@ class OrderStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     DISCONTINUED = "DISCONTINUED" # Different from canceled
     UNKNOWN = "UNKNOWN"
+
+class Modality(str, enum.Enum):
+    CR = "CR"
+    CT = "CT"
+    MR = "MR"
+    US = "US"
+    XA = "XA"
+    OT = "OT" # Other

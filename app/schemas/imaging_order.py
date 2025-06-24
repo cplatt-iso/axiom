@@ -1,6 +1,6 @@
 # app/schemas/imaging_order.py
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime, date
 from .enums import OrderStatus
 
@@ -64,3 +64,8 @@ class ImagingOrderRead(ImagingOrderBase):
     order_received_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+class ImagingOrderReadResponse(BaseModel):
+    """Response model for paginated imaging orders."""
+    items: List[ImagingOrderRead]
+    total: int

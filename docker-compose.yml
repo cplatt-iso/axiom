@@ -281,7 +281,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: python -u app/services/mllp_listener.py
+    command: python -u -m app.services.mllp_listener
     container_name: axiom-mllp-listener
     ports:
       - "2575:2575" # Standard MLLP port

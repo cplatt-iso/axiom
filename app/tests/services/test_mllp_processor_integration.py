@@ -30,7 +30,7 @@ async def test_process_and_store_order_creates_new_order(db: Session):
     Tests that a new order message is correctly parsed and stored in the database.
     """
     # Act
-    await process_and_store_order(db, SAMPLE_ORM_O01_HAPPY_PATH)
+    await process_and_store_order(db, SAMPLE_ORM_O01_HAPPY_PATH, peername="test-peer")
 
     # Assert
     db_order = imaging_order.get_by_accession_number(db, accession_number="FILLER456")
@@ -46,13 +46,13 @@ async def test_process_and_store_order_updates_existing_order(db: Session):
     Tests that a message for an existing accession number updates the record.
     """
     # Arrange: Create an initial order
-    await process_and_store_order(db, SAMPLE_ORM_O01_HAPPY_PATH)
+    await process_and_store_order(db, SAMPLE_ORM_O01_HAPPY_PATH, peername="test-peer")
     
     # Create an update message (e.g., changing the procedure)
     update_message = SAMPLE_ORM_O01_HAPPY_PATH.replace("CT CHEST W/CONTRAST", "CT ABDOMEN W/O CONTRAST")
 
     # Act
-    await process_and_store_order(db, update_message)
+    await process_and_store_order(db, update_message, peername="test-peer")
 
     # Assert
     all_orders = db.query(ImagingOrder).all()
@@ -69,10 +69,10 @@ async def test_process_and_store_order_cancels_order(db: Session):
     Tests that a cancellation message correctly updates an existing order's status.
     """
     # Arrange: Create the order to be cancelled
-    await process_and_store_order(db, SAMPLE_ORM_O01_HAPPY_PATH)
+    await process_and_store_order(db, SAMPLE_ORM_O01_HAPPY_PATH, peername="test-peer")
 
     # Act: Send the cancellation message
-    await process_and_store_order(db, SAMPLE_ORM_O01_CANCEL)
+    await process_and_store_order(db, SAMPLE_ORM_O01_CANCEL, peername="test-peer")
 
     # Assert
     cancelled_order = imaging_order.get_by_accession_number(db, accession_number="FILLER456")
@@ -89,7 +89,7 @@ async def test_process_and_store_order_handles_parsing_error(db: Session):
     
     # Act: This will raise an exception inside, which should be caught and logged.
     # The function itself shouldn't raise the exception out, but handle it.
-    await process_and_store_order(db, bad_message)
+    await process_and_store_order(db, bad_message, peername="test-peer")
     
     # Assert
     count = db.query(ImagingOrder).count()

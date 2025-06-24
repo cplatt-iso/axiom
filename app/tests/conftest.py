@@ -2,52 +2,75 @@
 
 import pytest
 import os
+import pydicom
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
+from typing import Generator
+from unittest.mock import Mock, MagicMock
+import importlib
+
 from app.db.base import Base
 from app.core.config import settings
-from typing import Generator
 
-# --- THE ONE FIX TO RULE THEM ALL ---
-# Check an environment variable to determine the database host.
-# This makes the test suite work both inside and outside Docker.
-DB_HOST = "db" if os.getenv("RUNNING_IN_DOCKER") else "localhost"
-
-# Use a separate test database to be safe.
-# We append '_test' to the database name.
-user = settings.POSTGRES_USER
-password = settings.POSTGRES_PASSWORD.get_secret_value()
-db_name = f"{settings.POSTGRES_DB}_test"
-
-SQLALCHEMY_DATABASE_URL = f"postgresql+psycopg://{user}:{password}@{DB_HOST}:5432/{db_name}"
-
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
+# This fixture provides the test DB session.
 @pytest.fixture(scope="function")
 def db() -> Generator[Session, None, None]:
     """
-    Pytest fixture to provide a transactional scope around a test.
-    This fixture now connects to a separate test database and ensures all tables are created.
+    Pytest fixture that provides a test DB session to a dedicated test database,
+    and REFUSES to run against a non-test database.
     """
-    # Create all tables
+    # --- THE SAFETY CATCH ---
+    # We derive the test DB name and explicitly check it.
+    base_db_name = settings.POSTGRES_DB
+    test_db_name = f"{base_db_name}_test"
+    
+    if "_test" not in test_db_name:
+        pytest.fail(
+            "FATAL: Attempting to run tests on a database that does not end in '_test'. "
+            f"Cowardly refusing to drop tables on '{test_db_name}'. "
+            "Check your POSTGRES_DB environment variable."
+        )
+
+    db_host = "localhost" # For local testing
+    user = settings.POSTGRES_USER
+    password = settings.POSTGRES_PASSWORD.get_secret_value()
+    
+    SQLALCHEMY_DATABASE_URL = f"postgresql+psycopg://{user}:{password}@{db_host}:5432/{test_db_name}"
+    
     try:
+        engine = create_engine(SQLALCHEMY_DATABASE_URL)
         Base.metadata.create_all(bind=engine)
+        connection = engine.connect()
     except Exception as e:
-        # If the test DB doesn't exist, this might fail.
-        # A proper setup would involve a script to run `CREATE DATABASE ..._test`
-        print(f"Error creating tables, you might need to manually create the test database '{db_name}'. Error: {e}")
-        raise
+        pytest.fail(
+            f"FATAL: Could not connect to the test database '{test_db_name}'. "
+            f"Please ensure it exists and is accessible. Original error: {e}"
+        )
 
-    connection = engine.connect()
     transaction = connection.begin()
-    db_session = TestingSessionLocal(bind=connection)
-
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=connection)
+    db_session = TestingSessionLocal()
+    
     yield db_session
-
-    # After the test, rollback and drop all tables for a clean slate.
+    
     db_session.close()
     transaction.rollback()
     connection.close()
     Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture
+def mock_c_find_event() -> Mock:
+    """
+    Provides a mock pynetdicom C-FIND event object for testing handlers.
+    """
+    mock_assoc = MagicMock()
+    mock_assoc.native_id = 123
+    mock_assoc.requestor.ae_title = "TEST_MODALITY"
+    mock_assoc.requestor.address = "127.0.0.1"
+    mock_assoc.acceptor.ae_title = "TEST_SCP"
+    event = Mock()
+    event.assoc = mock_assoc
+    event.AffectedSOPClassUID = "1.2.840.10008.5.1.4.31"
+    event.identifier = pydicom.Dataset()
+    return event
