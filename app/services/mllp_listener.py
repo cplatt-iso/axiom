@@ -41,28 +41,51 @@ async def process_and_store_order(db: Session, hl7_message_str: str, peername: s
     log = logger.bind(peer=peername)
     try:
         log.info("HL7_PROCESS_START: Parsing message...")
+        # order_to_process is an ImagingOrderCreate schema object
         order_to_process = parse_orm_o01(hl7_message_str)
+
+        # Log the key identifiers we're about to use
+        placer_num = order_to_process.placer_order_number
         accn = order_to_process.accession_number
-        status = order_to_process.order_status.value
-        log = log.bind(accession_number=accn, order_status=status)
+        order_control = order_to_process.order_status # This is a bit of a misnomer, it's the mapped status
+        
+        log = log.bind(
+            placer_order_number=placer_num,
+            accession_number=accn,
+            order_status=order_control.value
+        )
         log.info("HL7_PROCESS_PARSE_SUCCESS")
-        existing_order = imaging_order.get_by_accession_number(db, accession_number=accn)
+
+        # --- THE NEW, SUPERIOR LOGIC ---
+        # First, try to find the order by its lifecycle identifier: the Placer Order Number.
+        existing_order = None
+        if placer_num is not None:
+            existing_order = imaging_order.get_by_placer_order_number(db, placer_order_number=placer_num)
+
         if existing_order:
             log.info("HL7_PROCESS_UPDATE_EXISTING", db_id=existing_order.id)
+            # Use our Pydantic schema to create a clean update payload
             update_data = ImagingOrderUpdate(**order_to_process.model_dump(exclude_unset=True))
             imaging_order.update(db, db_obj=existing_order, obj_in=update_data)
-        elif order_to_process.order_status != OrderStatus.CANCELED:
-            log.info("HL7_PROCESS_CREATE_NEW")
+        
+        # Only create a new order if it's NOT a cancel request for something we've never seen.
+        elif order_control != OrderStatus.CANCELED and order_control != OrderStatus.DISCONTINUED:
+            log.info("HL7_PROCESS_CREATE_NEW: No existing order found, creating new one.")
             imaging_order.create(db, obj_in=order_to_process)
+        
         else:
-            log.warn("HL7_PROCESS_CANCEL_IGNORED_UNKNOWN_ACCN")
+            # We received a cancel/discontinue for an order we don't have.
+            # This isn't an error, just a weird but possible race condition. Log it and move on.
+            log.warn("HL7_PROCESS_CANCEL_IGNORED_UNKNOWN_ORDER", 
+                     reason="Received a cancel/discontinue message for an unknown Placer Order Number.")
+        
         db.commit()
         log.info("HL7_PROCESS_SUCCESS: Database commit successful.")
+
     except Exception as e:
         log.error("HL7_PROCESS_FAILURE", error=str(e), exc_info=True)
         db.rollback()
-    finally:
-        log.debug("HL7_PROCESS_DB_SESSION_CLOSE")
+    
 
 
 def create_ack_message(parsed_msg: HL7apyMessage) -> HL7apyMessage:

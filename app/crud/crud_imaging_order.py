@@ -15,10 +15,18 @@ from app.schemas.enums import OrderStatus
 class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUpdate]):
     
     def get_by_accession_number(self, db: Session, *, accession_number: str) -> Optional[ImagingOrder]:
-        """
-        Retrieves an imaging order by its accession number.
-        """
+        """Retrieves an imaging order by its accession number."""
         return db.query(self.model).filter(self.model.accession_number == accession_number).first()
+
+    # --- THIS IS THE NEW WEAPON IN OUR ARSENAL ---
+    def get_by_placer_order_number(self, db: Session, *, placer_order_number: str) -> Optional[ImagingOrder]:
+        """
+        Retrieves an imaging order by its Placer Order Number (from ORC-2).
+        This is the correct way to find an existing order for updates/cancellations.
+        """
+        if not placer_order_number:
+            return None
+        return db.query(self.model).filter(self.model.placer_order_number == placer_order_number).first()
 
     def get_worklist(
         self,
