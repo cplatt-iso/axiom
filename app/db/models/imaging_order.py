@@ -1,11 +1,15 @@
 # app/db/models/imaging_order.py
 from datetime import datetime
 from sqlalchemy import String, DateTime, Date, Enum as DBEnum, Text, func, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column
-from typing import Optional
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import Optional, TYPE_CHECKING
+if TYPE_CHECKING:
+    from .user import User
 
 from app.db.base import Base
 from app.schemas.enums import OrderStatus # We'll add this enum
+
+
 
 class ImagingOrder(Base):
     __tablename__ = "imaging_orders" # type: ignore
@@ -49,6 +53,10 @@ class ImagingOrder(Base):
     source: Mapped[str] = mapped_column(String(255), comment="Identifier for the source system, e.g., 'HL7v2_MLLP_LISTENER_MAIN'")
     order_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     raw_hl7_message: Mapped[Optional[str]] = mapped_column(Text, comment="For debugging the fuck-ups.")
+
+    # Relationships
+    creator_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
+    creator: Mapped["User"] = relationship("User", back_populates="imaging_orders")
 
     def __repr__(self) -> str:
         return f"<ImagingOrder(id={self.id}, accn='{self.accession_number}', status='{self.order_status.value}')>"

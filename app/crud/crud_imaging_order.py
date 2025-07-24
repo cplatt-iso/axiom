@@ -80,6 +80,7 @@ class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUp
         limit: int = 100,
         search: Optional[str] = None,
         modalities: Optional[List[str]] = None,
+        statuses: Optional[List[str]] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
     ) -> Tuple[List[ImagingOrder], int]:
@@ -100,8 +101,12 @@ class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUp
                 )
             )
 
+
         if modalities:
             query = query.filter(self.model.modality.in_(modalities))
+
+        if statuses:
+            query = query.filter(self.model.order_status.in_(statuses))
 
         if start_date:
             start_datetime = datetime.combine(start_date, time.min)

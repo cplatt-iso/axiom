@@ -11,6 +11,8 @@ from sqlalchemy.sql import func
 from app.db.base import Base
 
 from .api_key import ApiKey
+from .imaging_order import ImagingOrder
+
 
 # Association Table for User <-> Role (Many-to-Many)
 user_role_association = Table(
@@ -84,6 +86,8 @@ class User(Base):
 
     # Relationships to other models if needed (e.g., track creator)
     # created_rulesets: Mapped[List["RuleSet"]] = relationship(back_populates="created_by_user")
+    imaging_orders: Mapped[List["ImagingOrder"]] = relationship(back_populates="creator")
+
 
     # Add table args for potential constraints if needed (e.g., ensure email or google_id is set)
     # __table_args__ = (

@@ -52,7 +52,7 @@ async def process_and_store_order(db: Session, hl7_message_str: str, peername: s
         log = log.bind(
             placer_order_number=placer_num,
             accession_number=accn,
-            order_status=order_control.value
+            order_status=getattr(order_control, "value", str(order_control))
         )
         log.info("HL7_PROCESS_PARSE_SUCCESS")
 
@@ -125,6 +125,7 @@ async def handle_hl7_client(reader, writer):
 
     try:
         while True:
+            # ... (the start of the loop is the same) ...
             char = await reader.read(1)
             if not char:
                 log.info("MLLP_CONNECTION_CLOSED_BY_PEER")
@@ -135,48 +136,54 @@ async def handle_hl7_client(reader, writer):
             buffer = await reader.readuntil(FS + CR)
             hl7_message_str = buffer.decode('utf-8', errors='ignore')
             
-            # Explicitly sanitize HL7 message
             hl7_message_str = hl7_message_str.strip('\x0b\x1c\r\n ')
             hl7_message_str = hl7_message_str.replace('\n', '\r')
             segments = [seg.strip() for seg in hl7_message_str.split('\r') if seg.strip()]
             hl7_message_str = '\r'.join(segments) + '\r'
 
-            log.debug("MLLP_RAW_MESSAGE_RECEIVED", raw=repr(buffer.decode('utf-8', errors='ignore')))
-            log.debug("HL7_CLEAN_MESSAGE", cleaned=repr(hl7_message_str))
-            log.debug("HL7_RAW_BYTES", bytes=buffer)
-            log.debug("HL7_FINAL_STRING", message=hl7_message_str)
+            # ... (some logging is the same) ...
 
             try:
-                log.debug("HL7_MESSAGE_BEFORE_PARSE", final=repr(hl7_message_str))
-
                 parsed_msg = parse_message(hl7_message_str)
 
                 if not isinstance(parsed_msg, HL7apyMessage):
                     raise ValueError("Parsed HL7 message is not a valid hl7apy Message object")
-
-                # MSH-10 (Message Control ID) is mandatory for creating a valid ACK.
-                # Safely get it, and if it's missing, we cannot proceed normally.
+                
                 control_id_field = parsed_msg.msh.msh_10
                 if not control_id_field or not control_id_field.value:
                     log.error("HL7_MESSAGE_INVALID", reason="Missing MSH-10 (Message Control ID). Cannot generate ACK or process.")
-                    # Consider sending a rejection ACK here if possible, then break.
                     break
 
                 control_id = control_id_field.value
                 log = log.bind(msg_control_id=str(control_id))
 
+                # --- THIS IS THE EXORCISM ---
+                log.info("Creating ACK message...")
                 ack_msg = create_ack_message(parsed_msg)
-                writer.write(VT + str(ack_msg).encode('utf-8') + FS + CR)
+
+                # REVEAL YOUR TRUE FORM!
+                log.warning("INSPECTING ACK OBJECT BEFORE SEND", 
+                            ack_object_type=str(type(ack_msg)), 
+                            ack_object_repr=repr(ack_msg))
+                
+                clean_ack_payload_str = ack_msg.to_er7().strip()
+                clean_ack_payload_bytes = clean_ack_payload_str.encode('utf-8')
+
+                # LOG THE FINAL PAYLOADS
+                log.warning("FINAL PAYLOADS BEFORE WRITE", 
+                            final_string=repr(clean_ack_payload_str),
+                            final_bytes=repr(clean_ack_payload_bytes))
+
+                writer.write(VT + clean_ack_payload_bytes + FS + CR)
+                # ---------------------------
+
                 await writer.drain()
                 log.info("MLLP_ACK_SENT")
 
                 asyncio.create_task(run_order_processing(hl7_message_str, str(peername)))
 
-            except ParserError as e:
-                log.error("HL7APY_PARSE_ERROR", error=str(e), message=hl7_message_str)
-                break
-
             except Exception as e:
+                # ... (error handling is the same) ...
                 log.error(
                     "MLLP_MESSAGE_PROCESSING_ERROR",
                     error_type=type(e).__name__,
@@ -186,12 +193,11 @@ async def handle_hl7_client(reader, writer):
                 )
                 break
 
+    # ... (the rest of the function is the same) ...
     except asyncio.IncompleteReadError:
         log.warning("MLLP_INCOMPLETE_READ_ERROR")
-
     except Exception as e:
         log.error("MLLP_UNEXPECTED_CONNECTION_ERROR", error=str(e), exc_info=True)
-
     finally:
         log.info("MLLP_CONNECTION_CLOSING")
         writer.close()

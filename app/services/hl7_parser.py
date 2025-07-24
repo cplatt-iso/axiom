@@ -113,6 +113,7 @@ def parse_orm_o01(hl7_message_str: str) -> ImagingOrderCreate:
     obr_fields = raw_segments.get("OBR", [])
     msh_fields = raw_segments.get("MSH", [])
     pv1_fields = raw_segments.get("PV1", [])
+    zds_fields = raw_segments.get("ZDS", [])
 
     if not pid_fields or not obr_fields or not orc_fields:
         raise ValueError("Missing required PID, ORC, or OBR segment in HL7 message")
@@ -136,6 +137,17 @@ def parse_orm_o01(hl7_message_str: str) -> ImagingOrderCreate:
     # ...and we use our new, robust function to map it to a status.
     order_status = _map_order_control_to_status(order_control_code)
 
+    # --- NEW: Extract Study Instance UID, Scheduled AE Title, and Scheduled Station Name ---
+    # ZDS-2 for Study Instance UID
+    study_instance_uid = safe_get(zds_fields, 2)
+
+    # ZDS-3 has Scheduled AE Title as the first component
+    scheduled_station_ae_title = _get_component(safe_get(zds_fields, 3), 1)
+
+    # PV1-3 has Assigned Patient Location, e.g., "RAD^R101^1^RADIOLOGY"
+    # We want the 4th component for the human-readable name.
+    scheduled_station_name = _get_component(safe_get(pv1_fields, 3), 4)
+
     # Assemble the final data payload for our database schema.
     order_data = {
         "patient_id": patient_id,
@@ -151,9 +163,9 @@ def parse_orm_o01(hl7_message_str: str) -> ImagingOrderCreate:
         "requesting_physician": _parse_person_name(safe_get(obr_fields, 16)),
         "referring_physician": _parse_person_name(safe_get(pv1_fields, 8)),
         "order_status": order_status, # The glorious result of our new logic
-        "study_instance_uid": None, 
-        "scheduled_station_ae_title": None, 
-        "scheduled_station_name": None,
+        "study_instance_uid": study_instance_uid, 
+        "scheduled_station_ae_title": scheduled_station_ae_title, 
+        "scheduled_station_name": scheduled_station_name,
         "source": f"hl7_mllp:{safe_get(msh_fields, 4, is_msh=True)}",
         "raw_hl7_message": hl7_message_str
     }

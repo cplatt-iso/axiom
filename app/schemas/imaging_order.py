@@ -17,7 +17,6 @@ class ImagingOrderBase(BaseModel):
 
     requested_procedure_description: Optional[str] = Field(None, max_length=255)
     requested_procedure_code: Optional[str] = Field(None, max_length=64)
-    modality: str = Field(..., max_length=16)
 
     scheduled_station_ae_title: Optional[str] = Field(None, max_length=16)
     scheduled_station_name: Optional[str] = Field(None, max_length=128)
@@ -26,7 +25,7 @@ class ImagingOrderBase(BaseModel):
     requesting_physician: Optional[str] = Field(None, max_length=255)
     referring_physician: Optional[str] = Field(None, max_length=255)
 
-    order_status: OrderStatus = Field(default=OrderStatus.SCHEDULED)
+    order_status: Optional[OrderStatus] = Field(default=OrderStatus.SCHEDULED)
     study_instance_uid: Optional[str] = Field(None, max_length=128, description="DICOM Study Instance UID.")
 
     source: str = Field(..., description="Source system identifier.")
@@ -34,10 +33,12 @@ class ImagingOrderBase(BaseModel):
 
 # Properties to receive on item creation
 class ImagingOrderCreate(ImagingOrderBase):
-    pass # All fields are required via Base
+    modality: str = Field(..., max_length=16)
+    study_instance_uid: Optional[str] = None
+    scheduled_station_name: Optional[str] = None
 
 # Properties to receive on item update
-class ImagingOrderUpdate(BaseModel):
+class ImagingOrderUpdate(ImagingOrderBase):
     # Almost everything is optional on an update
     patient_name: Optional[str] = None
     patient_dob: Optional[date] = None
@@ -46,7 +47,7 @@ class ImagingOrderUpdate(BaseModel):
     filler_order_number: Optional[str] = None
     requested_procedure_description: Optional[str] = None
     requested_procedure_code: Optional[str] = None
-    modality: Optional[str] = None
+    modality: Optional[str] = Field(None, max_length=16)
     scheduled_station_ae_title: Optional[str] = None
     scheduled_station_name: Optional[str] = None
     scheduled_procedure_step_start_datetime: Optional[datetime] = None
@@ -62,6 +63,7 @@ class ImagingOrderRead(ImagingOrderBase):
     created_at: datetime
     updated_at: datetime
     order_received_at: datetime
+    modality: str = Field(..., max_length=16)
 
     model_config = ConfigDict(from_attributes=True)
 

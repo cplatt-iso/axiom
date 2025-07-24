@@ -19,6 +19,7 @@ def read_imaging_orders(
     limit: int = 100,
     search: Optional[str] = None,
     modalities: Optional[List[str]] = Query(None, description="List of modalities to filter by."),
+    statuses: Optional[List[str]] = Query(None, description="List of order statuses to filter by (e.g., SCHEDULED, IN_PROGRESS, CANCELED). Repeat for multiple."),
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     current_user: models.User = Depends(deps.get_current_active_user),
@@ -33,10 +34,10 @@ def read_imaging_orders(
         limit=limit,
         search=search,
         modalities=modalities,
+        statuses=statuses,
         start_date=start_date,
         end_date=end_date,
     )
-    
     return {"items": orders, "total": total_count}
 
 
