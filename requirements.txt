@@ -10,6 +10,7 @@ attrs==25.3.0
 bcrypt==4.3.0
 billiard==4.2.1
 CacheControl==0.14.3
+aio-pika==9.4.0
 cachetools==5.5.2
 celery==5.5.2
 certifi==2025.4.26

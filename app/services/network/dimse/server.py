@@ -20,6 +20,7 @@ from pynetdicom.ae import ApplicationEntity as AE # MODIFIED
 from pynetdicom.presentation import PresentationContext, build_context, StoragePresentationContexts # MODIFIED
 from pynetdicom.sop_class import Verification # MODIFIED (was VerificationServiceClass, add type ignore) # type: ignore[attr-defined]
 from pynetdicom.sop_class import ModalityWorklistInformationFind # MODIFIED (was ModalityWorklistInformationModel, add type ignore) # type: ignore[attr-defined]
+from pynetdicom.sop_class import ModalityPerformedProcedureStep # MODIFIED (was ModalityPerformedProcedureStepServiceClass, add type ignore) # type: ignore[attr-defined]
 from pynetdicom import evt
 from pynetdicom._globals import ALL_TRANSFER_SYNTAXES # MODIFIED (as per Pylance suggestion, though typically internal)
 
@@ -29,7 +30,7 @@ from sqlalchemy import select, update as sql_update, func
 
 # Application imports
 from app.core.config import settings
-from app.services.network.dimse.handlers import handle_store, handle_echo, handle_c_find, set_current_listener_context
+from app.services.network.dimse.handlers import handle_store, handle_echo, handle_c_find, handle_n_create, handle_n_set, set_current_listener_context
 from app.db.session import SessionLocal, Session
 from app.crud import crud_dimse_listener_state, crud_dimse_listener_config
 from app.db import models
@@ -138,6 +139,7 @@ for default_context in StoragePresentationContexts:
         contexts.append(new_context)
 contexts.append(build_context(Verification, SUPPORTED_TRANSFER_SYNTAXES)) # MODIFIED: Use Verification (SOPClass instance)
 contexts.append(build_context(ModalityWorklistInformationFind, SUPPORTED_TRANSFER_SYNTAXES))
+contexts.append(build_context(ModalityPerformedProcedureStep, SUPPORTED_TRANSFER_SYNTAXES))
 
 # --- Event Handlers (Keep Existing) ---
 def log_assoc_event(event, msg_prefix):
@@ -162,6 +164,8 @@ HANDLERS = [
     (evt.EVT_C_STORE, handle_store),
     (evt.EVT_C_ECHO, handle_echo),
     (evt.EVT_C_FIND, handle_c_find),
+    (evt.EVT_N_CREATE, handle_n_create),
+    (evt.EVT_N_SET, handle_n_set),
     (evt.EVT_ACCEPTED, lambda event: log_assoc_event(event, "Association Accepted")),
     (evt.EVT_ESTABLISHED, lambda event: log_assoc_event(event, "Association Established")),
     (evt.EVT_REJECTED, lambda event: log_assoc_event(event, "Association Rejected")),

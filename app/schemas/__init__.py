@@ -1,4 +1,10 @@
-# app/schemas/__init__.py
+# --- MPPS Schemas ---
+from .mpps import (
+    MppsBase,
+    MppsCreate,
+    MppsUpdate,
+    MppsRead,
+)
 
 # --- Rule Schemas ---
 from .rule import (
@@ -172,6 +178,11 @@ from .imaging_order import (
     ImagingOrderRead,
     ImagingOrderReadResponse
 )
+from .system_setting import (
+    SystemSettingCreate,
+    SystemSettingUpdate,
+    SystemSettingRead
+)
 # --- Data Browser Schemas (if defined) ---
 # from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
 
@@ -229,4 +240,10 @@ __all__ = [
     "ImagingOrderRead",    # Update model
     "ImagingOrderReadResponse",  # Assuming this is a response model for the Orders API
     "OrderStatus", 
+    # MPPS
+    "MppsBase", "MppsCreate", "MppsUpdate", "MppsRead",
+    # System Settings
+    "SystemSettingCreate",
+    "SystemSettingUpdate",
+    "SystemSettingRead",
 ]

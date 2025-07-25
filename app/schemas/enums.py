@@ -48,6 +48,7 @@ class OrderStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     DISCONTINUED = "DISCONTINUED" # Different from canceled
     UNKNOWN = "UNKNOWN"
+    FAILED = "FAILED"
 
 class Modality(str, enum.Enum):
     CR = "CR"
@@ -56,3 +57,11 @@ class Modality(str, enum.Enum):
     US = "US"
     XA = "XA"
     OT = "OT" # Other
+
+class MppsStatus(str, enum.Enum):
+    """
+    Represents the status of a Modality Performed Procedure Step (MPPS).
+    """
+    IN_PROGRESS = "IN PROGRESS"
+    COMPLETED = "COMPLETED"
+    DISCONTINUED = "DISCONTINUED"

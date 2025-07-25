@@ -7,6 +7,7 @@ import structlog # type: ignore # <-- ADDED: Import structlog
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+import asyncio
 
 # Core Application Imports
 from app.core.config import settings # Needs LOG_LEVEL setting
@@ -219,6 +220,7 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 @app.on_event("startup")
 async def startup_event():
     """ Actions to perform on application startup. """
+    global rabbitmq_connection, sse_consumer_task
     logger.info("Application starting up...", api_root_path=app.root_path)
 
     logger.info("Checking/Creating database tables...")
@@ -235,6 +237,20 @@ async def startup_event():
         if db:
             db.close()
 
+    try:
+        logger.info("Connecting to RabbitMQ for SSE...")
+        rabbitmq_connection = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+        # Pass the connection to the dependency injection system
+        app.state.rabbitmq_connection = rabbitmq_connection
+        
+        # Start the consumer task
+        sse_consumer_task = asyncio.create_task(rabbitmq_consumer(rabbitmq_connection))
+        logger.info("RabbitMQ connection and SSE consumer started successfully.")
+    except Exception as e:
+        logger.error("Failed to connect to RabbitMQ or start SSE consumer during startup.", error=str(e), exc_info=True)
+        # Depending on requirements, you might want to exit if RabbitMQ is essential
+        # For now, we log the error and continue.
+
     logger.info("Startup complete.")
 
 
@@ -242,7 +258,18 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """ Actions to perform on application shutdown. """
+    global rabbitmq_connection, sse_consumer_task
     logger.info("Application shutting down...")
+    if sse_consumer_task and not sse_consumer_task.done():
+        sse_consumer_task.cancel()
+        try:
+            await sse_consumer_task
+        except asyncio.CancelledError:
+            logger.info("SSE consumer task successfully cancelled.")
+    if rabbitmq_connection and not rabbitmq_connection.is_closed:
+        await rabbitmq_connection.close()
+        logger.info("RabbitMQ connection closed.")
+    logger.info("Shutdown complete.")
 
 
 # --- Main execution block (for direct running with uvicorn) ---
@@ -265,3 +292,11 @@ if __name__ == "__main__":
         # Use default uvicorn access logs unless silenced above
         # use_colors=False # Might help if colors interfere with JSON
     )
+
+import aio_pika
+from aio_pika.abc import AbstractRobustConnection
+from app.events import rabbitmq_consumer, ORDERS_EXCHANGE_NAME
+
+# --- RabbitMQ Connection and SSE Consumer Task ---
+rabbitmq_connection: Optional[AbstractRobustConnection] = None
+sse_consumer_task: Optional[asyncio.Task] = None

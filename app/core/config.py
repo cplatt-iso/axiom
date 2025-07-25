@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     RABBITMQ_PASSWORD: SecretStr = SecretStr("guest")
     RABBITMQ_VHOST: str = "/"
     CELERY_BROKER_URL: Optional[str] = None
+    RABBITMQ_URL: str = "amqp://guest:guest@rabbitmq:5672/"
 
     OPENAI_API_KEY: Optional[SecretStr] = None
     OPENAI_MODEL_NAME_RULE_GEN: Optional[str] = None # Optional: Model name for OpenAI rule generation

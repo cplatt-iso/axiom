@@ -7,6 +7,7 @@ from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import jwt, JWTError
 from pydantic import ValidationError, SecretStr # Ensure SecretStr is imported for type hints if needed elsewhere
 from sqlalchemy.orm import Session
+from aio_pika.abc import AbstractRobustConnection
 
 from app.db import models
 from app import crud, schemas # Import top-level packages
@@ -242,3 +243,10 @@ def require_role(required_role: str):
         logger.debug(f"[Auth] User {current_user.id} has required role '{required_role}'. Allowing access.")
         return current_user
     return role_checker
+
+# Dependency to get the RabbitMQ connection
+async def get_rabbitmq_connection(request: Request) -> AbstractRobustConnection:
+    connection = request.app.state.rabbitmq_connection
+    if connection is None:
+        raise HTTPException(status_code=503, detail="RabbitMQ connection not available.")
+    return connection

@@ -42,6 +42,20 @@ def _parse_person_name(field_string: str) -> str:
     name_parts = [name for name in [last_name, first_name] if name]
     return ", ".join(name_parts)
 
+def _parse_hl7_address(field: str) -> Optional[str]:
+    """Parses an HL7 XAD address field into a single-line string."""
+    if not field:
+        return None
+    # Street^Other^City^State^Zip^Country -> Street, Other, City, State Zip, Country
+    parts = [_get_component(field, i) for i in [1, 2, 3, 4, 5, 6]]
+    # A more readable address format
+    street = f"{parts[0]} {parts[1]}".strip()
+    city_state_zip = f"{parts[2]}, {parts[3]} {parts[4]}".strip(", ")
+    country = parts[5]
+    
+    full_address = ", ".join(filter(None, [street, city_state_zip, country]))
+    return full_address if full_address else None
+
 # --- THE NEW, ROBUST HELPER FUNCTION ---
 def _map_order_control_to_status(order_control: str) -> OrderStatus:
     """
@@ -155,18 +169,29 @@ def parse_orm_o01(hl7_message_str: str) -> ImagingOrderCreate:
         "patient_name": _parse_person_name(safe_get(pid_fields, 5)),
         "patient_dob": _parse_hl7_date(safe_get(pid_fields, 7)),
         "patient_sex": safe_get(pid_fields, 8),
+        "patient_address": _parse_hl7_address(safe_get(pid_fields, 11)),
+        "patient_phone_number": safe_get(pid_fields, 13),
+        "patient_class": _get_component(safe_get(pv1_fields, 2)),
+        "visit_number": _get_component(safe_get(pv1_fields, 19)),
         "placer_order_number": safe_get(orc_fields, 2),
         "filler_order_number": accession_number, # Often the same as accession
+        "placer_group_number": _get_component(safe_get(orc_fields, 4)),
         "requested_procedure_description": proc_desc,
         "modality": modality_value,
         "scheduled_procedure_step_start_datetime": _parse_hl7_datetime(safe_get(obr_fields, 7)),
         "requesting_physician": _parse_person_name(safe_get(obr_fields, 16)),
         "referring_physician": _parse_person_name(safe_get(pv1_fields, 8)),
+        "attending_physician": _parse_person_name(safe_get(pv1_fields, 7)),
         "order_status": order_status, # The glorious result of our new logic
         "study_instance_uid": study_instance_uid, 
         "scheduled_station_ae_title": scheduled_station_ae_title, 
         "scheduled_station_name": scheduled_station_name,
         "source": f"hl7_mllp:{safe_get(msh_fields, 4, is_msh=True)}",
+        "source_sending_application": safe_get(msh_fields, 3, is_msh=True),
+        "source_sending_facility": safe_get(msh_fields, 4, is_msh=True),
+        "source_receiving_application": safe_get(msh_fields, 5, is_msh=True),
+        "source_receiving_facility": safe_get(msh_fields, 6, is_msh=True),
+        "source_message_control_id": safe_get(msh_fields, 10, is_msh=True),
         "raw_hl7_message": hl7_message_str
     }
 
