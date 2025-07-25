@@ -20,9 +20,19 @@ def _parse_hl7_date(hl7_date: str) -> Optional[date]:
     except (ValueError, TypeError): return None
 
 def _parse_hl7_datetime(hl7_datetime: str) -> Optional[datetime]:
-    if not hl7_datetime: return None
-    try: return datetime.strptime(hl7_datetime[:14], '%Y%m%d%H%M%S')
-    except (ValueError, TypeError): return None
+    if not hl7_datetime:
+        return None
+    # Remove 'T' if present
+    dt_str = hl7_datetime.replace('T', '')
+    # Pad time if needed
+    if len(dt_str) == 13:  # e.g., YYYYMMDDHHMM
+        dt_str += '00'
+    elif len(dt_str) == 12:  # e.g., YYYYMMDDHHMM
+        dt_str += '00'
+    try:
+        return datetime.strptime(dt_str[:14], '%Y%m%d%H%M%S')
+    except (ValueError, TypeError):
+        return None
 
 def _get_component(field_string: str, index: int = 1, default: str = "") -> str:
     """Safely gets a component from a raw field string."""
@@ -152,15 +162,17 @@ def parse_orm_o01(hl7_message_str: str) -> ImagingOrderCreate:
     order_status = _map_order_control_to_status(order_control_code)
 
     # --- NEW: Extract Study Instance UID, Scheduled AE Title, and Scheduled Station Name ---
-    # ZDS-2 for Study Instance UID
     study_instance_uid = safe_get(zds_fields, 2)
-
-    # ZDS-3 has Scheduled AE Title as the first component
     scheduled_station_ae_title = _get_component(safe_get(zds_fields, 3), 1)
-
-    # PV1-3 has Assigned Patient Location, e.g., "RAD^R101^1^RADIOLOGY"
-    # We want the 4th component for the human-readable name.
     scheduled_station_name = _get_component(safe_get(pv1_fields, 3), 4)
+
+    # --- NEW: Extract scheduled_exam_datetime from ORC-7 TQ.4 ---
+    scheduled_exam_datetime = None
+    orc_7_field = safe_get(orc_fields, 7)
+    if orc_7_field:
+        tq_components = orc_7_field.split('^')
+        if len(tq_components) >= 4:
+            scheduled_exam_datetime = _parse_hl7_datetime(tq_components[3])
 
     # Assemble the final data payload for our database schema.
     order_data = {
@@ -179,6 +191,7 @@ def parse_orm_o01(hl7_message_str: str) -> ImagingOrderCreate:
         "requested_procedure_description": proc_desc,
         "modality": modality_value,
         "scheduled_procedure_step_start_datetime": _parse_hl7_datetime(safe_get(obr_fields, 7)),
+        "scheduled_exam_datetime": scheduled_exam_datetime,
         "requesting_physician": _parse_person_name(safe_get(obr_fields, 16)),
         "referring_physician": _parse_person_name(safe_get(pv1_fields, 8)),
         "attending_physician": _parse_person_name(safe_get(pv1_fields, 7)),

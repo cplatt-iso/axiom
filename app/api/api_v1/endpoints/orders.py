@@ -63,7 +63,11 @@ def read_imaging_order(
 
 
 @router.get("/events", summary="Subscribe to real-time order updates")
-async def sse_endpoint(request: Request):
+async def sse_endpoint(
+    request: Request,
+    # THIS IS THE LINE, YOU ABSOLUTE DONUT. ADD THE AUTH DEPENDENCY.
+    current_user: models.User = Depends(deps.get_current_active_user),
+):
     """
     Server-Sent Events endpoint to stream order updates.
     """

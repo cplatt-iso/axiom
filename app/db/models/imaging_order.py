@@ -44,6 +44,11 @@ class ImagingOrder(Base):
     scheduled_station_ae_title: Mapped[Optional[str]] = mapped_column(String(16))
     scheduled_station_name: Mapped[Optional[str]] = mapped_column(String(128))
     scheduled_procedure_step_start_datetime: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    scheduled_exam_datetime: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+        comment="Datetime the exam is scheduled to take place (ORC.7 TQ.4)."
+    )
     
     # Physician Information
     requesting_physician: Mapped[Optional[str]] = mapped_column(String(255))

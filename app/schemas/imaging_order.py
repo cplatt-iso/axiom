@@ -30,6 +30,10 @@ class ImagingOrderBase(BaseModel):
     scheduled_station_ae_title: Optional[str] = Field(None, max_length=16)
     scheduled_station_name: Optional[str] = Field(None, max_length=128)
     scheduled_procedure_step_start_datetime: Optional[datetime] = None
+    scheduled_exam_datetime: Optional[datetime] = Field(
+        None,
+        description="Datetime the exam is scheduled to take place (ORC.7 TQ.4)."
+    )
 
     requesting_physician: Optional[str] = Field(None, max_length=255)
     referring_physician: Optional[str] = Field(None, max_length=255)
@@ -56,6 +60,7 @@ class ImagingOrderCreate(ImagingOrderBase):
     modality: str = Field(..., max_length=16)
     study_instance_uid: Optional[str] = None
     scheduled_station_name: Optional[str] = None
+    scheduled_exam_datetime: Optional[datetime] = None
 
 # Properties to receive on item update
 class ImagingOrderUpdate(ImagingOrderBase):
@@ -81,6 +86,7 @@ class ImagingOrderUpdate(ImagingOrderBase):
     scheduled_station_ae_title: Optional[str] = None
     scheduled_station_name: Optional[str] = None
     scheduled_procedure_step_start_datetime: Optional[datetime] = None
+    scheduled_exam_datetime: Optional[datetime] = None
     requesting_physician: Optional[str] = None
     referring_physician: Optional[str] = None
     # --- NEW PHYSICIAN FIELDS ---
@@ -106,6 +112,7 @@ class ImagingOrderRead(ImagingOrderBase):
     order_received_at: datetime
     modality: str = Field(..., max_length=16)
 
+    scheduled_exam_datetime: Optional[datetime] = None
     model_config = ConfigDict(from_attributes=True)
 
 class ImagingOrderReadResponse(BaseModel):
