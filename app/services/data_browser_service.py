@@ -36,7 +36,8 @@ from app.schemas.data_browser import (
 # Ensure GoogleHealthcareSource model is imported if you plan to use it
 from app.db.models.google_healthcare_source import GoogleHealthcareSource
 from app.core.config import settings
-from app.services import dicomweb_client
+# FUCKING FINALLY, LET'S IMPORT THE SERVICES WE'LL ACTUALLY USE
+from app.services import dicomweb_client, google_healthcare_service
 from app.worker.dimse_qr_poller import _resolve_dynamic_date_filter
 
 import structlog # type: ignore
@@ -502,6 +503,88 @@ async def _execute_qido_query(
          raise QueryServiceError(f"QIDO Error: {e}", source_type="dicomweb", source_id=source_config.id) from e
 
 
+# --- NEW: Google Healthcare QIDO Implementation ---
+async def _execute_ghc_qido_query(
+    source_config: models.GoogleHealthcareSource,
+    query_params: Dict[str, str],
+    query_level: QueryLevel
+) -> List[Dict[str, Any]]:
+    """
+    Executes a QIDO query against the Google Healthcare API.
+    This is the moment you've been waiting for. No more placeholders.
+    """
+    log = logger.bind(
+        source_name=source_config.name,
+        source_id=source_config.id,
+        query_level=query_level.value,
+        gcp_project=source_config.gcp_project_id
+    ) # type: ignore[attr-defined]
+    log.info("Attempting Google Healthcare QIDO query")
+
+    # The GHC API uses Study/Series UIDs in the URL path for deeper queries.
+    # We need to pull them out of the general query_params dict. It's a subtle
+    # but critical difference from standard QIDO. Don't fuck it up.
+    search_params = query_params.copy()
+    study_uid = search_params.pop("StudyInstanceUID", None)
+    series_uid = search_params.pop("SeriesInstanceUID", None)
+
+    try:
+        results: List[Dict[str, Any]] = []
+        if query_level == QueryLevel.STUDY:
+            log.debug("Dispatching to GHC search_for_studies")
+            results = await google_healthcare_service.search_for_studies(
+                gcp_project_id=source_config.gcp_project_id,
+                gcp_location=source_config.gcp_location,
+                gcp_dataset_id=source_config.gcp_dataset_id,
+                gcp_dicom_store_id=source_config.gcp_dicom_store_id,
+                query_params=search_params,
+                limit=settings.DICOMWEB_POLLER_QIDO_LIMIT # Use a sensible limit
+            )
+        elif query_level == QueryLevel.SERIES:
+            log.debug("Dispatching to GHC search_for_series", study_uid=study_uid)
+            results = await google_healthcare_service.search_for_series(
+                gcp_project_id=source_config.gcp_project_id,
+                gcp_location=source_config.gcp_location,
+                gcp_dataset_id=source_config.gcp_dataset_id,
+                gcp_dicom_store_id=source_config.gcp_dicom_store_id,
+                study_instance_uid=study_uid, # Passed as a path parameter
+                query_params=search_params,
+                limit=settings.DICOMWEB_POLLER_QIDO_LIMIT
+            )
+        elif query_level == QueryLevel.INSTANCE:
+            log.debug("Dispatching to GHC search_for_instances", study_uid=study_uid, series_uid=series_uid)
+            results = await google_healthcare_service.search_for_instances(
+                gcp_project_id=source_config.gcp_project_id,
+                gcp_location=source_config.gcp_location,
+                gcp_dataset_id=source_config.gcp_dataset_id,
+                gcp_dicom_store_id=source_config.gcp_dicom_store_id,
+                study_instance_uid=study_uid, # Passed as a path parameter
+                series_instance_uid=series_uid, # Also a path parameter
+                query_params=search_params,
+                limit=settings.DICOMWEB_POLLER_QIDO_LIMIT
+            )
+        else:
+            # Should be unreachable due to Enum validation, but defense in depth
+            raise InvalidParameterError(f"Unsupported query level for Google Healthcare: {query_level.value}", source_type="google_healthcare", source_id=source_config.id)
+
+        log.info("GHC QIDO query successful", result_count=len(results))
+        # Now, let's decorate these results with our source info so the frontend knows where they came from.
+        for result in results:
+            result["source_id"] = source_config.id
+            result["source_name"] = source_config.name
+            result["source_type"] = "google_healthcare"
+        return results
+
+    except google_healthcare_service.GoogleHealthcareQueryError as e:
+        log.error("Error during Google Healthcare query", error=str(e), exc_info=False)
+        # Translate their error into our error for consistency.
+        # This is what professionals do.
+        raise RemoteQueryError(f"GHC Query Error: {e}", source_type="google_healthcare", source_id=source_config.id) from e
+    except Exception as e:
+        log.error("Unexpected error during GHC query", error=str(e), exc_info=True)
+        raise QueryServiceError(f"Unexpected GHC Error: {e}", source_type="google_healthcare", source_id=source_config.id) from e
+
+
 # --- get_source_info_for_response (MODIFIED) ---
 def get_source_info_for_response(db: Session, source_id: int, source_type: Literal["dicomweb", "dimse-qr", "google_healthcare"]) -> Dict[str, str]: # MODIFIED Literal
     """Gets basic source info (name, type) based on ID AND type."""
@@ -575,7 +658,9 @@ async def execute_query(
 
 
     # 2. Check if source is enabled
-    if not source_config.is_enabled:
+    # GHC source has `is_enabled`, DicomWebSourceState doesn't have a standard one, DimseQRS has `is_enabled`
+    is_enabled_flag = getattr(source_config, 'is_enabled', True) # Default to True if attr not present
+    if not is_enabled_flag:
          log.warning("Query attempt on disabled source")
          # Return success but indicate no query was run
          return DataBrowserQueryResponse(
@@ -609,17 +694,13 @@ async def execute_query(
                 prioritize_custom_params=True
             )
         elif source_type == "google_healthcare":
-            log.info(f"Google Healthcare query for source ID {source_id} - Not yet fully implemented.")
-            # Placeholder: Fetch config and potentially build GHC specific query params
-            # ghc_query_params = _build_ghc_params(query_params) # You'd need to create this helper
+            log.debug("Preparing GHC QIDO parameters")
+            qido_params_dict = _build_qido_params(query_params)
             if not isinstance(source_config, models.GoogleHealthcareSource): raise TypeError("Config type mismatch for Google Healthcare")
+            # And now, the moment of truth...
+            results_list = await _execute_ghc_qido_query(source_config, qido_params_dict, query_level)
+            log.debug("Google Healthcare query finished.")
             
-            # Actual GHC query logic would go here. For now, return empty.
-            # Example: results_list = await _execute_ghc_query(source_config, ghc_query_params, query_level)
-            results_list = []
-            message = "Google Healthcare query executed (placeholder)."
-            query_status = "success" # Or "partial" if some parts are implemented
-            log.debug("Google Healthcare query (placeholder) finished.")
         # No else needed due to explicit type check/raise earlier
 
     except QueryServiceError as e:

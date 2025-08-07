@@ -10,19 +10,19 @@ import os
 import re
 import ssl
 import tempfile
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Tuple, List
 
-
-# Third-party imports
-from pynetdicom.ae import ApplicationEntity as AE # MODIFIED
-from pynetdicom.presentation import PresentationContext, build_context, StoragePresentationContexts # MODIFIED
-from pynetdicom.sop_class import Verification # MODIFIED (was VerificationServiceClass, add type ignore) # type: ignore[attr-defined]
-from pynetdicom.sop_class import ModalityWorklistInformationFind # MODIFIED (was ModalityWorklistInformationModel, add type ignore) # type: ignore[attr-defined]
-from pynetdicom.sop_class import ModalityPerformedProcedureStep # MODIFIED (was ModalityPerformedProcedureStepServiceClass, add type ignore) # type: ignore[attr-defined]
+from pynetdicom.ae import ApplicationEntity as AE
+from pynetdicom.presentation import build_context
+from pynetdicom.sop_class import Verification
+from pynetdicom.sop_class import ModalityWorklistInformationFind 
+from pynetdicom.sop_class import ModalityPerformedProcedureStep
 from pynetdicom import evt
-from pynetdicom._globals import ALL_TRANSFER_SYNTAXES # MODIFIED (as per Pylance suggestion, though typically internal)
+from pynetdicom._globals import ALL_TRANSFER_SYNTAXES
+from pydicom.uid import UID
 
 import structlog # type: ignore
 # SQLAlchemy Core imports
@@ -126,18 +126,49 @@ INCOMING_DIR.mkdir(parents=True, exist_ok=True)
 HEARTBEAT_INTERVAL_SECONDS = 30
 
 # --- Presentation Contexts (Keep Existing) ---
+
 SUPPORTED_TRANSFER_SYNTAXES = [
-    '1.2.840.10008.1.2.1', '1.2.840.10008.1.2', '1.2.840.10008.1.2.2',
-    '1.2.840.10008.1.2.5', '1.2.840.10008.1.2.4.50', '1.2.840.10008.1.2.4.70',
-    '1.2.840.10008.1.2.4.90', '1.2.840.10008.1.2.4.91',
+    '1.2.840.10008.1.2.1',  # Explicit VR Little Endian
+    '1.2.840.10008.1.2',    # Implicit VR Little Endian
+    '1.2.840.10008.1.2.2',  # Explicit VR Big Endian
+    '1.2.840.10008.1.2.5',  # RLE Lossless
+    '1.2.840.10008.1.2.4.50', # JPEG Baseline
+    '1.2.840.10008.1.2.4.70', # JPEG Lossless
+    '1.2.840.10008.1.2.4.90', # JPEG 2000 Image Compression (Lossless Only)
+    '1.2.840.10008.1.2.4.91', # JPEG 2000 Image Compression
 ]
+
 contexts = []
-for default_context in StoragePresentationContexts:
-    sop_class_uid = default_context.abstract_syntax
-    if sop_class_uid: # MODIFIED: Ensure sop_class_uid is not None
-        new_context = build_context(sop_class_uid, SUPPORTED_TRANSFER_SYNTAXES)
-        contexts.append(new_context)
-contexts.append(build_context(Verification, SUPPORTED_TRANSFER_SYNTAXES)) # MODIFIED: Use Verification (SOPClass instance)
+try:
+    # Get the directory of the current script to build a reliable path
+    server_dir = Path(__file__).parent
+    contexts_file_path = server_dir / "supported_contexts.json"
+    logger.info("Loading supported storage contexts from JSON file", path=str(contexts_file_path))
+    with open(contexts_file_path, 'r') as f:
+        storage_contexts_data = json.load(f)
+
+    for context_info in storage_contexts_data:
+        uid = context_info.get("uid")
+        if uid:
+            # The abstract syntax is the UID string itself
+            contexts.append(build_context(uid, SUPPORTED_TRANSFER_SYNTAXES))
+        else:
+            logger.warning("Skipping context with no UID in JSON file", context_data=context_info)
+    logger.info(f"Successfully loaded {len(contexts)} storage contexts from JSON file.")
+
+except FileNotFoundError:
+    logger.error("CRITICAL: supported_contexts.json not found. The DICOM listener will not accept any storage requests.", path=str(contexts_file_path))
+    # You could choose to exit here, or continue with zero storage contexts.
+    # Exiting is probably safer to alert the admin of a misconfiguration.
+    # For now, we will continue with an empty list, which will be logged by the AE.
+except json.JSONDecodeError:
+    logger.error("CRITICAL: Failed to parse supported_contexts.json. Check for syntax errors.", path=str(contexts_file_path))
+except Exception as e:
+    logger.error("An unexpected error occurred while loading supported contexts", error=str(e), path=str(contexts_file_path))
+
+
+# Now, add the non-storage service contexts
+contexts.append(build_context(Verification, SUPPORTED_TRANSFER_SYNTAXES))
 contexts.append(build_context(ModalityWorklistInformationFind, SUPPORTED_TRANSFER_SYNTAXES))
 contexts.append(build_context(ModalityPerformedProcedureStep, SUPPORTED_TRANSFER_SYNTAXES))
 
@@ -404,6 +435,24 @@ def run_dimse_server():
     # --- AE Setup and Thread Start ---
     ae = AE(ae_title=ae_title)
     log.info("Configuring AE", storage_contexts_count=len(contexts), verification_context=True)
+    
+    sops_to_log = []
+    for context in contexts:
+        uid_str = context.abstract_syntax
+        try:
+            # Look up the name of the UID for readability
+            uid_name = UID(uid_str).name
+        except:
+            # Fallback for unknown UIDs
+            uid_name = "Unknown SOP Class"
+        sops_to_log.append(f"{uid_name} ({uid_str})")
+    log.info(
+        "Finalizing AE Configuration. The following SOP Classes will be supported.",
+        supported_sops=sops_to_log
+    )
+   
+    ae.supported_contexts = contexts
+    address = (settings.LISTENER_HOST, port)
     ae.supported_contexts = contexts
     # Ensure Verification context uses all transfer syntaxes if needed, or restrict
     # ae.add_supported_context(Verification, transfer_syntax=SUPPORTED_TRANSFER_SYNTAXES) # Be explicit

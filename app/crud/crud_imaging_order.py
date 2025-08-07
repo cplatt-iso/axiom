@@ -34,6 +34,7 @@ class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUp
         self,
         db: Session,
         *,
+        accession_number: Optional[str] = None,
         modality: Optional[str] = None,
         scheduled_station_ae_title: Optional[str] = None,
         patient_name: Optional[str] = None,
@@ -47,6 +48,10 @@ class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUp
         Supports the DIMSE C-FIND service.
         """
         query = db.query(self.model)
+
+        if accession_number:
+            # AccessionNumber should be an exact match (DICOM standard)
+            query = query.filter(self.model.accession_number == accession_number)
 
         if modality:
             if '*' in modality or '?' in modality:

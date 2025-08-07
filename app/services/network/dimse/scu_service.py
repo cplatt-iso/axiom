@@ -19,6 +19,16 @@ from pynetdicom.service_class import VerificationServiceClass
 
 from pydicom.dataset import Dataset
 from app.core.config import settings
+from .transfer_syntax_negotiation import (
+    create_presentation_contexts_with_fallback,
+    analyze_accepted_contexts,
+    find_compatible_transfer_syntax,
+    TransferSyntaxStrategy,
+    validate_negotiation_success,
+    handle_cstore_context_error,
+    create_optimized_contexts_for_sop_class,
+    suggest_fallback_strategy
+)
 
 # Attempt to import gcp_utils and its exceptions
 try:
@@ -182,6 +192,173 @@ def _prepare_scu_tls_context(
 
 
 @contextmanager
+def manage_association_with_fallback(
+    remote_host: str,
+    remote_port: int,
+    remote_ae_title: str,
+    local_ae_title: str = "AXIOM_SCU",
+    sop_class_uid: Optional[str] = None,
+    transfer_syntax_strategy: str = "conservative",
+    contexts: Optional[List[PresentationContext]] = None,
+    tls_enabled: bool = False,
+    tls_ca_cert_secret: Optional[str] = None,
+    tls_client_cert_secret: Optional[str] = None,
+    tls_client_key_secret: Optional[str] = None,
+    max_retries: int = 3
+) -> Generator[Tuple[Association, Dict[str, Any]], None, None]:
+    """
+    Context manager for DICOM association with robust transfer syntax fallback.
+    
+    Returns:
+        Tuple of (Association, metadata_dict) where metadata includes strategy used, attempts, etc.
+    """
+    log_context = {
+        "remote_ae": remote_ae_title, "remote_host": remote_host, "remote_port": remote_port,
+        "local_ae": local_ae_title, "tls_enabled": tls_enabled,
+        "strategy": transfer_syntax_strategy
+    }
+    if hasattr(logger, 'bind'):
+        log = logger.bind(**log_context) # type: ignore[attr-defined]
+    else:
+        log = logger
+    
+    if not remote_host or not remote_port or not remote_ae_title:
+        raise ValueError("Remote host, port, and AE title are required.")
+
+    metadata = {
+        "strategy_used": None,
+        "attempts_made": 0,
+        "transfer_syntax": None,
+        "context_analysis": None
+    }
+
+    # Define fallback sequence based on initial strategy
+    if transfer_syntax_strategy == "extended":
+        strategies = ["extended", "compression", "standard", "conservative", "universal"]
+    elif transfer_syntax_strategy == "compression":
+        strategies = ["compression", "standard", "conservative", "universal"]
+    elif transfer_syntax_strategy == "standard":
+        strategies = ["standard", "conservative", "universal"]
+    elif transfer_syntax_strategy == "conservative":
+        strategies = ["conservative", "universal"]
+    else:  # universal or unknown
+        strategies = ["universal"]
+
+    last_exception = None
+    
+    for attempt, strategy in enumerate(strategies, 1):
+        if attempt > max_retries:
+            break
+            
+        metadata["attempts_made"] = attempt
+        log.info(f"Association attempt {attempt}", strategy=strategy)
+        
+        try:
+            ae = AE(ae_title=local_ae_title)
+            
+            # Use provided contexts or create with fallback strategy
+            if contexts:
+                ae.requested_contexts = contexts
+            elif sop_class_uid:
+                fallback_contexts = create_presentation_contexts_with_fallback(
+                    sop_class_uid=sop_class_uid,
+                    strategies=[strategy],
+                    max_contexts_per_strategy=5
+                )
+                ae.requested_contexts = fallback_contexts
+            else:
+                raise ValueError("Either contexts or sop_class_uid must be provided")
+            
+            ae.acse_timeout = settings.DIMSE_ACSE_TIMEOUT
+            ae.dimse_timeout = settings.DIMSE_DIMSE_TIMEOUT
+            ae.network_timeout = settings.DIMSE_NETWORK_TIMEOUT
+
+            ssl_context_scu: Optional[ssl.SSLContext] = None 
+            temp_files_created_scu: List[str] = [] 
+
+            try:
+                if tls_enabled:
+                    ssl_context_scu, temp_files_created_scu = _prepare_scu_tls_context(
+                        tls_ca_cert_secret=tls_ca_cert_secret,
+                        tls_client_cert_secret=tls_client_cert_secret,
+                        tls_client_key_secret=tls_client_key_secret,
+                        log_context=log
+                    )
+
+                tls_args_scu = (ssl_context_scu, remote_host if ssl_context_scu and ssl_context_scu.check_hostname else None) if tls_enabled and ssl_context_scu else None
+                assoc = ae.associate(remote_host, remote_port, ae_title=remote_ae_title, tls_args=tls_args_scu) # type: ignore[arg-type]
+
+                if assoc.is_established:
+                    # Analyze accepted contexts
+                    context_analysis = analyze_accepted_contexts(assoc)
+                    
+                    # Validate that we have useful contexts if SOP class was specified
+                    if sop_class_uid:
+                        validation = validate_negotiation_success(assoc, [sop_class_uid])
+                        if not validation["success"]:
+                            log.warning("Required SOP class not supported by peer",
+                                       sop_class_uid=sop_class_uid,
+                                       missing_classes=validation["missing_sop_classes"])
+                            # Continue anyway - let the caller handle this
+                    
+                    metadata.update({
+                        "strategy_used": strategy,
+                        "context_analysis": context_analysis,
+                        "transfer_syntax": context_analysis.get("accepted_contexts", [{}])[0].get("transfer_syntax") if context_analysis.get("accepted_contexts") else None,
+                        "validation": validation if sop_class_uid else None
+                    })
+                    
+                    log.info("Association established successfully", 
+                            strategy=strategy, 
+                            accepted_contexts=context_analysis.get("accepted_count", 0),
+                            peer_supports_compression=context_analysis.get("peer_supports_compression", False))
+                    
+                    try:
+                        yield assoc, metadata
+                    finally:
+                        if assoc and assoc.is_established:
+                            log.debug("Releasing association")
+                            assoc.release()
+                        elif assoc and not assoc.is_released and not assoc.is_aborted:
+                            log.debug("Aborting association")
+                            try: assoc.abort()
+                            except Exception: pass
+                    
+                    return  # Success, exit the retry loop
+                else:
+                    reason = "Unknown"
+                    if assoc.is_rejected: 
+                        reason = f"Rejected by {getattr(assoc,'result_source','N/A')}, code {getattr(assoc,'result_reason','N/A')}"
+                    elif assoc.is_aborted: 
+                        reason = "Aborted"
+                    
+                    last_exception = AssociationError(f"Association failed with strategy '{strategy}': {reason}", remote_ae=remote_ae_title)
+                    log.warning("Association failed, trying next strategy", 
+                               strategy=strategy, reason=reason, next_attempt=attempt+1)
+                    
+            finally:
+                for file_path in temp_files_created_scu:
+                    try:
+                        if file_path and os.path.exists(file_path): os.remove(file_path)
+                    except OSError: pass
+
+        except (TlsConfigError, ValueError) as e:
+            # These are configuration errors, don't retry
+            raise e
+        except ssl.SSLError as e: 
+            last_exception = AssociationError("TLS Handshake Error", remote_ae=remote_ae_title, details=str(e))
+            log.error("TLS error, trying next strategy", strategy=strategy, error=str(e))
+        except Exception as e: 
+            last_exception = AssociationError("Unexpected association error", remote_ae=remote_ae_title, details=str(e))
+            log.error("Unexpected error, trying next strategy", strategy=strategy, error=str(e))
+
+    # If we get here, all strategies failed
+    if last_exception:
+        raise last_exception
+    else:
+        raise AssociationError(f"All {len(strategies)} transfer syntax strategies failed", remote_ae=remote_ae_title)
+
+@contextmanager  
 def manage_association(
     remote_host: str,
     remote_port: int,
@@ -343,3 +520,299 @@ def move_study(
         return {"status":"success","message":"C-MOVE successful","sub_operations":sub_ops_summary}
     except (TlsConfigError,AssociationError,DimseCommandError,ValueError) as e: raise
     except Exception as e: raise DimseScuError("Unexpected C-MOVE error",remote_ae=config.get("remote_ae_title"),details=str(e)) from e
+
+
+def store_dataset(
+    config: Dict[str, Any],
+    dataset: Dataset,
+    transfer_syntax_strategy: str = "conservative",
+    max_retries: int = 3
+) -> Dict[str, Any]:
+    """
+    Robust C-STORE operation with automatic transfer syntax fallback.
+    
+    Args:
+        config: Configuration dictionary with connection details
+        dataset: DICOM dataset to store
+        transfer_syntax_strategy: Initial strategy for transfer syntax negotiation
+        max_retries: Maximum number of retry attempts with different strategies
+        
+    Returns:
+        Dictionary with store operation results
+    """
+    if not hasattr(dataset, 'SOPClassUID') or not dataset.SOPClassUID:
+        raise ValueError("Dataset missing required SOPClassUID")
+    if not hasattr(dataset, 'SOPInstanceUID') or not dataset.SOPInstanceUID:
+        raise ValueError("Dataset missing required SOPInstanceUID")
+    
+    sop_class_uid = str(dataset.SOPClassUID)
+    sop_instance_uid = str(dataset.SOPInstanceUID)
+    
+    current_log_context = {
+        "remote_ae": config.get("remote_ae_title"), 
+        "operation": "C-STORE",
+        "sop_class_uid": sop_class_uid,
+        "sop_instance_uid": sop_instance_uid,
+        "strategy": transfer_syntax_strategy
+    }
+    
+    if hasattr(logger, 'bind'):
+        log = logger.bind(**current_log_context) # type: ignore[attr-defined]
+    else:
+        log = logger
+    
+    log.info("Starting C-STORE operation")
+    
+    try:
+        with manage_association_with_fallback(
+            remote_host=config["remote_host"],
+            remote_port=config["remote_port"], 
+            remote_ae_title=config["remote_ae_title"],
+            local_ae_title=config.get("local_ae_title", "AXIOM_SCU"),
+            sop_class_uid=sop_class_uid,
+            transfer_syntax_strategy=transfer_syntax_strategy,
+            tls_enabled=config.get("tls_enabled", False),
+            tls_ca_cert_secret=config.get("tls_ca_cert_secret_name"),
+            tls_client_cert_secret=config.get("tls_client_cert_secret_name"),
+            tls_client_key_secret=config.get("tls_client_key_secret_name"),
+            max_retries=max_retries
+        ) as (assoc, metadata):
+            
+            # Find the best presentation context for this dataset
+            compatible_context, reason = find_compatible_transfer_syntax(
+                dataset=dataset,
+                accepted_contexts=assoc.accepted_contexts,
+                sop_class_uid=sop_class_uid
+            )
+            
+            if not compatible_context:
+                from .transfer_syntax_negotiation import handle_cstore_context_error
+                error_analysis = handle_cstore_context_error(
+                    sop_class_uid=sop_class_uid,
+                    required_transfer_syntax=getattr(dataset.file_meta, 'TransferSyntaxUID', 'Unknown'),
+                    association=assoc
+                )
+                raise DimseCommandError(
+                    f"No compatible presentation context for {error_analysis['sop_class_name']}",
+                    remote_ae=config["remote_ae_title"],
+                    details=str(error_analysis)
+                )
+            
+            log.info("Found compatible presentation context", 
+                    context_id=compatible_context.context_id,
+                    transfer_syntax=compatible_context.transfer_syntax,
+                    reason=reason)
+            
+            # Perform the C-STORE (pynetdicom automatically selects the right context)
+            status = assoc.send_c_store(dataset)
+            
+            if status and hasattr(status, 'Status'):
+                status_int = int(status.Status)
+                
+                if status_int == 0x0000:  # Success
+                    log.info("C-STORE successful", 
+                            status=f"0x{status_int:04X}",
+                            strategy_used=metadata.get("strategy_used"),
+                            transfer_syntax=compatible_context.transfer_syntax)
+                    
+                    return {
+                        "status": "success",
+                        "message": "C-STORE completed successfully",
+                        "sop_instance_uid": sop_instance_uid,
+                        "strategy_used": metadata.get("strategy_used"),
+                        "transfer_syntax": compatible_context.transfer_syntax,
+                        "context_id": compatible_context.context_id
+                    }
+                else:
+                    # Handle various C-STORE error codes
+                    error_details = getattr(status, 'ErrorComment', 'No error comment')
+                    if hasattr(status, 'ErrorID'):
+                        error_details += f" (Error ID: {status.ErrorID})"
+                    
+                    raise DimseCommandError(
+                        f"C-STORE failed with status 0x{status_int:04X}",
+                        remote_ae=config["remote_ae_title"],
+                        details=error_details
+                    )
+            else:
+                raise DimseCommandError(
+                    "C-STORE failed: No status received",
+                    remote_ae=config["remote_ae_title"]
+                )
+                
+    except (TlsConfigError, AssociationError, DimseCommandError, ValueError) as e:
+        raise
+    except Exception as e:
+        raise DimseScuError(
+            "Unexpected C-STORE error", 
+            remote_ae=config.get("remote_ae_title"), 
+            details=str(e)
+        ) from e
+
+
+def store_datasets_batch(
+    config: Dict[str, Any],
+    datasets: List[Dataset],
+    transfer_syntax_strategy: str = "conservative",
+    max_retries: int = 3,
+    continue_on_error: bool = True
+) -> Dict[str, Any]:
+    """
+    Store multiple datasets in a single association with robust error handling.
+    
+    Args:
+        config: Configuration dictionary with connection details
+        datasets: List of DICOM datasets to store
+        transfer_syntax_strategy: Strategy for transfer syntax negotiation
+        max_retries: Maximum retry attempts
+        continue_on_error: Whether to continue on individual dataset errors
+        
+    Returns:
+        Dictionary with batch operation results
+    """
+    if not datasets:
+        raise ValueError("No datasets provided for batch store operation")
+    
+    # Collect all unique SOP classes
+    sop_classes = set()
+    for dataset in datasets:
+        if hasattr(dataset, 'SOPClassUID') and dataset.SOPClassUID:
+            sop_classes.add(str(dataset.SOPClassUID))
+    
+    if not sop_classes:
+        raise ValueError("No valid SOPClassUID found in any dataset")
+    
+    current_log_context = {
+        "remote_ae": config.get("remote_ae_title"), 
+        "operation": "C-STORE-BATCH",
+        "dataset_count": len(datasets),
+        "sop_classes": list(sop_classes),
+        "strategy": transfer_syntax_strategy
+    }
+    
+    if hasattr(logger, 'bind'):
+        log = logger.bind(**current_log_context) # type: ignore[attr-defined]
+    else:
+        log = logger
+    
+    log.info("Starting batch C-STORE operation")
+    
+    results = {
+        "total_datasets": len(datasets),
+        "successful": 0,
+        "failed": 0,
+        "details": [],
+        "strategy_used": None
+    }
+    
+    try:
+        # Create contexts for all required SOP classes
+        from .transfer_syntax_negotiation import create_optimized_contexts_for_sop_class
+        all_contexts = []
+        for sop_class in sop_classes:
+            contexts = create_optimized_contexts_for_sop_class(
+                sop_class_uid=sop_class,
+                max_contexts=3  # Limit contexts per SOP class
+            )
+            all_contexts.extend(contexts)
+        
+        with manage_association_with_fallback(
+            remote_host=config["remote_host"],
+            remote_port=config["remote_port"],
+            remote_ae_title=config["remote_ae_title"],
+            local_ae_title=config.get("local_ae_title", "AXIOM_SCU"),
+            contexts=all_contexts,
+            transfer_syntax_strategy=transfer_syntax_strategy,
+            tls_enabled=config.get("tls_enabled", False),
+            tls_ca_cert_secret=config.get("tls_ca_cert_secret_name"),
+            tls_client_cert_secret=config.get("tls_client_cert_secret_name"),
+            tls_client_key_secret=config.get("tls_client_key_secret_name"),
+            max_retries=max_retries
+        ) as (assoc, metadata):
+            
+            results["strategy_used"] = metadata.get("strategy_used")
+            
+            for i, dataset in enumerate(datasets):
+                try:
+                    sop_class_uid = str(dataset.SOPClassUID)
+                    sop_instance_uid = str(dataset.SOPInstanceUID)
+                    
+                    # Find compatible context for this dataset
+                    compatible_context, reason = find_compatible_transfer_syntax(
+                        dataset=dataset,
+                        accepted_contexts=assoc.accepted_contexts,
+                        sop_class_uid=sop_class_uid
+                    )
+                    
+                    if not compatible_context:
+                        error_msg = f"No compatible presentation context for dataset {i+1}"
+                        log.warning(error_msg, sop_instance_uid=sop_instance_uid)
+                        results["details"].append({
+                            "dataset_index": i,
+                            "sop_instance_uid": sop_instance_uid,
+                            "status": "failed",
+                            "error": error_msg
+                        })
+                        results["failed"] += 1
+                        if not continue_on_error:
+                            raise DimseCommandError(error_msg, remote_ae=config["remote_ae_title"])
+                        continue
+                    
+                    # Store the dataset (pynetdicom automatically selects the right context)
+                    status = assoc.send_c_store(dataset)
+                    
+                    if status and hasattr(status, 'Status') and int(status.Status) == 0x0000:
+                        results["details"].append({
+                            "dataset_index": i,
+                            "sop_instance_uid": sop_instance_uid,
+                            "status": "success",
+                            "context_id": compatible_context.context_id
+                        })
+                        results["successful"] += 1
+                        log.debug("Dataset stored successfully", 
+                                dataset_index=i, sop_instance_uid=sop_instance_uid)
+                    else:
+                        error_msg = f"C-STORE failed for dataset {i+1}"
+                        if status and hasattr(status, 'Status'):
+                            error_msg += f" (Status: 0x{int(status.Status):04X})"
+                        
+                        results["details"].append({
+                            "dataset_index": i,
+                            "sop_instance_uid": sop_instance_uid,
+                            "status": "failed",
+                            "error": error_msg
+                        })
+                        results["failed"] += 1
+                        
+                        if not continue_on_error:
+                            raise DimseCommandError(error_msg, remote_ae=config["remote_ae_title"])
+                        
+                except Exception as dataset_error:
+                    error_msg = f"Error processing dataset {i+1}: {str(dataset_error)}"
+                    log.error(error_msg, dataset_index=i)
+                    
+                    results["details"].append({
+                        "dataset_index": i,
+                        "sop_instance_uid": getattr(dataset, 'SOPInstanceUID', 'Unknown'),
+                        "status": "failed", 
+                        "error": error_msg
+                    })
+                    results["failed"] += 1
+                    
+                    if not continue_on_error:
+                        raise
+        
+        log.info("Batch C-STORE completed", 
+                successful=results["successful"], 
+                failed=results["failed"])
+        
+        return results
+        
+    except (TlsConfigError, AssociationError, DimseCommandError, ValueError) as e:
+        raise
+    except Exception as e:
+        raise DimseScuError(
+            "Unexpected batch C-STORE error", 
+            remote_ae=config.get("remote_ae_title"), 
+            details=str(e)
+        ) from e

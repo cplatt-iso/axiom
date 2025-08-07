@@ -5,8 +5,10 @@ import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlencode, quote
 import json
+import google
 import google.oauth2
 import google.oauth2.service_account
+from google.auth.credentials import Credentials as GoogleAuthCredentials
 import httpx
 
 from app.core.config import settings # ADDED IMPORT
@@ -33,9 +35,7 @@ except ImportError:
     except ImportError:
          # This would be very bad - means sync refresh also impossible
          logging.getLogger(__name__).critical("Failed to import google.auth.transport.requests - basic auth will likely fail.")
-         # Ensure it's None if you check for it later
-         if 'google' in globals() and hasattr(google.auth, 'transport') and not hasattr(google.auth.transport, 'requests'):
-            google.auth.transport.requests = None
+         # Note: Removed problematic assignment that was shadowing the global 'google' import
 
 
 # --- End Simplified Imports ---
@@ -54,71 +54,115 @@ class GoogleHealthcareQueryError(Exception):
     """Custom exception for Google Healthcare query errors."""
     pass
 
+
 # --- Credential Management ---
-_credentials = None
+_credentials: Optional[GoogleAuthCredentials] = None
 _credential_lock = asyncio.Lock()
 
-async def get_ghc_credentials():
-    """Gets and refreshes Google Cloud credentials asynchronously."""
+async def get_ghc_credentials() -> GoogleAuthCredentials:
+    """
+    Gets and refreshes Google Cloud credentials asynchronously.
+    It will return a valid credential object or raise an exception.
+    No more returning None like a coward.
+    """
     global _credentials
     async with _credential_lock:
-        if settings.GOOGLE_APPLICATION_CREDENTIALS:
-            # Existing code for handling service account key file...
-            # If this block is truly empty for now, add pass
-            logger.info(f"Attempting to use Service Account Key from path: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
-            try:
-                # creds = google.oauth2.service_account.Credentials.from_service_account_file(
-                creds = google.oauth2.service_account.Credentials.from_service_account_file(
-                    settings.GOOGLE_APPLICATION_CREDENTIALS,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
-                )
-                _credentials = creds
-                logger.info("Successfully loaded credentials from Service Account Key JSON file.")
-            except FileNotFoundError:
-                logger.error(f"Service Account Key JSON file not found at path: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
-                raise
-            except Exception as e:
-                logger.error(f"Failed to load credentials from Service Account Key JSON file: {e}", exc_info=True)
-                raise
-            # pass # If intentionally empty for now
-        else:
-            # Try Application Default Credentials
-            if not _credentials or (_credentials.expired and hasattr(_credentials, 'refresh')):
-                logger.info("Attempting to use Application Default Credentials (ADC).")
+        # This logic is key: it re-evaluates if the global creds are missing OR expired.
+        # The original code had this right, it just didn't handle the failure modes correctly.
+        if not _credentials or (_credentials and hasattr(_credentials, 'expired') and _credentials.expired):
+            creds = None # Work with a local variable until we're sure.
+            if settings.GOOGLE_APPLICATION_CREDENTIALS:
+                logger.info(f"Attempting to load/refresh credentials from Service Account Key: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
                 try:
-                    # Ensure google.auth.default is called correctly
-                    creds, project_id = await asyncio.to_thread(
+                    creds = google.oauth2.service_account.Credentials.from_service_account_file(
+                        settings.GOOGLE_APPLICATION_CREDENTIALS,
+                        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
+                    logger.info("Successfully loaded credentials from Service Account Key JSON file.")
+                except FileNotFoundError:
+                    logger.error(f"Service Account Key JSON file not found at path: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
+                    # Re-wrap in our custom exception for consistent error handling upstream.
+                    raise GoogleHealthcareQueryError(f"Service Account Key file not found: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
+                except Exception as e:
+                    logger.error(f"Failed to load credentials from Service Account Key JSON file: {e}", exc_info=True)
+                    raise GoogleHealthcareQueryError(f"Failed to load credentials from Service Account Key file: {e}")
+            else:
+                logger.info("Attempting to load/refresh credentials using Application Default Credentials (ADC).")
+                try:
+                    # Run the blocking I/O in a separate thread to not block the event loop.
+                    creds_raw, project_id = await asyncio.to_thread(
                         google.auth.default, scopes=["https://www.googleapis.com/auth/cloud-platform"]
                     )
-                    _credentials = creds
-                    # Example: if L89, L96, L106, L109 were in this block, they'd be adjusted:
-                    # logger.error(f"Failed to obtain Application Default Credentials. Error: {adc_err}") # Example for L89
-                    # logger.info(f"VERTEX_AI_INIT: Using inferred project ID from ADC: {project_id}") # Example for L96
-                    # logger.error(f"VERTEX_AI_INIT: Unexpected error obtaining Application Default Credentials. Error: {e}", exc_info=True) # Example for L106
+                    # Ensure the returned creds are of the correct type
+                    if isinstance(creds_raw, GoogleAuthCredentials):
+                        creds = creds_raw
+                    else:
+                        logger.error(f"google.auth.default returned credentials of type {type(creds_raw).__name__}, which is not a subclass of GoogleAuthCredentials.")
+                        raise GoogleHealthcareQueryError(f"google.auth.default returned unsupported credentials type: {type(creds_raw).__name__}")
                     if project_id:
                         logger.info(f"ADC obtained. Inferred project ID: {project_id}")
                     else:
-                        logger.info("ADC obtained. Project ID not inferred by google-auth library.")
-
+                        logger.warning("ADC obtained, but project ID not inferred by google-auth library.")
                 except google.auth.exceptions.DefaultCredentialsError as adc_err:
-                    logger.error(f"Failed to obtain Application Default Credentials: {adc_err}", exc_info=True) # MODIFIED
-                    raise
+                    logger.error(
+                        "Failed to find Application Default Credentials. This is a fatal error for GHC functionality. "
+                        "Ensure ADC is configured in the environment (e.g., `gcloud auth application-default login` for local dev, "
+                        "or service account attachment in GCP).",
+                        exc_info=True
+                    )
+                    raise GoogleHealthcareQueryError(f"Could not find Application Default Credentials. The environment is not authenticated to Google Cloud. Error: {adc_err}")
                 except Exception as e:
-                    logger.error(f"An unexpected error occurred getting ADC: {e}", exc_info=True) # MODIFIED
-                    raise
-        # ... (rest of the function)
+                    logger.error(f"An unexpected error occurred while getting Application Default Credentials: {e}", exc_info=True)
+                    raise GoogleHealthcareQueryError(f"Unexpected error getting ADC: {e}")
+
+            # If we successfully got new credentials, update the global one.
+            if creds:
+                _credentials = creds
+
+    # After the lock is released, if _credentials is still None, we have a huge problem.
+    if not _credentials:
+        # This state should be impossible if the logic above raises correctly, but defense in depth.
+        logger.critical("Credential loading process completed without raising an error, but the global credentials object is still None. This indicates a logic flaw.")
+        raise GoogleHealthcareQueryError("Failed to initialize Google Cloud credentials for an unknown reason.")
+
+    return _credentials
 
 
 async def _get_auth_token() -> str:
-    """Gets a valid OAuth2 token."""
+    """Gets a valid OAuth2 token, refreshing it if necessary."""
     creds = await get_ghc_credentials()
-    if not creds:
-         raise GoogleHealthcareQueryError("Credentials object is None after get_ghc_credentials.")
+
+    # Check if the token needs to be refreshed. This is the correct way to do it.
+    if not creds.token or (hasattr(creds, 'expired') and creds.expired):
+        logger.info("Credentials token is missing or expired. Attempting refresh.")
+
+        try:
+            # ServiceAccountCredentials uses sync refresh, not async
+            if isinstance(creds, google.oauth2.service_account.Credentials):
+                # Use the already imported google.auth.transport.requests from top level
+                # Run the blocking refresh in a thread, passing a valid Request object
+                await asyncio.to_thread(creds.refresh, google.auth.transport.requests.Request())
+                logger.info("Successfully refreshed service account credentials token (sync refresh in thread).")
+            # If async transport is available, use it for async credentials
+            elif _async_transport_request:
+                auth_request = _async_transport_request()
+                await creds.refresh(auth_request)
+                logger.info("Successfully refreshed credentials token (async refresh).")
+            else:
+                err_msg = "Cannot refresh token: credentials type not supported for async refresh and no sync fallback."
+                logger.critical(err_msg)
+                raise GoogleHealthcareQueryError(err_msg)
+        except Exception as e:
+            logger.error(f"Failed to refresh Google Cloud credentials: {e}", exc_info=True)
+            raise GoogleHealthcareQueryError(f"Credential refresh failed: {e}")
+
+    # After attempting refresh, the token DAMN WELL better exist.
     if not creds.token:
-        logger.warning("Credentials valid but token is None, attempting final check/access.")
-        # If token is still None after refresh, something is wrong.
-        raise GoogleHealthcareQueryError("Failed to obtain valid token from credentials object (token is None).")
+        logger.error("Credentials refresh was attempted, but the token is still None. This indicates a severe authentication problem.")
+        raise GoogleHealthcareQueryError("Failed to obtain a valid token even after a refresh attempt.")
+
     return creds.token
+
 
 # --- Async HTTP Client (keep as is) ---
 _async_http_client = None

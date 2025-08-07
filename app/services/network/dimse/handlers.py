@@ -260,6 +260,11 @@ def handle_c_find(event):
     log.info("C_FIND_DMWL_QUERY_DETECTED")
     query_dataset = event.identifier
     
+    # Extract top-level query parameters
+    accession_number = query_dataset.get("AccessionNumber", None)
+    patient_name = query_dataset.get("PatientName", None)
+    patient_id = query_dataset.get("PatientID", None)
+    
     # Extract query parameters from the ScheduledProcedureStepSequence
     # This is how a DMWL query is structured.
     sps_query = query_dataset.ScheduledProcedureStepSequence[0]
@@ -271,13 +276,11 @@ def handle_c_find(event):
     date_str = sps_query.get("ScheduledProcedureStepStartDate", "")
     start_date, end_date = _parse_dicom_date_range(date_str)
     
-    # Extract top-level patient identifiers
-    patient_name = query_dataset.get("PatientName", None)
-    patient_id = query_dataset.get("PatientID", None)
     status_str = sps_query.get("ScheduledProcedureStepStatus", None)
 
     log.info(
         "C_FIND_DMWL_QUERY_PARAMS",
+        accession_number=accession_number,
         modality=modality,
         ae_title=ae_title,
         date_range=date_str,
@@ -292,6 +295,7 @@ def handle_c_find(event):
         # Use our glorious CRUD function
         worklist_items = imaging_order.get_worklist(
             db,
+            accession_number=accession_number,
             modality=modality,
             scheduled_station_ae_title=ae_title,
             patient_name=patient_name,

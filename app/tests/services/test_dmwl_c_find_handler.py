@@ -93,6 +93,53 @@ def test_dmwl_find_by_date_range(db: Session, mock_c_find_event: Mock, monkeypat
     assert len(responses) == 2
     assert responses[0][1].AccessionNumber == "TODAY" # type: ignore
 
+
+def test_dmwl_find_by_accession_number(db: Session, mock_c_find_event: Mock, monkeypatch):
+    """Tests filtering by a specific accession number."""
+    # Arrange
+    create_test_order(db, accession_number="ACC12345", patient_name="SMITH^JOHN")
+    create_test_order(db, accession_number="ACC67890", patient_name="DOE^JANE") 
+    create_test_order(db, accession_number="ACC99999", patient_name="JONES^BOB")
+    monkeypatch.setattr(handlers, "SessionLocal", lambda: db)
+    
+    query_ds = Dataset()
+    query_ds.AccessionNumber = "ACC12345"  # Query for specific accession number
+    query_ds.ScheduledProcedureStepSequence = [Dataset()]
+    mock_c_find_event.identifier = query_ds
+    
+    # Act
+    responses = list(handlers.handle_c_find(mock_c_find_event))
+    
+    # Assert
+    assert len(responses) == 2  # One pending result + one final success
+    status, result_ds = responses[0]
+    assert status == 0xFF00  # Pending
+    assert result_ds.AccessionNumber == "ACC12345" # type: ignore
+    assert result_ds.PatientName == "SMITH^JOHN" # type: ignore
+    final_status, _ = responses[1]
+    assert final_status == 0x0000  # Success
+
+
+def test_dmwl_find_by_nonexistent_accession_number(db: Session, mock_c_find_event: Mock, monkeypatch):
+    """Tests that querying for a non-existent accession number returns no results."""
+    # Arrange
+    create_test_order(db, accession_number="ACC12345")
+    create_test_order(db, accession_number="ACC67890")
+    monkeypatch.setattr(handlers, "SessionLocal", lambda: db)
+    
+    query_ds = Dataset()
+    query_ds.AccessionNumber = "ACC18744718"  # Query for non-existent accession number
+    query_ds.ScheduledProcedureStepSequence = [Dataset()]
+    mock_c_find_event.identifier = query_ds
+    
+    # Act
+    responses = list(handlers.handle_c_find(mock_c_find_event))
+    
+    # Assert
+    assert len(responses) == 1  # Only the final success response, no pending responses
+    assert responses[0][0] == 0x0000  # Success with no results
+
+
 # ... (the unsupported sop class test doesn't need the DB, so it's fine) ...
 def test_c_find_unsupported_sop_class(mock_c_find_event: Mock):
     from pydicom.uid import UID

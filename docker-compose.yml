@@ -28,7 +28,7 @@ services:
     logging: # <-- ADD THIS
       driver: "fluentd"
       options:
-        fluentd-address: "192.168.88.115:24224" # Use Host IP hack
+        fluentd-address: "127.0.0.1:24224" # Use Host IP
         tag: "axiom.postgres.{{.Name}}"
         mode: non-blocking
         max-buffer-size: "10m"
@@ -67,7 +67,7 @@ services:
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
-        fluentd-address: "192.168.88.115:24224"
+        fluentd-address: "127.0.0.1:24224"
         tag: "axiom.rabbitmq.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
 
 
@@ -88,6 +88,15 @@ services:
     networks:
       - default
       - shared # Added shared for potential external access/consistency
+    logging: # <-- CONFIGURED LOGGING DRIVER -->
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.redis.{{.Name}}" # Consider adding {{.ID}} for scaling: axiom.worker.{{.Name}}.{{.ID}
 
   # --- Application Services ---
   api:
@@ -131,7 +140,7 @@ services:
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
-        fluentd-address: "192.168.88.115:24224" # Points to 192.168.88.115 on shared network
+        fluentd-address: "127.0.0.1:24224" # Points to fluent-bit on host
         tag: "axiom.api.{{.Name}}"          # Example: axiom.api.dicom_processor_api-1
         # Optional fluentd options:
         # fluentd-async-connect: "true"
@@ -170,7 +179,7 @@ services:
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
-        fluentd-address: "192.168.88.115:24224"
+        fluentd-address: "127.0.0.1:24224"
         tag: "axiom.beat.{{.Name}}"
 
   worker:
@@ -191,11 +200,11 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./app:/app/app # Mount code for consistency
+      # - ./app:/app/app # Mount code for consistency
       # Mount data directories if worker needs read/write access
       - dicom_incoming:/dicom_data/incoming
       - dicom_processed:/dicom_data/processed
-      - dicom_errors:/dicom_data/errors # Needs write access?
+      - /home/icculus/axiom/axiom-volumes/dicom_errors:/dicom_data/errors # Needs write access?
       # Mount GCP key if used
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
     # command: # Uses CMD from Dockerfile.worker unless overridden
@@ -210,7 +219,7 @@ services:
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
-        fluentd-address: "192.168.88.115:24224"
+        fluentd-address: "127.0.0.1:24224"
         tag: "axiom.worker.{{.Name}}" # Consider adding {{.ID}} for scaling: axiom.worker.{{.Name}}.{{.ID}}
 
   listener:
@@ -247,7 +256,7 @@ services:
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
-        fluentd-address: "192.168.88.115:24224"
+        fluentd-address: "127.0.0.1:24224"
         tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
 
 
@@ -276,6 +285,15 @@ services:
       - dicom_incoming:/dicom_data/incoming
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
     restart: unless-stopped
+    logging: # <-- CONFIGURED LOGGING DRIVER -->
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
 
   mllp-listener:
     build:
@@ -297,6 +315,15 @@ services:
     networks:
       - default
       - shared # Added shared for potential external access/consistency
+    logging: # <-- CONFIGURED LOGGING DRIVER -->
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.mllp_listener.{{.Name}}" # Consider adding {{.ID}} for scaling: axiom.worker.{{.Name}}.{{.ID}
 
 # --- Volumes ---
 # Defines named volumes used by services in THIS compose file
