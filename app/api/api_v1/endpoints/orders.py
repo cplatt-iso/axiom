@@ -46,6 +46,19 @@ def read_imaging_orders(
     return {"items": orders, "total": total_count}
 
 
+@router.get("/events", summary="Subscribe to real-time order updates")
+async def sse_endpoint(
+    request: Request,
+    # THIS IS THE LINE, YOU ABSOLUTE DONUT. ADD THE AUTH DEPENDENCY.
+    current_user: models.User = Depends(deps.get_current_active_user),
+):
+    """
+    Server-Sent Events endpoint to stream order updates.
+    """
+    from app.events import sse_event_stream # Import locally to avoid circular dependency issues
+    return StreamingResponse(sse_event_stream(request), media_type="text/event-stream")
+
+
 @router.get("/{order_id}", response_model=schemas.ImagingOrderRead)
 def read_imaging_order(
     order_id: int,
@@ -60,19 +73,6 @@ def read_imaging_order(
     if db_order is None:
         raise HTTPException(status_code=404, detail="Imaging order not found")
     return db_order
-
-
-@router.get("/events", summary="Subscribe to real-time order updates")
-async def sse_endpoint(
-    request: Request,
-    # THIS IS THE LINE, YOU ABSOLUTE DONUT. ADD THE AUTH DEPENDENCY.
-    current_user: models.User = Depends(deps.get_current_active_user),
-):
-    """
-    Server-Sent Events endpoint to stream order updates.
-    """
-    from app.events import sse_event_stream # Import locally to avoid circular dependency issues
-    return StreamingResponse(sse_event_stream(request), media_type="text/event-stream")
 
 
 @router.post("/", response_model=schemas.ImagingOrderRead, status_code=201)
@@ -119,3 +119,41 @@ async def update_imaging_order(
         connection=rabbitmq_connection
     )
     return order
+
+
+@router.delete("/{order_id}", status_code=204)
+async def delete_imaging_order(
+    *,
+    db: Session = Depends(deps.get_db),
+    order_id: int,
+    current_user: models.User = Depends(deps.get_current_active_user),
+    rabbitmq_connection: AbstractRobustConnection = Depends(deps.get_rabbitmq_connection),
+):
+    """
+    Delete an imaging order by ID.
+    """
+    db_order = crud.imaging_order.get(db, id=order_id)
+    if not db_order:
+        raise HTTPException(status_code=404, detail="Imaging order not found")
+    
+    # Store order data for the event before deletion
+    order_data = schemas.ImagingOrderRead.from_orm(db_order).dict()
+    
+    # Delete the order
+    try:
+        crud.imaging_order.remove(db, id=order_id)
+    except ValueError as e:
+        # Handle database constraints (e.g., foreign key constraints)
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete order: {str(e)}"
+        )
+    
+    # Publish event to RabbitMQ
+    await publish_order_event(
+        event_type="order_deleted",
+        payload=order_data,
+        connection=rabbitmq_connection
+    )
+    
+    # Return 204 No Content (no response body for successful deletion)

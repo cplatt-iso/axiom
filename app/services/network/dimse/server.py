@@ -17,9 +17,7 @@ from typing import Optional, Tuple, List
 
 from pynetdicom.ae import ApplicationEntity as AE
 from pynetdicom.presentation import build_context
-from pynetdicom.sop_class import Verification
-from pynetdicom.sop_class import ModalityWorklistInformationFind 
-from pynetdicom.sop_class import ModalityPerformedProcedureStep
+from pynetdicom import sop_class
 from pynetdicom import evt
 from pynetdicom._globals import ALL_TRANSFER_SYNTAXES
 from pydicom.uid import UID
@@ -139,10 +137,11 @@ SUPPORTED_TRANSFER_SYNTAXES = [
 ]
 
 contexts = []
+# Get the directory of the current script to build a reliable path
+server_dir = Path(__file__).parent
+contexts_file_path = server_dir / "supported_contexts.json"
+
 try:
-    # Get the directory of the current script to build a reliable path
-    server_dir = Path(__file__).parent
-    contexts_file_path = server_dir / "supported_contexts.json"
     logger.info("Loading supported storage contexts from JSON file", path=str(contexts_file_path))
     with open(contexts_file_path, 'r') as f:
         storage_contexts_data = json.load(f)
@@ -168,9 +167,9 @@ except Exception as e:
 
 
 # Now, add the non-storage service contexts
-contexts.append(build_context(Verification, SUPPORTED_TRANSFER_SYNTAXES))
-contexts.append(build_context(ModalityWorklistInformationFind, SUPPORTED_TRANSFER_SYNTAXES))
-contexts.append(build_context(ModalityPerformedProcedureStep, SUPPORTED_TRANSFER_SYNTAXES))
+contexts.append(build_context(getattr(sop_class, 'Verification'), SUPPORTED_TRANSFER_SYNTAXES))
+contexts.append(build_context(getattr(sop_class, 'ModalityWorklistInformationFind'), SUPPORTED_TRANSFER_SYNTAXES))
+contexts.append(build_context(getattr(sop_class, 'ModalityPerformedProcedureStep'), SUPPORTED_TRANSFER_SYNTAXES))
 
 # --- Event Handlers (Keep Existing) ---
 def log_assoc_event(event, msg_prefix):

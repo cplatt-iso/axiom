@@ -22,3 +22,5 @@ from .dicom_exception_log import DicomExceptionLog
 from .imaging_order import ImagingOrder, OrderStatus
 from .mpps import Mpps
 from .system_setting import SystemSetting
+from .facility import Facility
+from .modality import Modality

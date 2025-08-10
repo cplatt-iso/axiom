@@ -19,9 +19,9 @@ from app.worker.tasks import process_dicom_file_task
 from app.worker.celery_app import app as current_celery_app
 from app import crud, schemas
 from app.db.session import SessionLocal
+from sqlalchemy.orm import Session
 from app.schemas.enums import ProcessedStudySourceType, OrderStatus, MppsStatus
-from app.crud import crud_mpps
-
+from app.crud import crud_mpps, crud_modality
 
 from app.crud.crud_imaging_order import imaging_order
 from app.db.models.imaging_order import ImagingOrder
@@ -196,6 +196,73 @@ def _parse_dicom_date_range(date_str: str) -> tuple[Optional[date], Optional[dat
         logger.warn("DMWL_INVALID_DATE_FORMAT", provided_date=date_str)
         return None, None
 
+def _validate_modality_dmwl_access(db: Session, calling_ae: str, source_ip: str) -> tuple[bool, Optional[str], Optional[dict]]:
+    """
+    Validates if a modality is allowed to query the DMWL service.
+    
+    Args:
+        db: Database session
+        calling_ae: AE Title of the calling modality
+        source_ip: IP address of the calling modality
+        
+    Returns:
+        Tuple of (is_allowed, reason_if_denied, modality_info)
+    """
+    log = logger.bind(calling_ae=calling_ae, source_ip=source_ip)
+    
+    try:
+        # Check if modality is configured and allowed to query DMWL
+        is_allowed, modality = crud_modality.can_query_dmwl(
+            db, ae_title=calling_ae, ip_address=source_ip
+        )
+        
+        if not is_allowed:
+            # Try to find modality by AE title only for more specific error messaging
+            modality_by_ae = crud_modality.get_by_ae_title(db, ae_title=calling_ae)
+            
+            if not modality_by_ae:
+                log.warning("DMWL_ACCESS_DENIED_UNKNOWN_MODALITY")
+                return False, f"Modality with AE Title '{calling_ae}' is not configured", None
+            
+            if not modality_by_ae.is_active:
+                log.warning("DMWL_ACCESS_DENIED_INACTIVE_MODALITY", modality_id=modality_by_ae.id)
+                return False, f"Modality '{calling_ae}' is inactive", None
+                
+            if not modality_by_ae.is_dmwl_enabled:
+                log.warning("DMWL_ACCESS_DENIED_DMWL_DISABLED", modality_id=modality_by_ae.id)
+                return False, f"Modality '{calling_ae}' is not enabled for DMWL queries", None
+                
+            if modality_by_ae.ip_address != source_ip:
+                log.warning("DMWL_ACCESS_DENIED_IP_MISMATCH", 
+                           configured_ip=modality_by_ae.ip_address, 
+                           actual_ip=source_ip,
+                           modality_id=modality_by_ae.id)
+                return False, f"IP address mismatch for modality '{calling_ae}' (expected: {modality_by_ae.ip_address}, got: {source_ip})", None
+            
+            # Check if facility is active
+            if not modality_by_ae.facility or not modality_by_ae.facility.is_active:
+                log.warning("DMWL_ACCESS_DENIED_INACTIVE_FACILITY", modality_id=modality_by_ae.id)
+                return False, f"Facility for modality '{calling_ae}' is inactive", None
+        
+        if modality:
+            modality_info = {
+                "id": modality.id,
+                "ae_title": modality.ae_title,
+                "modality_type": modality.modality_type,
+                "facility_id": modality.facility_id,
+                "department": modality.department
+            }
+            log.info("DMWL_ACCESS_GRANTED", modality_id=modality.id, modality_type=modality.modality_type)
+            return True, None, modality_info
+        
+        # This shouldn't happen, but just in case
+        log.error("DMWL_ACCESS_VALIDATION_ERROR", reason="Unexpected validation result")
+        return False, "Internal validation error", None
+        
+    except Exception as e:
+        log.error("DMWL_ACCESS_VALIDATION_EXCEPTION", error=str(e), exc_info=True)
+        return False, f"Error validating modality access: {str(e)}", None
+
 def _imaging_order_to_dmwl_dataset(order: ImagingOrder) -> Dataset:
     """Converts our ImagingOrder model into a pydicom Dataset for a DMWL response."""
     ds = Dataset()
@@ -258,40 +325,59 @@ def handle_c_find(event):
         return
 
     log.info("C_FIND_DMWL_QUERY_DETECTED")
-    query_dataset = event.identifier
-    
-    # Extract top-level query parameters
-    accession_number = query_dataset.get("AccessionNumber", None)
-    patient_name = query_dataset.get("PatientName", None)
-    patient_id = query_dataset.get("PatientID", None)
-    
-    # Extract query parameters from the ScheduledProcedureStepSequence
-    # This is how a DMWL query is structured.
-    sps_query = query_dataset.ScheduledProcedureStepSequence[0]
-    
-    modality = sps_query.get("Modality", None)
-    ae_title = sps_query.get("ScheduledStationAETitle", None)
-    
-    # Extract and parse the date range
-    date_str = sps_query.get("ScheduledProcedureStepStartDate", "")
-    start_date, end_date = _parse_dicom_date_range(date_str)
-    
-    status_str = sps_query.get("ScheduledProcedureStepStatus", None)
-
-    log.info(
-        "C_FIND_DMWL_QUERY_PARAMS",
-        accession_number=accession_number,
-        modality=modality,
-        ae_title=ae_title,
-        date_range=date_str,
-        patient_name=patient_name,
-        patient_id=patient_id,
-        status=status_str,
-    )
     
     db = None
     try:
         db = SessionLocal()
+        
+        # Validate modality access before processing the query
+        calling_ae = event.assoc.requestor.ae_title
+        source_ip = event.assoc.requestor.address
+        
+        is_allowed, deny_reason, modality_info = _validate_modality_dmwl_access(
+            db, calling_ae, source_ip
+        )
+        
+        if not is_allowed:
+            log.warning("C_FIND_DMWL_ACCESS_DENIED", reason=deny_reason)
+            # Return successful response with 0 results for unauthorized modalities
+            # This prevents information disclosure about whether orders exist
+            yield (0x0000, None)
+            return
+        
+        log.info("C_FIND_DMWL_ACCESS_GRANTED", modality_info=modality_info)
+        
+        query_dataset = event.identifier
+        
+        # Extract top-level query parameters
+        accession_number = query_dataset.get("AccessionNumber", None)
+        patient_name = query_dataset.get("PatientName", None)
+        patient_id = query_dataset.get("PatientID", None)
+        
+        # Extract query parameters from the ScheduledProcedureStepSequence
+        # This is how a DMWL query is structured.
+        sps_query = query_dataset.ScheduledProcedureStepSequence[0]
+        
+        modality = sps_query.get("Modality", None)
+        ae_title = sps_query.get("ScheduledStationAETitle", None)
+        
+        # Extract and parse the date range
+        date_str = sps_query.get("ScheduledProcedureStepStartDate", "")
+        start_date, end_date = _parse_dicom_date_range(date_str)
+        
+        status_str = sps_query.get("ScheduledProcedureStepStatus", None)
+
+        log.info(
+            "C_FIND_DMWL_QUERY_PARAMS",
+            accession_number=accession_number,
+            modality=modality,
+            ae_title=ae_title,
+            date_range=date_str,
+            patient_name=patient_name,
+            patient_id=patient_id,
+            status=status_str,
+        )
+        
         # Use our glorious CRUD function
         worklist_items = imaging_order.get_worklist(
             db,

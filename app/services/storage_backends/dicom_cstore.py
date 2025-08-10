@@ -344,12 +344,14 @@ class CStoreStorage(BaseStorageBackend):
                     if client_cert_file and client_key_file:
                         ssl_context.load_cert_chain(certfile=client_cert_file, keyfile=client_key_file)
                     
-                    _tls_hostname_for_associate = self.dest_host if ssl_context and ssl_context.check_hostname else None
+                    # Prepare TLS args - if check_hostname is disabled, we can use the dest_host anyway
+                    # since hostname verification will be skipped by the SSL context
+                    tls_hostname = self.dest_host if ssl_context.check_hostname else self.dest_host
                     assoc = ae.associate(
                         self.dest_host,
                         self.dest_port,
                         ae_title=self.dest_ae_title,
-                        tls_args=(ssl_context, _tls_hostname_for_associate)
+                        tls_args=(ssl_context, tls_hostname)
                     )
                 except StorageBackendError as tls_prep_err: 
                     raise

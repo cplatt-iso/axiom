@@ -251,7 +251,7 @@ def manage_association_with_fallback(
             break
             
         metadata["attempts_made"] = attempt
-        log.info(f"Association attempt {attempt}", strategy=strategy)
+        log.info(f"Association attempt {attempt}")
         
         try:
             ae = AE(ae_title=local_ae_title)
@@ -293,12 +293,11 @@ def manage_association_with_fallback(
                     context_analysis = analyze_accepted_contexts(assoc)
                     
                     # Validate that we have useful contexts if SOP class was specified
+                    validation = None
                     if sop_class_uid:
                         validation = validate_negotiation_success(assoc, [sop_class_uid])
                         if not validation["success"]:
-                            log.warning("Required SOP class not supported by peer",
-                                       sop_class_uid=sop_class_uid,
-                                       missing_classes=validation["missing_sop_classes"])
+                            log.warning("Required SOP class not supported by peer")
                             # Continue anyway - let the caller handle this
                     
                     metadata.update({
@@ -308,10 +307,7 @@ def manage_association_with_fallback(
                         "validation": validation if sop_class_uid else None
                     })
                     
-                    log.info("Association established successfully", 
-                            strategy=strategy, 
-                            accepted_contexts=context_analysis.get("accepted_count", 0),
-                            peer_supports_compression=context_analysis.get("peer_supports_compression", False))
+                    log.info("Association established successfully")
                     
                     try:
                         yield assoc, metadata
@@ -333,8 +329,7 @@ def manage_association_with_fallback(
                         reason = "Aborted"
                     
                     last_exception = AssociationError(f"Association failed with strategy '{strategy}': {reason}", remote_ae=remote_ae_title)
-                    log.warning("Association failed, trying next strategy", 
-                               strategy=strategy, reason=reason, next_attempt=attempt+1)
+                    log.warning("Association failed, trying next strategy")
                     
             finally:
                 for file_path in temp_files_created_scu:
@@ -347,10 +342,10 @@ def manage_association_with_fallback(
             raise e
         except ssl.SSLError as e: 
             last_exception = AssociationError("TLS Handshake Error", remote_ae=remote_ae_title, details=str(e))
-            log.error("TLS error, trying next strategy", strategy=strategy, error=str(e))
+            log.error("TLS error, trying next strategy")
         except Exception as e: 
             last_exception = AssociationError("Unexpected association error", remote_ae=remote_ae_title, details=str(e))
-            log.error("Unexpected error, trying next strategy", strategy=strategy, error=str(e))
+            log.error("Unexpected error, trying next strategy")
 
     # If we get here, all strategies failed
     if last_exception:
@@ -579,11 +574,17 @@ def store_dataset(
         ) as (assoc, metadata):
             
             # Find the best presentation context for this dataset
-            compatible_context, reason = find_compatible_transfer_syntax(
+            context_result = find_compatible_transfer_syntax(
                 dataset=dataset,
                 accepted_contexts=assoc.accepted_contexts,
                 sop_class_uid=sop_class_uid
             )
+            
+            if context_result is None:
+                compatible_context = None
+                reason = "No compatible transfer syntax found"
+            else:
+                compatible_context, reason = context_result
             
             if not compatible_context:
                 from .transfer_syntax_negotiation import handle_cstore_context_error
@@ -598,10 +599,7 @@ def store_dataset(
                     details=str(error_analysis)
                 )
             
-            log.info("Found compatible presentation context", 
-                    context_id=compatible_context.context_id,
-                    transfer_syntax=compatible_context.transfer_syntax,
-                    reason=reason)
+            log.info("Found compatible presentation context")
             
             # Perform the C-STORE (pynetdicom automatically selects the right context)
             status = assoc.send_c_store(dataset)
@@ -610,10 +608,7 @@ def store_dataset(
                 status_int = int(status.Status)
                 
                 if status_int == 0x0000:  # Success
-                    log.info("C-STORE successful", 
-                            status=f"0x{status_int:04X}",
-                            strategy_used=metadata.get("strategy_used"),
-                            transfer_syntax=compatible_context.transfer_syntax)
+                    log.info("C-STORE successful")
                     
                     return {
                         "status": "success",
@@ -738,15 +733,21 @@ def store_datasets_batch(
                     sop_instance_uid = str(dataset.SOPInstanceUID)
                     
                     # Find compatible context for this dataset
-                    compatible_context, reason = find_compatible_transfer_syntax(
+                    context_result = find_compatible_transfer_syntax(
                         dataset=dataset,
                         accepted_contexts=assoc.accepted_contexts,
                         sop_class_uid=sop_class_uid
                     )
                     
+                    if context_result is None:
+                        compatible_context = None
+                        reason = "No compatible transfer syntax found"
+                    else:
+                        compatible_context, reason = context_result
+                    
                     if not compatible_context:
                         error_msg = f"No compatible presentation context for dataset {i+1}"
-                        log.warning(error_msg, sop_instance_uid=sop_instance_uid)
+                        log.warning(error_msg)
                         results["details"].append({
                             "dataset_index": i,
                             "sop_instance_uid": sop_instance_uid,
@@ -769,8 +770,7 @@ def store_datasets_batch(
                             "context_id": compatible_context.context_id
                         })
                         results["successful"] += 1
-                        log.debug("Dataset stored successfully", 
-                                dataset_index=i, sop_instance_uid=sop_instance_uid)
+                        log.debug("Dataset stored successfully")
                     else:
                         error_msg = f"C-STORE failed for dataset {i+1}"
                         if status and hasattr(status, 'Status'):
@@ -789,7 +789,7 @@ def store_datasets_batch(
                         
                 except Exception as dataset_error:
                     error_msg = f"Error processing dataset {i+1}: {str(dataset_error)}"
-                    log.error(error_msg, dataset_index=i)
+                    log.error(error_msg)
                     
                     results["details"].append({
                         "dataset_index": i,
@@ -802,9 +802,7 @@ def store_datasets_batch(
                     if not continue_on_error:
                         raise
         
-        log.info("Batch C-STORE completed", 
-                successful=results["successful"], 
-                failed=results["failed"])
+        log.info("Batch C-STORE completed")
         
         return results
         

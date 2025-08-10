@@ -6,6 +6,21 @@ from .mpps import (
     MppsRead,
 )
 
+# --- Facility and Modality Schemas ---
+from .facility import (
+    FacilityBase,
+    FacilityCreate,
+    FacilityUpdate,
+    Facility,
+    FacilityModalityInfo,
+)
+from .modality import (
+    ModalityBase,
+    ModalityCreate,
+    ModalityUpdate,
+    Modality,
+)
+
 # --- Rule Schemas ---
 from .rule import (
     # Base/Common
@@ -242,6 +257,10 @@ __all__ = [
     "OrderStatus", 
     # MPPS
     "MppsBase", "MppsCreate", "MppsUpdate", "MppsRead",
+    # Facility and Modality
+    "FacilityBase", "FacilityCreate", "FacilityUpdate", "Facility", 
+    "FacilityModalityInfo",
+    "ModalityBase", "ModalityCreate", "ModalityUpdate", "Modality", 
     # System Settings
     "SystemSettingCreate",
     "SystemSettingUpdate",

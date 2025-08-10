@@ -5,6 +5,7 @@ Test for the specific transfer syntax list handling fixes.
 
 import sys
 import os
+from typing import Any, List
 sys.path.append('/app')
 
 from app.services.network.dimse.transfer_syntax_negotiation import (
@@ -15,12 +16,13 @@ from app.services.network.dimse.transfer_syntax_negotiation import (
 
 from pydicom.dataset import Dataset
 from pydicom.uid import CTImageStorage, ImplicitVRLittleEndian
-from pynetdicom.presentation import build_context
+from pynetdicom.presentation import build_context, PresentationContext
+from pynetdicom.association import Association
 
-def create_mock_accepted_context():
+def create_mock_accepted_context() -> Any:
     """Create a mock context that mimics pynetdicom's accepted context structure."""
     class MockContext:
-        def __init__(self, context_id, abstract_syntax, transfer_syntax):
+        def __init__(self, context_id: int, abstract_syntax: str, transfer_syntax: Any):
             self.context_id = context_id
             self.abstract_syntax = abstract_syntax
             # This is a list as it comes from pynetdicom
@@ -28,7 +30,7 @@ def create_mock_accepted_context():
     
     return MockContext(1, CTImageStorage, [ImplicitVRLittleEndian])
 
-def create_mock_association():
+def create_mock_association() -> Any:
     """Create a mock association."""
     class MockAssociation:
         def __init__(self):
@@ -64,7 +66,7 @@ def test_find_compatible_transfer_syntax():
     try:
         result = find_compatible_transfer_syntax(
             dataset=ds,
-            accepted_contexts=accepted_contexts,
+            accepted_contexts=accepted_contexts,  # type: ignore[arg-type]
             sop_class_uid=CTImageStorage
         )
         
@@ -89,7 +91,7 @@ def test_analyze_accepted_contexts():
     mock_assoc = create_mock_association()
     
     try:
-        analysis = analyze_accepted_contexts(mock_assoc)
+        analysis = analyze_accepted_contexts(mock_assoc)  # type: ignore[arg-type]
         
         print(f"✓ Analysis completed: {analysis['accepted_count']} accepted contexts")
         for ctx in analysis['accepted_contexts']:
@@ -111,7 +113,7 @@ def test_handle_cstore_context_error():
         error_analysis = handle_cstore_context_error(
             sop_class_uid=CTImageStorage,
             required_transfer_syntax=ImplicitVRLittleEndian,
-            association=mock_assoc
+            association=mock_assoc  # type: ignore[arg-type]
         )
         
         print(f"✓ Error analysis completed for {error_analysis['sop_class_name']}")

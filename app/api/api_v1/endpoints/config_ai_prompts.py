@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, schemas
 from app.api import deps
+from app.db import models
 # from app.db.models.user import User # Not actively used in current functions
 
 # Placeholder for Vertex AI service availability (assuming these are defined elsewhere, e.g. ai_assist_service.py and imported)
@@ -36,6 +37,7 @@ def create_ai_prompt_config(
     *,
     db: Session = Depends(deps.get_db),
     ai_prompt_config_in: schemas.AIPromptConfigCreate,
+    current_user: models.User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
     Create a new AI Prompt Configuration.
@@ -81,6 +83,7 @@ def read_ai_prompt_config(
     *,
     db: Session = Depends(deps.get_db),
     config_id: int,
+    current_user: models.User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
     Get a specific AI Prompt Configuration by its ID.
@@ -108,6 +111,7 @@ def read_ai_prompt_configs(
     is_enabled: Optional[bool] = Query(None, description="Filter by enabled status (true/false)"),
     dicom_tag_keyword: Optional[str] = Query(None, description="Filter by DICOM tag keyword (exact match)"),
     model_identifier: Optional[str] = Query(None, description="Filter by AI model identifier (exact match)"),
+    current_user: models.User = Depends(deps.get_current_active_user),
 
 ) -> Any:
     """
@@ -141,6 +145,7 @@ def update_ai_prompt_config(
     db: Session = Depends(deps.get_db),
     config_id: int,
     ai_prompt_config_in: schemas.AIPromptConfigUpdate,
+    current_user: models.User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
     Update an existing AI Prompt Configuration.
@@ -184,6 +189,7 @@ def delete_ai_prompt_config(
     *,
     db: Session = Depends(deps.get_db),
     config_id: int,
+    current_user: models.User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
     Delete an AI Prompt Configuration by its ID.
@@ -250,7 +256,7 @@ def get_vertex_generative_models_placeholder() -> List[Dict[str, str]]:
     tags=["AI Configuration", "AI Assist"] # Added tags for Swagger UI grouping
 )
 def list_available_vertex_ai_models(
-    # current_user: User = Depends(deps.get_current_active_user) # If auth is needed
+    current_user: models.User = Depends(deps.get_current_active_user),
 ):
     """
     Provides a list of available Vertex AI generative models that can be used

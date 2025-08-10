@@ -69,7 +69,8 @@ class TransferSyntaxStrategy:
 
 def get_transfer_syntaxes_for_strategy(strategy: str) -> List[str]:
     """Get transfer syntaxes for a given strategy."""
-    return TransferSyntaxStrategy.STRATEGY_MAP.get(strategy, CONSERVATIVE_TRANSFER_SYNTAXES).copy()
+    uid_list = TransferSyntaxStrategy.STRATEGY_MAP.get(strategy, CONSERVATIVE_TRANSFER_SYNTAXES).copy()
+    return [str(uid_obj) for uid_obj in uid_list]
 
 def detect_dataset_transfer_syntax(dataset: Dataset) -> Optional[str]:
     """
@@ -97,7 +98,7 @@ def detect_dataset_transfer_syntax(dataset: Dataset) -> Optional[str]:
 
 def create_presentation_contexts_with_fallback(
     sop_class_uid: str, 
-    strategies: List[str] = None,
+    strategies: Optional[List[str]] = None,
     max_contexts_per_strategy: int = 3
 ) -> List[PresentationContext]:
     """
@@ -181,7 +182,10 @@ def analyze_accepted_contexts(association: Association) -> Dict[str, Any]:
     
     for context in association.accepted_contexts:
         try:
-            sop_name = UID(context.abstract_syntax).name
+            if context.abstract_syntax:
+                sop_name = UID(context.abstract_syntax).name
+            else:
+                sop_name = "Unknown SOP Class"
         except:
             sop_name = "Unknown SOP Class"
         
@@ -202,8 +206,9 @@ def analyze_accepted_contexts(association: Association) -> Dict[str, Any]:
     
     # Try to get rejected contexts if the attribute exists
     # Note: pynetdicom may not expose requested_contexts in all versions
-    if hasattr(association, 'requested_contexts') and association.requested_contexts:
-        for context in association.requested_contexts:
+    requested_contexts = getattr(association, 'requested_contexts', None)
+    if requested_contexts:
+        for context in requested_contexts:
             if not any(ac.context_id == context.context_id for ac in association.accepted_contexts):
                 ctx_ts = context.transfer_syntax
                 if isinstance(ctx_ts, list):
@@ -241,12 +246,12 @@ def _get_transfer_syntax_name(ts_uid: str) -> str:
     except:
         # Manual mapping for common ones
         name_map = {
-            uid.ImplicitVRLittleEndian: "Implicit VR Little Endian",
-            uid.ExplicitVRLittleEndian: "Explicit VR Little Endian", 
-            uid.ExplicitVRBigEndian: "Explicit VR Big Endian",
-            uid.RLELossless: "RLE Lossless",
-            uid.JPEG2000Lossless: "JPEG 2000 Lossless",
-            uid.JPEG2000: "JPEG 2000",
+            str(uid.ImplicitVRLittleEndian): "Implicit VR Little Endian",
+            str(uid.ExplicitVRLittleEndian): "Explicit VR Little Endian", 
+            str(uid.ExplicitVRBigEndian): "Explicit VR Big Endian",
+            str(uid.RLELossless): "RLE Lossless",
+            str(uid.JPEG2000Lossless): "JPEG 2000 Lossless",
+            str(uid.JPEG2000): "JPEG 2000",
         }
         return name_map.get(ts_uid, f"Unknown ({ts_uid})")
 
@@ -384,7 +389,7 @@ def create_optimized_contexts_for_sop_class(
     """
     if preferred_transfer_syntaxes is None:
         # Use conservative approach by default
-        preferred_transfer_syntaxes = CONSERVATIVE_TRANSFER_SYNTAXES
+        preferred_transfer_syntaxes = [str(uid_obj) for uid_obj in CONSERVATIVE_TRANSFER_SYNTAXES]
     
     contexts = []
     context_id = 1

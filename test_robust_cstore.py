@@ -17,7 +17,7 @@ from app.services.network.dimse.transfer_syntax_negotiation import (
 from app.services.network.dimse.scu_service import store_dataset
 
 from pydicom.dataset import Dataset
-from pydicom.uid import CTImageStorage, ImplicitVRLittleEndian
+from pydicom.uid import CTImageStorage, ImplicitVRLittleEndian, UID
 from pynetdicom.presentation import build_context
 
 def test_transfer_syntax_strategies():
@@ -63,9 +63,9 @@ def create_sample_dataset():
     """Create a sample CT dataset for testing."""
     ds = Dataset()
     ds.SOPClassUID = CTImageStorage
-    ds.SOPInstanceUID = "1.2.3.4.5.6.7.8.9.10"
-    ds.StudyInstanceUID = "1.2.3.4.5.6.7.8.9"
-    ds.SeriesInstanceUID = "1.2.3.4.5.6.7.8"
+    ds.SOPInstanceUID = UID("1.2.3.4.5.6.7.8.9.10")
+    ds.StudyInstanceUID = UID("1.2.3.4.5.6.7.8.9")
+    ds.SeriesInstanceUID = UID("1.2.3.4.5.6.7.8")
     ds.PatientName = "Test^Patient"
     ds.PatientID = "TEST123"
     ds.Modality = "CT"
@@ -85,7 +85,7 @@ def create_sample_dataset():
     ds.file_meta.MediaStorageSOPClassUID = CTImageStorage
     ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
     ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
-    ds.file_meta.ImplementationClassUID = "1.2.3.4.5.6.7.8.9.10.11"
+    ds.file_meta.ImplementationClassUID = UID("1.2.3.4.5.6.7.8.9.10.11")
     
     return ds
 

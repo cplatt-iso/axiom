@@ -26,6 +26,8 @@ from app.api.api_v1.endpoints import (
     orders,
     mpps,
     system_settings,
+    facilities,
+    modalities,
 )
 
 api_router = APIRouter()
@@ -45,6 +47,10 @@ api_router.include_router(dicom_exceptions.router, prefix="/exceptions", tags=["
 
 api_router.include_router(orders.router, prefix="/orders", tags=["Imaging Orders"])
 api_router.include_router(mpps.router, prefix="/mpps", tags=["MPPS"])
+
+# Facility and Modality Management
+api_router.include_router(facilities.router, prefix="/facilities", tags=["Facilities"])
+api_router.include_router(modalities.router, prefix="/modalities", tags=["Modalities"])
 
 # Add route for new system config area if needed (using placeholder endpoint)
 # api_router.include_router(system_config_placeholder.router, prefix="/admin/system-config", tags=["System Configuration"])

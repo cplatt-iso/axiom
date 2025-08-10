@@ -17,3 +17,5 @@ from .crud_dicom_exception_log import dicom_exception_log
 from .crud_imaging_order import imaging_order
 from .crud_mpps import mpps
 from .crud_system_setting import system_setting
+from . import crud_facility
+from . import crud_modality
