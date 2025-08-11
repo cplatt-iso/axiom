@@ -250,9 +250,24 @@ def _validate_modality_dmwl_access(db: Session, calling_ae: str, source_ip: str)
                 "ae_title": modality.ae_title,
                 "modality_type": modality.modality_type,
                 "facility_id": modality.facility_id,
-                "department": modality.department
+                "department": modality.department,
+                "bypass_ip_validation": modality.bypass_ip_validation,
+                "configured_ip": modality.ip_address,
+                "actual_ip": source_ip
             }
-            log.info("DMWL_ACCESS_GRANTED", modality_id=modality.id, modality_type=modality.modality_type)
+            
+            # Enhanced logging for bypass cases
+            if modality.bypass_ip_validation and modality.ip_address != source_ip:
+                log.info("DMWL_ACCESS_GRANTED_VIA_IP_BYPASS", 
+                        modality_id=modality.id, 
+                        modality_type=modality.modality_type,
+                        configured_ip=modality.ip_address,
+                        actual_ip=source_ip)
+            else:
+                log.info("DMWL_ACCESS_GRANTED", 
+                        modality_id=modality.id, 
+                        modality_type=modality.modality_type)
+            
             return True, None, modality_info
         
         # This shouldn't happen, but just in case

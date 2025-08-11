@@ -46,6 +46,7 @@ class ModalityBase(BaseModel):
     # Security and Access Control
     is_active: bool = Field(True, description="Whether this modality is currently active.")
     is_dmwl_enabled: bool = Field(True, description="Whether this modality is allowed to query the modality worklist.")
+    bypass_ip_validation: bool = Field(False, description="Whether this modality can bypass IP address validation (for testing/containers).")
     
     # Facility Relationship
     facility_id: int = Field(..., description="ID of the facility this modality belongs to.")
@@ -104,6 +105,7 @@ class ModalityUpdate(BaseModel):
     modality_type: Optional[str] = Field(None, min_length=1, max_length=16)
     is_active: Optional[bool] = None
     is_dmwl_enabled: Optional[bool] = None
+    bypass_ip_validation: Optional[bool] = None
     facility_id: Optional[int] = None
     manufacturer: Optional[str] = Field(None, max_length=255)
     model: Optional[str] = Field(None, max_length=255)

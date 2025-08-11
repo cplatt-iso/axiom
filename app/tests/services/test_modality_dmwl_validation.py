@@ -223,3 +223,75 @@ class TestModalityDmwlValidation:
         assert "facility" in reason.lower()
         assert "inactive" in reason.lower()
         assert modality_info is None
+
+    def test_validate_bypass_ip_validation_success(self):
+        """Test that a modality with bypass_ip_validation=True can access from any IP."""
+        # Arrange
+        mock_db = Mock(spec=Session)
+        
+        # Create mock facility
+        mock_facility = Mock(spec=Facility)
+        mock_facility.id = 1
+        mock_facility.is_active = True
+        
+        # Create mock modality with bypass enabled
+        mock_modality = Mock(spec=Modality)
+        mock_modality.id = 1
+        mock_modality.ae_title = "BYPASS_CT"
+        mock_modality.ip_address = "192.168.1.100"  # Configured IP
+        mock_modality.is_active = True
+        mock_modality.is_dmwl_enabled = True
+        mock_modality.bypass_ip_validation = True
+        mock_modality.modality_type = "CT"
+        mock_modality.facility_id = 1
+        mock_modality.department = "Radiology"
+        mock_modality.facility = mock_facility
+        
+        # Mock the CRUD function to return authorized modality (bypass case)
+        crud_modality.can_query_dmwl = Mock(return_value=(True, mock_modality))
+        
+        # Act - Request from different IP than configured
+        is_allowed, reason, modality_info = _validate_modality_dmwl_access(
+            mock_db, "BYPASS_CT", "192.168.1.999"  # Different IP
+        )
+        
+        # Assert
+        assert is_allowed is True
+        assert reason is None
+        assert modality_info is not None
+        assert modality_info["id"] == 1
+        assert modality_info["ae_title"] == "BYPASS_CT"
+        assert modality_info["bypass_ip_validation"] is True
+        assert modality_info["configured_ip"] == "192.168.1.100"
+        assert modality_info["actual_ip"] == "192.168.1.999"
+
+    def test_validate_bypass_ip_validation_disabled(self):
+        """Test that bypass_ip_validation=False still enforces IP validation."""
+        # Arrange
+        mock_db = Mock(spec=Session)
+        
+        # Create mock modality with bypass disabled
+        mock_modality = Mock(spec=Modality)
+        mock_modality.id = 1
+        mock_modality.ae_title = "NO_BYPASS_CT"
+        mock_modality.ip_address = "192.168.1.100"
+        mock_modality.is_active = True
+        mock_modality.is_dmwl_enabled = True
+        mock_modality.bypass_ip_validation = False
+        
+        # Mock the CRUD functions to deny access (IP mismatch)
+        crud_modality.can_query_dmwl = Mock(return_value=(False, None))
+        crud_modality.get_by_ae_title = Mock(return_value=mock_modality)
+        
+        # Act - Request from different IP than configured
+        is_allowed, reason, modality_info = _validate_modality_dmwl_access(
+            mock_db, "NO_BYPASS_CT", "192.168.1.999"  # Different IP
+        )
+        
+        # Assert
+        assert is_allowed is False
+        assert reason is not None
+        assert "IP address mismatch" in reason
+        assert "192.168.1.100" in reason  # Expected IP
+        assert "192.168.1.999" in reason  # Actual IP
+        assert modality_info is None

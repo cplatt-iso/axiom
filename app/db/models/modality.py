@@ -54,6 +54,10 @@ class Modality(Base):
         Boolean, default=True, nullable=False, index=True,
         comment="Whether this modality is allowed to query the modality worklist."
     )
+    bypass_ip_validation: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True,
+        comment="Whether this modality can bypass IP address validation (for testing/containers)."
+    )
 
     # --- Facility Relationship ---
     facility_id: Mapped[int] = mapped_column(

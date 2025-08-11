@@ -181,8 +181,13 @@ def can_query_dmwl(db: Session, *, ae_title: str, ip_address: Optional[str] = No
     """
     Check if a modality (identified by AE Title and optionally IP) is allowed to query DMWL.
     Returns (allowed, modality_object) tuple.
+    
+    A modality can query DMWL if:
+    1. Normal case: AE title matches, IP matches, and all status flags are enabled
+    2. Bypass case: AE title matches, bypass_ip_validation is True, and all status flags are enabled
     """
-    statement = (
+    # Base query for active modality with DMWL enabled and active facility
+    base_statement = (
         select(models.Modality)
         .join(models.Facility)
         .where(
@@ -196,7 +201,24 @@ def can_query_dmwl(db: Session, *, ae_title: str, ip_address: Optional[str] = No
     )
     
     if ip_address:
-        statement = statement.where(models.Modality.ip_address == ip_address)
+        # Try normal case first: AE title + IP address match
+        normal_statement = base_statement.where(models.Modality.ip_address == ip_address)
+        modality = db.scalar(normal_statement)
+        
+        if modality:
+            return True, modality
+        
+        # If normal case fails, try bypass case: AE title + bypass flag
+        bypass_statement = base_statement.where(models.Modality.bypass_ip_validation == True)
+        modality = db.scalar(bypass_statement)
+        
+        if modality:
+            logger.info(f"Modality {ae_title} granted DMWL access via IP bypass (expected: {modality.ip_address}, actual: {ip_address})")
+            return True, modality
+    else:
+        # If no IP provided, just check AE title and bypass flag
+        modality = db.scalar(base_statement)
+        if modality:
+            return True, modality
     
-    modality = db.scalar(statement)
-    return modality is not None, modality
+    return False, None
