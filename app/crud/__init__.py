@@ -7,6 +7,7 @@ from .crud_dimse_listener_state import crud_dimse_listener_state
 from .crud_dicomweb_source import dicomweb_source 
 from .crud_dimse_listener_config import crud_dimse_listener_config
 from .crud_dimse_qr_source import crud_dimse_qr_source
+from .crud_spanner import crud_spanner_config, crud_spanner_source_mapping, crud_spanner_query_log
 from .crud_processed_study_log import crud_processed_study_log
 from .crud_storage_backend_config import crud_storage_backend_config
 from .crud_crosswalk import crud_crosswalk_data_source, crud_crosswalk_map

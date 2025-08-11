@@ -15,6 +15,7 @@ from app.api.api_v1.endpoints import (
     config_dicomweb,
     config_dimse_listeners,
     config_dimse_qr,
+    config_spanner,
     config_storage_backends,
     config_crosswalk,
     config_schedules,
@@ -28,6 +29,9 @@ from app.api.api_v1.endpoints import (
     system_settings,
     facilities,
     modalities,
+    spanner_qido,
+    spanner_wado,
+    spanner_services,
 )
 
 api_router = APIRouter()
@@ -72,6 +76,11 @@ api_router.include_router(
     tags=["Configuration - DIMSE Q/R Sources"]
 )
 api_router.include_router(
+    config_spanner.router,
+    prefix="/config/spanner",
+    tags=["Configuration - Query Spanning"]
+)
+api_router.include_router(
     config_storage_backends.router,
     prefix="/config/storage-backends",
     tags=["Configuration - Storage Backends"]
@@ -89,3 +98,20 @@ api_router.include_router(
 api_router.include_router(config_google_healthcare_sources.router, prefix="/config/google-healthcare-sources", tags=["Configuration - Google Healthcare Sources"])
 api_router.include_router(config_ai_prompts.router, prefix="/config/ai-prompts", tags=["Configuration - AI Prompts"])
 api_router.include_router(system_settings.router, prefix="/system-settings", tags=["System Settings"])
+
+# Spanner DICOMweb Endpoints
+api_router.include_router(
+    spanner_qido.router,
+    prefix="/spanner/qido",
+    tags=["Spanner - QIDO-RS Query Spanning"]
+)
+api_router.include_router(
+    spanner_wado.router,
+    prefix="/spanner/wado",
+    tags=["Spanner - WADO-RS Retrieval Spanning"]
+)
+api_router.include_router(
+    spanner_services.router,
+    prefix="/spanner/services",
+    tags=["Spanner - Service Management"]
+)

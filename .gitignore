@@ -215,6 +215,11 @@ public/page-data/
 # Netbeans
 nbproject/
 
+# VS Code - Personal configurations
+.vscode/copilot-instructions.md
+.vscode/settings.json
+.vscode/launch.json
+
 # --- Docker ---
 # Avoid committing potentially large volume data if stored locally
 # (Keep these commented unless you store runtime volume data inside the project dir)

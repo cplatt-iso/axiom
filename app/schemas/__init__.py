@@ -198,6 +198,24 @@ from .system_setting import (
     SystemSettingUpdate,
     SystemSettingRead
 )
+from .spanner import (
+    SpannerConfigCreate,
+    SpannerConfigUpdate, 
+    SpannerConfigRead,
+    SpannerConfigListResponse,
+    SpannerSourceMappingCreate,
+    SpannerSourceMappingUpdate,
+    SpannerSourceMappingRead,
+    SpannerSourceMappingListResponse,
+    SpannerQueryLogRead,
+    SpannerQueryLogListResponse,
+    SpannerTestRequest,
+    SpannerTestResult,
+    FailureStrategy,
+    DeduplicationStrategy,
+    CMoveStrategy,
+    QueryStatus
+)
 # --- Data Browser Schemas (if defined) ---
 # from .data_browser import QueryLevel, DataBrowserQuery, DataBrowserResultItem, DataBrowserResult
 

@@ -1,0 +1,31 @@
+# scripts/axiom-spanner.service
+[Unit]
+Description=Axiom DICOM Query Spanning Services
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=axiom
+Group=axiom
+WorkingDirectory=/opt/axiom/backend
+Environment=PYTHONPATH=/opt/axiom/backend
+ExecStart=/opt/axiom/backend/.venv/bin/python /opt/axiom/backend/scripts/start_spanner_services.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/axiom /opt/axiom/backend/logs
+
+[Install]
+WantedBy=multi-user.target

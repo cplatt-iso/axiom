@@ -1,0 +1,95 @@
+# Dockerfile.spanner
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN useradd --create-home --shell /bin/bash app
+
+# Set work directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
+COPY scripts/ ./scripts/
+
+# Create logs directory
+RUN mkdir -p /app/logs && chown -R app:app /app/logs
+
+# Create startup script for spanner
+COPY <<EOF /app/start_spanner.sh
+#!/bin/bash
+set -e
+
+echo "Starting Axiom DICOM Query Spanner..."
+
+# Wait for database
+echo "Waiting for database connection..."
+python -c "
+import time
+import psycopg2
+import os
+from urllib.parse import urlparse
+
+db_url = os.getenv('DATABASE_URL')
+parsed = urlparse(db_url)
+
+for i in range(30):
+    try:
+        conn = psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port,
+            database=parsed.path[1:],
+            user=parsed.username,
+            password=parsed.password
+        )
+        conn.close()
+        print('Database is ready!')
+        break
+    except psycopg2.OperationalError:
+        print(f'Database not ready, waiting... ({i+1}/30)')
+        time.sleep(2)
+else:
+    print('Database connection timeout!')
+    exit(1)
+"
+
+# Run database migrations
+echo "Running database migrations..."
+alembic upgrade head
+
+# Start spanner services
+echo "Starting spanner services..."
+exec python scripts/start_spanner_services.py
+EOF
+
+RUN chmod +x /app/start_spanner.sh && chown app:app /app/start_spanner.sh
+
+# Switch to app user
+USER app
+
+# Expose DIMSE ports
+EXPOSE 11112-11120
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import socket; s = socket.socket(); s.settimeout(5); s.connect(('localhost', 11112)); s.close()" || exit 1
+
+# Start spanner services
+CMD ["/app/start_spanner.sh"]
