@@ -38,6 +38,8 @@ from app.schemas.system import (
     DimseListenersStatusResponse,
     DimseQrSourceStatus,
     DimseQrSourcesStatusResponse,
+    GoogleHealthcareSourceStatus,
+    GoogleHealthcareSourcesStatusResponse,
     DiskUsageStats, # Import updated schema
     DirectoryUsageStats, # Import new schema
     SystemInfo
@@ -232,6 +234,35 @@ def get_dimse_qr_sources_status(
     except Exception as e:
         logger.error(f"Error retrieving DIMSE Q/R source status from DB: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error retrieving DIMSE Q/R source status.")
+
+
+# --- Google Healthcare Source Status Endpoint ---
+@router.get(
+    "/google-healthcare-sources/status",
+    response_model=GoogleHealthcareSourcesStatusResponse,
+    summary="Get Status of Configured Google Healthcare Sources",
+    dependencies=[Depends(deps.get_current_active_user)],
+    tags=["System Status"],
+)
+def get_google_healthcare_sources_status(
+    *,
+    db: Session = Depends(deps.get_db),
+    skip: int = Query(0, ge=0, description="Number of records to skip."),
+    limit: int = Query(100, ge=1, le=500, description="Maximum number of records."),
+) -> GoogleHealthcareSourcesStatusResponse:
+    """
+    Retrieves the current configuration and health status for all Google Healthcare sources
+    from the database.
+    """
+    logger.debug("Request received for Google Healthcare source status.")
+    try:
+        ghc_sources_db: List[models.GoogleHealthcareSource] = crud.google_healthcare_source.get_multi(db=db, skip=skip, limit=limit)
+        # Convert each DB model to the Pydantic schema model
+        response_sources = [GoogleHealthcareSourceStatus.model_validate(gs) for gs in ghc_sources_db]
+        return GoogleHealthcareSourcesStatusResponse(sources=response_sources)
+    except Exception as e:
+        logger.error(f"Error retrieving Google Healthcare source status from DB: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error retrieving Google Healthcare source status.")
 
 
 # --- Helper Function to Get Directory Size ---

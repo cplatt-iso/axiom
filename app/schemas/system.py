@@ -4,6 +4,8 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
 
+from app.schemas.enums import HealthStatus
+
 class DirectoryUsageStats(BaseModel):
     path: str = Field(..., description="The directory path checked.")
     content_bytes: int = Field(..., description="Total size of files within this directory in bytes.")
@@ -26,6 +28,10 @@ class DicomWebSourceStatus(BaseModel):
     found_instance_count: int = Field(0, description="Total instances found by QIDO.")
     queued_instance_count: int = Field(0, description="Total instances queued for processing.")
     processed_instance_count: int = Field(0, description="Total instances successfully processed.")
+    # --- ADDED Health Status ---
+    health_status: HealthStatus = Field(HealthStatus.UNKNOWN, description="Connection health status")
+    last_health_check: Optional[datetime] = Field(None, description="Last health check timestamp")
+    last_health_error: Optional[str] = Field(None, description="Last health check error message")
     # --- END ADDED ---
 
     model_config = ConfigDict(from_attributes=True) # Use ConfigDict for Pydantic v2
@@ -81,6 +87,11 @@ class DimseQrSourceStatus(BaseModel):
     found_study_count: int = Field(0, description="Total studies found by C-FIND.")
     move_queued_study_count: int = Field(0, description="Total studies queued for C-MOVE.")
     processed_instance_count: int = Field(0, description="Total instances processed after C-MOVE.")
+    # --- ADDED Health Status ---
+    health_status: HealthStatus = Field(HealthStatus.UNKNOWN, description="Connection health status")
+    last_health_check: Optional[datetime] = Field(None, description="Last health check timestamp")
+    last_health_error: Optional[str] = Field(None, description="Last health check error message")
+    # --- END ADDED ---
 
     model_config = ConfigDict(from_attributes=True) # Use ConfigDict for Pydantic v2
 
@@ -88,6 +99,32 @@ class DimseQrSourcesStatusResponse(BaseModel):
     """Schema for the API response containing all DIMSE Q/R source statuses."""
     sources: List[DimseQrSourceStatus] = []
 # --- END DIMSE Q/R Source Status Schemas ---
+
+# --- Google Healthcare Source Status Schemas ---
+class GoogleHealthcareSourceStatus(BaseModel):
+    """Schema representing the status of a Google Healthcare source."""
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    name: str
+    is_enabled: bool
+    gcp_project_id: str = Field(..., description="Google Cloud project ID")
+    gcp_dataset_id: str = Field(..., description="Healthcare dataset ID")
+    gcp_dicom_store_id: str = Field(..., description="DICOM store ID")
+    gcp_location: str = Field(..., description="Google Cloud location/region")
+    # --- Health Status ---
+    health_status: HealthStatus = Field(HealthStatus.UNKNOWN, description="Connection health status")
+    last_health_check: Optional[datetime] = Field(None, description="Last health check timestamp")
+    last_health_error: Optional[str] = Field(None, description="Last health check error message")
+    # --- END Health Status ---
+
+    model_config = ConfigDict(from_attributes=True)
+
+class GoogleHealthcareSourcesStatusResponse(BaseModel):
+    """Schema for the API response containing all Google Healthcare source statuses."""
+    sources: List[GoogleHealthcareSourceStatus] = []
+# --- END Google Healthcare Source Status Schemas ---
 
 class DiskUsageStats(BaseModel):
     # Keep overall filesystem stats for context

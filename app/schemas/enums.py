@@ -65,3 +65,10 @@ class MppsStatus(str, enum.Enum):
     IN_PROGRESS = "IN PROGRESS"
     COMPLETED = "COMPLETED"
     DISCONTINUED = "DISCONTINUED"
+
+class HealthStatus(str, enum.Enum):
+    """Health status of a scraper source."""
+    UNKNOWN = "UNKNOWN"
+    OK = "OK"
+    DOWN = "DOWN"
+    ERROR = "ERROR"

@@ -129,8 +129,23 @@ class DimseQueryRetrieveSource(Base):
         comment="Total count of instances successfully processed after C-MOVE."
     )
 
+    # --- Health Status Fields ---
+    health_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="UNKNOWN", server_default="UNKNOWN", index=True,
+        comment="Current health status of the source (OK, DOWN, ERROR, UNKNOWN)"
+    )
+    last_health_check: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Timestamp of the last health check attempt"
+    )
+    last_health_error: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Details of the last health check error, if any"
+    )
+    # --- END Health Status Fields ---
+
     def __repr__(self):
         tls_status = f"TLS={'Enabled' if self.tls_enabled else 'Disabled'}"
         return (f"<DimseQueryRetrieveSource(id={self.id}, name='{self.name}', "
                 f"remote_ae='{self.remote_ae_title}', host='{self.remote_host}:{self.remote_port}', "
-                f"enabled={self.is_enabled}, active={self.is_active}, {tls_status})>") # Updated repr
+                f"enabled={self.is_enabled}, active={self.is_active}, health={self.health_status}, {tls_status})>") # Updated repr

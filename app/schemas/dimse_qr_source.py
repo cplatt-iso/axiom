@@ -157,6 +157,11 @@ class DimseQueryRetrieveSourceRead(DimseQueryRetrieveSourceBase):
     move_queued_study_count: int = Field(0, description="Total studies queued for C-MOVE.")
     processed_instance_count: int = Field(0, description="Total instances processed after C-MOVE.")
 
+    # Health status fields
+    health_status: str = Field("UNKNOWN", description="Current health status of the source (OK, DOWN, ERROR, UNKNOWN).")
+    last_health_check: Optional[datetime] = Field(None, description="Timestamp of the last health check attempt.")
+    last_health_error: Optional[str] = Field(None, description="Details of the last health check error, if any.")
+
     # TLS fields are inherited from Base
     model_config = ConfigDict(from_attributes=True) # Enable ORM mode
 

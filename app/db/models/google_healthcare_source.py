@@ -1,10 +1,13 @@
 # backend/app/db/models/google_healthcare_source.py
 from __future__ import annotations # Needed for type hints potentially
+from datetime import datetime
 
-from sqlalchemy import String, Boolean, JSON, Integer
+from sqlalchemy import String, Boolean, JSON, Integer, DateTime, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+import sqlalchemy as sa
 
 from app.db.base import Base # Import your actual Base
+from app.schemas.enums import HealthStatus
 
 class GoogleHealthcareSource(Base):
     # __tablename__ generated automatically by Base class `declared_attr`
@@ -28,5 +31,17 @@ class GoogleHealthcareSource(Base):
     # Control Flags
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False) # Can be used in browser/rules?
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False) # Poller actively runs?
+
+    # --- Health Status Fields ---
+    health_status: Mapped[str] = mapped_column(
+        String(20), default="UNKNOWN", nullable=False, server_default="UNKNOWN", index=True
+    )
+    last_health_check: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_health_error: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    # --- END Health Status Fields ---
 
     # rules = relationship("Rule", secondary="rule_google_healthcare_source_assoc", back_populates="google_healthcare_sources") # Add later if needed

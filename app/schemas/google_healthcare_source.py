@@ -98,6 +98,11 @@ class GoogleHealthcareSourceRead(GoogleHealthcareSourceBase):
     created_at: datetime
     updated_at: datetime
     
+    # Health status fields
+    health_status: str = Field("UNKNOWN", description="Current health status of the source (OK, DOWN, ERROR, UNKNOWN).")
+    last_health_check: Optional[datetime] = Field(None, description="Timestamp of the last health check attempt.")
+    last_health_error: Optional[str] = Field(None, description="Details of the last health check error, if any.")
+    
     # If there are state fields specific to the GoogleHealthcareSource model in the DB
     # that should be exposed on read, add them here. For example:
     # last_successful_poll: Optional[datetime] = None

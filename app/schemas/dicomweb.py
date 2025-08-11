@@ -234,6 +234,11 @@ class DicomWebSourceConfigRead(BaseModel):
     found_instance_count: int = Field(0, description="Total instances found by QIDO.")
     queued_instance_count: int = Field(0, description="Total instances queued for processing.")
     processed_instance_count: int = Field(0, description="Total instances successfully processed.")
+    
+    # Health status fields
+    health_status: str = Field("UNKNOWN", description="Current health status of the source (OK, DOWN, ERROR, UNKNOWN).")
+    last_health_check: Optional[datetime] = Field(None, description="Timestamp of the last health check attempt.")
+    last_health_error: Optional[str] = Field(None, description="Details of the last health check error, if any.")
 
     # IMPORTANT: Need to make sure the API endpoint populating this schema
     #            omits sensitive fields from 'auth_config' before returning it.

@@ -1,6 +1,7 @@
 # app/api/api_v1/endpoints/config_dimse_qr.py
 import logging
-from typing import List, Any
+from typing import List, Any, Dict
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
@@ -202,3 +203,70 @@ def delete_dimse_qr_source(
         )
 
 # --- End API Routes ---
+
+# --- Connection Test Endpoint ---
+@router.post(
+    "/{source_id}/test-connection",
+    response_model=Dict[str, Any],
+    summary="Test DIMSE Q/R Source Connection",
+    description="Tests the connection to a DIMSE Q/R source using C-ECHO and updates its health status.",
+    responses={
+        status.HTTP_200_OK: {"description": "Connection test completed (check response for results)."},
+        status.HTTP_401_UNAUTHORIZED: {"description": "Authentication required."},
+        status.HTTP_403_FORBIDDEN: {"description": "Not authorized to test connections."},
+        status.HTTP_404_NOT_FOUND: {"description": "DIMSE Q/R source with the specified ID not found."},
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Internal server error during connection test."},
+    }
+)
+async def test_dimse_qr_connection(
+    *,
+    source_id: int,
+    db: Session = Depends(deps.get_db),
+    db_source: models.DimseQueryRetrieveSource = Depends(get_dimse_qr_source_by_id_from_path),
+    current_user: models.User = Depends(deps.get_current_active_user),
+) -> Dict[str, Any]:
+    """
+    Tests the connection to a DIMSE Q/R source using C-ECHO and updates its health status.
+    
+    This endpoint performs a connection test by sending a C-ECHO request to the source
+    and updates the source's health status based on the results.
+    """
+    logger.info(f"User {current_user.email} testing connection for DIMSE Q/R source ID {source_id} ('{db_source.remote_ae_title}@{db_source.remote_host}:{db_source.remote_port}').")
+    
+    try:
+        from app.services.connection_test_service import ConnectionTestService
+        
+        # Perform the connection test
+        health_status, error_message = await ConnectionTestService.test_dimse_qr_connection(db_source)
+        
+        # Update the health status in the database
+        await ConnectionTestService.update_source_health_status(
+            db_session=db,
+            source_type="dimse_qr",
+            source_id=source_id,
+            health_status=health_status,
+            error_message=error_message
+        )
+        
+        # Prepare response
+        response = {
+            "source_id": source_id,
+            "remote_ae_title": db_source.remote_ae_title,
+            "remote_endpoint": f"{db_source.remote_host}:{db_source.remote_port}",
+            "health_status": health_status.value,
+            "test_timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": health_status == schemas.enums.HealthStatus.OK,
+        }
+        
+        if error_message:
+            response["error_message"] = error_message
+        
+        logger.info(f"Connection test completed for DIMSE Q/R source {source_id}: {health_status.value}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error testing DIMSE Q/R connection for source {source_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to test connection: {str(e)}"
+        )

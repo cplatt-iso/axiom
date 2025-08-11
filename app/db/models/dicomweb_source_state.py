@@ -69,11 +69,26 @@ class DicomWebSourceState(Base):
     )
     # --- END ADDED ---
 
+    # --- Health Status Fields ---
+    health_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="UNKNOWN", server_default="UNKNOWN", index=True,
+        comment="Current health status of the source (OK, DOWN, ERROR, UNKNOWN)"
+    )
+    last_health_check: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Timestamp of the last health check attempt"
+    )
+    last_health_error: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Details of the last health check error, if any"
+    )
+    # --- END Health Status Fields ---
+
 
     # id, created_at, updated_at inherited from Base
 
     def __repr__(self):
         # Update repr to include the new active flag
         return (f"<DicomWebSourceState(id={self.id}, source_name='{self.source_name}', "
-                f"enabled={self.is_enabled}, active={self.is_active}, " # <-- ADDED ACTIVE FLAG HERE
+                f"enabled={self.is_enabled}, active={self.is_active}, health={self.health_status}, " # <-- ADDED HEALTH STATUS
                 f"queued={self.queued_instance_count})>")
