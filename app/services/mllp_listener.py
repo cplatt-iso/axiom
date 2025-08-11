@@ -17,6 +17,10 @@ from app.services.hl7_parser import parse_orm_o01
 from app.crud.crud_imaging_order import imaging_order
 from app.schemas.enums import OrderStatus
 from app.schemas.imaging_order import ImagingOrderUpdate
+from app.events import publish_order_event
+from app.schemas import imaging_order as schemas
+import aio_pika
+from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -62,16 +66,47 @@ async def process_and_store_order(db: Session, hl7_message_str: str, peername: s
         if placer_num is not None:
             existing_order = imaging_order.get_by_placer_order_number(db, placer_order_number=placer_num)
 
+        # Create RabbitMQ connection for event publishing
+        try:
+            rabbitmq_connection = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+        except Exception as e:
+            log.error("Failed to connect to RabbitMQ", error=str(e))
+            rabbitmq_connection = None
+
         if existing_order:
             log.info("HL7_PROCESS_UPDATE_EXISTING", db_id=existing_order.id)
             # Use our Pydantic schema to create a clean update payload
             update_data = ImagingOrderUpdate(**order_to_process.model_dump(exclude_unset=True))
-            imaging_order.update(db, db_obj=existing_order, obj_in=update_data)
+            updated_order = imaging_order.update(db, db_obj=existing_order, obj_in=update_data)
+            
+            # Publish update event
+            if rabbitmq_connection:
+                try:
+                    await publish_order_event(
+                        event_type="order_updated",
+                        payload=schemas.ImagingOrderRead.model_validate(updated_order).model_dump(mode='json'),
+                        connection=rabbitmq_connection
+                    )
+                    log.info("HL7_PROCESS_EVENT_PUBLISHED", event_type="order_updated", order_id=updated_order.id)
+                except Exception as e:
+                    log.error("HL7_PROCESS_EVENT_PUBLISH_FAILED", event_type="order_updated", error=str(e))
         
         # Only create a new order if it's NOT a cancel request for something we've never seen.
         elif order_control != OrderStatus.CANCELED and order_control != OrderStatus.DISCONTINUED:
             log.info("HL7_PROCESS_CREATE_NEW: No existing order found, creating new one.")
-            imaging_order.create(db, obj_in=order_to_process)
+            new_order = imaging_order.create(db, obj_in=order_to_process)
+            
+            # Publish creation event
+            if rabbitmq_connection:
+                try:
+                    await publish_order_event(
+                        event_type="order_created",
+                        payload=schemas.ImagingOrderRead.model_validate(new_order).model_dump(mode='json'),
+                        connection=rabbitmq_connection
+                    )
+                    log.info("HL7_PROCESS_EVENT_PUBLISHED", event_type="order_created", order_id=new_order.id)
+                except Exception as e:
+                    log.error("HL7_PROCESS_EVENT_PUBLISH_FAILED", event_type="order_created", error=str(e))
         
         else:
             # We received a cancel/discontinue for an order we don't have.
@@ -81,6 +116,10 @@ async def process_and_store_order(db: Session, hl7_message_str: str, peername: s
         
         db.commit()
         log.info("HL7_PROCESS_SUCCESS: Database commit successful.")
+        
+        # Close RabbitMQ connection
+        if rabbitmq_connection and not rabbitmq_connection.is_closed:
+            await rabbitmq_connection.close()
 
     except Exception as e:
         log.error("HL7_PROCESS_FAILURE", error=str(e), exc_info=True)

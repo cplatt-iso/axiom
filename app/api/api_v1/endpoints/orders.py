@@ -49,7 +49,6 @@ def read_imaging_orders(
 @router.get("/events", summary="Subscribe to real-time order updates")
 async def sse_endpoint(
     request: Request,
-    # THIS IS THE LINE, YOU ABSOLUTE DONUT. ADD THE AUTH DEPENDENCY.
     current_user: models.User = Depends(deps.get_current_active_user),
 ):
     """
@@ -90,7 +89,7 @@ async def create_imaging_order(
     # Publish event to RabbitMQ
     await publish_order_event(
         event_type="order_created",
-        payload=schemas.ImagingOrderRead.from_orm(order).dict(),
+        payload=schemas.ImagingOrderRead.model_validate(order).model_dump(mode='json'),
         connection=rabbitmq_connection
     )
     return order
@@ -115,7 +114,7 @@ async def update_imaging_order(
     # Publish event to RabbitMQ
     await publish_order_event(
         event_type="order_updated",
-        payload=schemas.ImagingOrderRead.from_orm(order).dict(),
+        payload=schemas.ImagingOrderRead.model_validate(order).model_dump(mode='json'),
         connection=rabbitmq_connection
     )
     return order

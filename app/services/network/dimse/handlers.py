@@ -492,13 +492,24 @@ def handle_n_create(event):
                 imaging_order_id = db_order.id
                 log.info("N_CREATE_LINKED_TO_ORDER", order_id=imaging_order_id)
                 if mpps_status == MppsStatus.IN_PROGRESS:
-                    crud.imaging_order.update_status(db, order_id=db_order.id, new_status=OrderStatus.IN_PROGRESS)
+                    updated_order = crud.imaging_order.update_status(db, order_id=db_order.id, new_status=OrderStatus.IN_PROGRESS)
                     log.info("N_CREATE_ORDER_STATUS_UPDATED", order_id=db_order.id, new_status=OrderStatus.IN_PROGRESS.value)
+                    
+                    # Publish SSE event for order status update
+                    if updated_order:
+                        try:
+                            from app.events import publish_order_event_sync
+                            from app.schemas import imaging_order as order_schemas
+                            order_data = order_schemas.ImagingOrderRead.model_validate(updated_order).model_dump(mode='json')
+                            publish_order_event_sync("order_updated", order_data)
+                            log.info("N_CREATE_SSE_EVENT_PUBLISHED", order_id=db_order.id, event_type="order_updated")
+                        except Exception as e:
+                            log.error("N_CREATE_SSE_EVENT_FAILED", order_id=db_order.id, error=str(e))
             else:
                  log.warning("N_CREATE_ORDER_NOT_FOUND", accession_number=accession_number)
         # --- End order logic ---
 
-        mpps_in = schemas.MppsCreate(
+        mpps_in = schemas.mpps.MppsCreate(
             sop_instance_uid=sop_instance_uid,
             status=mpps_status,
             modality=req_ds.get("Modality"),
@@ -580,11 +591,22 @@ def handle_n_set(event):
             if mpps_status == MppsStatus.COMPLETED: new_order_status = OrderStatus.COMPLETED
             elif mpps_status == MppsStatus.DISCONTINUED: new_order_status = OrderStatus.CANCELED
             if new_order_status:
-                crud.imaging_order.update_status(db, order_id=db_mpps.imaging_order_id, new_status=new_order_status)
+                updated_order = crud.imaging_order.update_status(db, order_id=db_mpps.imaging_order_id, new_status=new_order_status)
                 log.info("N_SET_ORDER_STATUS_UPDATED", order_id=db_mpps.imaging_order_id, new_status=new_order_status.value)
+                
+                # Publish SSE event for order status update
+                if updated_order:
+                    try:
+                        from app.events import publish_order_event_sync
+                        from app.schemas import imaging_order as order_schemas
+                        order_data = order_schemas.ImagingOrderRead.model_validate(updated_order).model_dump(mode='json')
+                        publish_order_event_sync("order_updated", order_data)
+                        log.info("N_SET_SSE_EVENT_PUBLISHED", order_id=db_mpps.imaging_order_id, event_type="order_updated")
+                    except Exception as e:
+                        log.error("N_SET_SSE_EVENT_FAILED", order_id=db_mpps.imaging_order_id, error=str(e))
         # --- End order logic ---
 
-        mpps_update = schemas.MppsUpdate(
+        mpps_update = schemas.mpps.MppsUpdate(
             status=mpps_status,
             performed_procedure_step_end_datetime=req_ds.get("PerformedProcedureStepEndDate"),
             raw_mpps_message=req_ds.to_json_dict(),

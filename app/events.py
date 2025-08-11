@@ -58,14 +58,32 @@ async def sse_event_stream(request: Request):
     queue = asyncio.Queue()
     await sse_manager.add_connection(queue)
     try:
-        while True:
-            # Wait for a message from the broadcast
-            message = await queue.get()
-            # Check if client is still connected before sending
-            if await request.is_disconnected():
-                log.warning("SSE client disconnected before message could be sent.")
-                break
-            yield message
+        # Send initial connection message
+        yield "event: connected\ndata: {\"message\": \"SSE connection established\"}\n\n"
+        
+        # Create a heartbeat task
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+                try:
+                    await queue.put("event: heartbeat\ndata: {\"timestamp\": \"" + str(asyncio.get_event_loop().time()) + "\"}\n\n")
+                except:
+                    break
+        
+        heartbeat_task = asyncio.create_task(heartbeat())
+        
+        try:
+            while True:
+                # Wait for a message from the broadcast
+                message = await queue.get()
+                # Check if client is still connected before sending
+                if await request.is_disconnected():
+                    log.warning("SSE client disconnected before message could be sent.")
+                    break
+                yield message
+        finally:
+            heartbeat_task.cancel()
+            
     except asyncio.CancelledError:
         log.info("SSE stream cancelled.")
     finally:
@@ -125,7 +143,10 @@ async def publish_order_event(
     log.info("Attempting to publish order event to RabbitMQ.", event_type=event_type)
     try:
         async with connection.channel() as channel:
-            exchange = await channel.get_exchange(ORDERS_EXCHANGE_NAME, ensure=True)
+            # Declare the exchange (same as consumer) to ensure it exists
+            exchange = await channel.declare_exchange(
+                ORDERS_EXCHANGE_NAME, aio_pika.ExchangeType.FANOUT, durable=True
+            )
             message_body = json.dumps({"event_type": event_type, "payload": payload})
             message = aio_pika.Message(
                 body=message_body.encode(),
@@ -136,3 +157,47 @@ async def publish_order_event(
             log.info("Successfully published order event.", event_type=event_type)
     except Exception:
         log.error("Failed to publish order event to RabbitMQ.", event_type=event_type, exc_info=True)
+
+
+def publish_order_event_sync(
+    event_type: str,
+    payload: Dict[str, Any]
+):
+    """
+    Synchronous wrapper for publishing order events.
+    Creates its own RabbitMQ connection and publishes the event.
+    Safe to call from synchronous contexts like DIMSE handlers.
+    """
+    async def _publish():
+        log.info("Attempting to publish order event to RabbitMQ (sync).", event_type=event_type)
+        try:
+            connection = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+            async with connection:
+                async with connection.channel() as channel:
+                    # Declare the exchange (same as consumer) to ensure it exists
+                    exchange = await channel.declare_exchange(
+                        ORDERS_EXCHANGE_NAME, aio_pika.ExchangeType.FANOUT, durable=True
+                    )
+                    message_body = json.dumps({"event_type": event_type, "payload": payload})
+                    message = aio_pika.Message(
+                        body=message_body.encode(),
+                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                        content_type="application/json",
+                    )
+                    await exchange.publish(message, routing_key="") # routing_key is ignored for fanout
+                    log.info("Successfully published order event (sync).", event_type=event_type)
+        except Exception:
+            log.error("Failed to publish order event to RabbitMQ (sync).", event_type=event_type, exc_info=True)
+    
+    try:
+        # Get the current event loop if one exists
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're already in an async context, schedule the task
+            asyncio.create_task(_publish())
+        else:
+            # If no loop is running, create a new one
+            asyncio.run(_publish())
+    except RuntimeError:
+        # No event loop, create a new one
+        asyncio.run(_publish())

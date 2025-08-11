@@ -167,5 +167,25 @@ class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUp
             db.refresh(db_obj)
         return db_obj
 
+    async def update_status_with_event(self, db: Session, *, order_id: int, new_status: OrderStatus, connection) -> Optional[ImagingOrder]:
+        """Update order status and publish SSE event"""
+        from app.events import publish_order_event
+        from app.schemas import imaging_order as schemas
+        
+        db_obj = self.update_status(db, order_id=order_id, new_status=new_status)
+        
+        if db_obj:
+            try:
+                await publish_order_event(
+                    event_type="order_updated",
+                    payload=schemas.ImagingOrderRead.from_orm(db_obj).dict(),
+                    connection=connection
+                )
+                logger.info("Order status updated with SSE event published", order_id=order_id, new_status=new_status.value)
+            except Exception as e:
+                logger.error("Failed to publish SSE event for order status update", order_id=order_id, error=str(e))
+        
+        return db_obj
+
 
 imaging_order = CRUDImagingOrder(ImagingOrder)
