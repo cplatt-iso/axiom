@@ -53,7 +53,12 @@ router = APIRouter()
 # <------------------------------------------------------->
 
 # --- RuleSet Endpoints ---
-@router.post( "/rulesets", response_model=schemas.RuleSet, status_code=status.HTTP_201_CREATED, summary="Create a new RuleSet", tags=["RuleSets"],)
+@router.post(
+    "/rulesets",
+    response_model=schemas.RuleSet,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new RuleSet"
+)
 def create_ruleset_endpoint(*, db: Session = Depends(deps.get_db), ruleset_in: schemas.RuleSetCreate, current_user: models.User = Depends(deps.get_current_active_user),) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_name=ruleset_in.name)
     log.info("Attempting to create ruleset")
@@ -66,7 +71,11 @@ def create_ruleset_endpoint(*, db: Session = Depends(deps.get_db), ruleset_in: s
     log.info("RuleSet created successfully", ruleset_id=created_ruleset.id)
     return created_ruleset
 
-@router.get( "/rulesets", response_model=List[schemas.RuleSet], summary="Retrieve multiple RuleSets", tags=["RuleSets"],)
+@router.get(
+    "/rulesets",
+    response_model=List[schemas.RuleSet],
+    summary="Retrieve multiple RuleSets"
+)
 def read_rulesets_endpoint( db: Session = Depends(deps.get_db), skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, skip=skip, limit=limit)
     log.debug("Reading rulesets")
@@ -74,7 +83,7 @@ def read_rulesets_endpoint( db: Session = Depends(deps.get_db), skip: int = Quer
     log.debug("Retrieved rulesets", count=len(rulesets))
     return rulesets
 
-@router.get( "/rulesets/{ruleset_id}", response_model=schemas.RuleSet, summary="Retrieve a specific RuleSet by ID", tags=["RuleSets"],)
+@router.get( "/rulesets/{ruleset_id}", response_model=schemas.RuleSet, summary="Retrieve a specific RuleSet by ID")
 def read_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
     log.debug("Reading ruleset")
@@ -85,7 +94,7 @@ def read_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), 
     log.debug("Successfully retrieved RuleSet", ruleset_name=db_ruleset.name)
     return db_ruleset
 
-@router.put( "/rulesets/{ruleset_id}", response_model=schemas.RuleSet, summary="Update a RuleSet", tags=["RuleSets"],)
+@router.put( "/rulesets/{ruleset_id}", response_model=schemas.RuleSet, summary="Update a RuleSet")
 def update_ruleset_endpoint( *, db: Session = Depends(deps.get_db), ruleset_id: int, ruleset_in: schemas.RuleSetUpdate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
     log.info("Attempting to update ruleset")
@@ -101,7 +110,7 @@ def update_ruleset_endpoint( *, db: Session = Depends(deps.get_db), ruleset_id: 
     log.info("RuleSet updated successfully")
     return updated_ruleset
 
-@router.delete( "/rulesets/{ruleset_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a RuleSet", tags=["RuleSets"],)
+@router.delete( "/rulesets/{ruleset_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a RuleSet")
 def delete_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> None:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id)
     log.info("Attempting to delete ruleset")
@@ -113,7 +122,7 @@ def delete_ruleset_endpoint( ruleset_id: int, db: Session = Depends(deps.get_db)
     return None
 
 # --- Rule Endpoints ---
-@router.post( "/rules", response_model=schemas.Rule, status_code=status.HTTP_201_CREATED, summary="Create a new Rule for a RuleSet", tags=["Rules"],)
+@router.post( "/rules", response_model=schemas.Rule, status_code=status.HTTP_201_CREATED, summary="Create a new Rule for a RuleSet")
 def create_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_in: schemas.RuleCreate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, rule_name=rule_in.name, ruleset_id=rule_in.ruleset_id)
     log.info("Attempting to create rule")
@@ -132,7 +141,7 @@ def create_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_in: schema
     log.info("Rule created successfully", rule_id=created_rule.id)
     return created_rule
 
-@router.get( "/rules", response_model=List[schemas.Rule], summary="Retrieve multiple Rules (optionally filter by RuleSet)", tags=["Rules"],)
+@router.get( "/rules", response_model=List[schemas.Rule], summary="Retrieve multiple Rules (optionally filter by RuleSet)")
 def read_rules_endpoint( db: Session = Depends(deps.get_db), ruleset_id: Optional[int] = Query(None), skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, ruleset_id=ruleset_id, skip=skip, limit=limit)
     log.debug("Reading rules")
@@ -151,7 +160,7 @@ def read_rules_endpoint( db: Session = Depends(deps.get_db), ruleset_id: Optiona
          log.warning("Attempted to read rules without specifying ruleset_id.")
          raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filtering by ruleset_id is required for fetching rules via this endpoint.")
 
-@router.get( "/rules/{rule_id}", response_model=schemas.Rule, summary="Retrieve a specific Rule by ID", tags=["Rules"],)
+@router.get( "/rules/{rule_id}", response_model=schemas.Rule, summary="Retrieve a specific Rule by ID")
 def read_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, rule_id=rule_id)
     log.debug("Reading rule")
@@ -162,7 +171,7 @@ def read_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), curren
     log.debug("Successfully retrieved Rule", rule_name=db_rule.name)
     return db_rule
 
-@router.put( "/rules/{rule_id}", response_model=schemas.Rule, summary="Update a Rule", tags=["Rules"],)
+@router.put( "/rules/{rule_id}", response_model=schemas.Rule, summary="Update a Rule")
 def update_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_id: int, rule_in: schemas.RuleUpdate, current_user: models.User = Depends(deps.get_current_active_user), ) -> Any:
     log = logger.bind(user_email=current_user.email, rule_id=rule_id)
     log.info("Attempting to update rule")
@@ -178,7 +187,7 @@ def update_rule_endpoint( *, db: Session = Depends(deps.get_db), rule_id: int, r
     log.info("Rule updated successfully")
     return updated_rule
 
-@router.delete( "/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a Rule", tags=["Rules"],)
+@router.delete( "/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a Rule")
 def delete_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), current_user: models.User = Depends(deps.get_current_active_user), ) -> None:
     log = logger.bind(user_email=current_user.email, rule_id=rule_id)
     log.info("Attempting to delete rule")
@@ -194,8 +203,7 @@ def delete_rule_endpoint( rule_id: int, db: Session = Depends(deps.get_db), curr
 @router.post(
     "/process-json",
     response_model=schemas.JsonProcessResponse,
-    summary="Process DICOM JSON Header with Rules",
-    tags=["Processing"],
+    summary="Process DICOM JSON Header with Rules"
 )
 def process_dicom_json(
     *,

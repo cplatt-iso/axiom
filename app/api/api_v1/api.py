@@ -86,6 +86,6 @@ api_router.include_router(
     prefix="/config/schedules",
     tags=["Configuration - Schedules"]
 )
-api_router.include_router(config_google_healthcare_sources.router, prefix="/config/google-healthcare-sources", tags=["config-google-healthcare-sources"])
-api_router.include_router(config_ai_prompts.router, prefix="/config/ai-prompts", tags=["config-ai_prompts"])
-api_router.include_router(system_settings.router, prefix="/system-settings", tags=["system-settings"])
+api_router.include_router(config_google_healthcare_sources.router, prefix="/config/google-healthcare-sources", tags=["Configuration - Google Healthcare Sources"])
+api_router.include_router(config_ai_prompts.router, prefix="/config/ai-prompts", tags=["Configuration - AI Prompts"])
+api_router.include_router(system_settings.router, prefix="/system-settings", tags=["System Settings"])
