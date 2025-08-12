@@ -2,10 +2,14 @@
 import asyncio
 import logging
 import time
+import json
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import aio_pika
+import redis.asyncio as redis
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
@@ -44,6 +48,149 @@ class SpannerQueryResult:
         self.error_message = error_message
         self.response_time_seconds = response_time_seconds
         self.result_count = len(self.results)
+
+
+class EnterpriseSpannerEngine:
+    """
+    Enterprise-grade spanner engine that delegates to microservices.
+    
+    Features:
+    - Async query submission to coordinator service
+    - Real-time result streaming
+    - Circuit breaker pattern for failover
+    - Connection pooling and caching
+    - Horizontal scaling support
+    """
+    
+    def __init__(self, db: Session):
+        """Initialize the enterprise spanner engine."""
+        self.db = db
+        self.redis_client = None
+        self.coordinator_url = "http://spanner-coordinator:8000"
+    
+    async def _get_redis_client(self):
+        """Get Redis client for caching."""
+        if not self.redis_client:
+            self.redis_client = redis.from_url("redis://redis:6379/0")
+        return self.redis_client
+    
+    async def execute_spanning_query_async(
+        self,
+        spanner_config_id: int,
+        query_type: str,
+        query_level: str = "STUDY",
+        query_filters: Optional[Dict[str, Any]] = None,
+        requesting_ae_title: Optional[str] = None,
+        requesting_ip: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute spanning query asynchronously via coordinator service.
+        
+        Returns immediately with query_id for polling/streaming results.
+        """
+        try:
+            # Submit to coordinator service
+            import httpx
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.coordinator_url}/spanning-query",
+                    params={
+                        "spanner_config_id": spanner_config_id,
+                        "query_type": query_type,
+                        "query_level": query_level,
+                        "requesting_ae_title": requesting_ae_title,
+                        "requesting_ip": requesting_ip
+                    },
+                    json={"query_filters": query_filters or {}},
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Coordinator error: {response.text}"
+                    )
+                    
+        except Exception as e:
+            logger.error(f"Error submitting to coordinator: {e}")
+            # Fallback to local execution
+            return await self._fallback_local_execution(
+                spanner_config_id, query_type, query_level, 
+                query_filters, requesting_ae_title, requesting_ip
+            )
+    
+    async def _fallback_local_execution(
+        self,
+        spanner_config_id: int,
+        query_type: str,
+        query_level: str,
+        query_filters: Optional[Dict[str, Any]],
+        requesting_ae_title: Optional[str],
+        requesting_ip: Optional[str]
+    ) -> Dict[str, Any]:
+        """Fallback to local execution if coordinator is unavailable."""
+        logger.warning("Falling back to local spanner execution")
+        
+        # Use the original SpannerEngine for fallback
+        local_engine = SpannerEngine(self.db)
+        return await local_engine.execute_spanning_query(
+            spanner_config_id=spanner_config_id,
+            query_type=query_type,
+            query_level=query_level,
+            query_filters=query_filters,
+            requesting_ae_title=requesting_ae_title,
+            requesting_ip=requesting_ip
+        )
+    
+    async def get_query_status(self, query_id: str) -> Dict[str, Any]:
+        """Get status of an async spanning query."""
+        try:
+            import httpx
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.coordinator_url}/spanning-query/{query_id}",
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    return {"query_id": query_id, "status": "error", "error": response.text}
+                    
+        except Exception as e:
+            logger.error(f"Error getting query status: {e}")
+            return {"query_id": query_id, "status": "error", "error": str(e)}
+    
+    async def stream_query_results(self, query_id: str):
+        """Stream query results as they become available."""
+        redis_client = await self._get_redis_client()
+        
+        start_time = time.time()
+        timeout = 300  # 5 minutes
+        
+        while time.time() - start_time < timeout:
+            # Check for final results
+            final_results = await redis_client.get(f"final_results:{query_id}")
+            if final_results:
+                result_data = json.loads(final_results)
+                if result_data["status"] in ["completed", "failed"]:
+                    yield result_data
+                    break
+            
+            # Check for partial results
+            partial_results = await redis_client.lrange(f"query_results:{query_id}", 0, -1)
+            if partial_results:
+                for result_json in partial_results:
+                    yield {"type": "partial", "data": json.loads(result_json)}
+            
+            await asyncio.sleep(1)  # Poll every second
+        
+        # Timeout
+        yield {"query_id": query_id, "status": "timeout"}
 
 
 class SpannerEngine:

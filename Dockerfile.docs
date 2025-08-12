@@ -1,0 +1,45 @@
+# Use nginx to serve static files with markdown viewer
+FROM nginx:alpine
+
+# Copy documentation files
+COPY docs/ /usr/share/nginx/html/
+
+# Create nginx configuration for docs
+RUN echo 'server {' > /etc/nginx/conf.d/default.conf && \
+    echo '    listen 80;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    server_name localhost;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    root /usr/share/nginx/html;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    index index.html;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    # Handle /docs prefix - serve HTML and markdown files without /docs prefix' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location ~ ^/docs/(.+)$ {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        try_files /$1 =404;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '    # Handle /docs/ root (serve index.html)' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location = /docs/ {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        try_files /index.html =404;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '    # Handle /docs without trailing slash' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location = /docs {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        return 301 /docs/;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '    # Serve markdown files as plain text' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location ~ \.md$ {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        add_header Content-Type text/plain;' >> /etc/nginx/conf.d/default.conf && \
+    echo '        try_files $uri =404;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '    # Default location for HTML and other files' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location / {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        try_files $uri $uri/ @fallback;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '    # Fallback to index.html' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location @fallback {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        try_files /index.html =404;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '    location /api/ {' >> /etc/nginx/conf.d/default.conf && \
+    echo '        proxy_pass http://api:80/api/;' >> /etc/nginx/conf.d/default.conf && \
+    echo '        proxy_set_header Host $host;' >> /etc/nginx/conf.d/default.conf && \
+    echo '        proxy_set_header X-Real-IP $remote_addr;' >> /etc/nginx/conf.d/default.conf && \
+    echo '    }' >> /etc/nginx/conf.d/default.conf && \
+    echo '}' >> /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
