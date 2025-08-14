@@ -1,0 +1,38 @@
+services:
+  mllp_1:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile
+    command: python -u -m app.services.mllp_listener
+    container_name: axiom-mllp-listener
+    ports:
+      - "2575:2575"
+    volumes:
+      - ./app:/app/app
+      - ./alembic.ini:/app/alembic.ini
+      - ./pytest.ini:/app/pytest.ini
+      - ./alembic:/app/alembic
+      - ./seed_dcm4che_listener.py:/app/seed_dcm4che_listener.py
+      - dicom_incoming:/dicom_data/incoming:ro
+      - dicom_processed:/dicom_data/processed:ro
+      - dicom_errors:/dicom_data/errors:ro
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    env_file:
+      - ./.env
+    depends_on:
+      - db
+      - redis
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.mllp_listener.{{.Name}}"

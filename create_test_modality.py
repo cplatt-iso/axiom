@@ -16,6 +16,7 @@ from app.db.session import SessionLocal
 from app import crud
 from app.schemas.modality import ModalityCreate
 from app.db.models.facility import Facility
+from app.db.models.modality import Modality
 
 
 def create_test_modality_with_bypass():

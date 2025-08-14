@@ -70,11 +70,14 @@ def test_api_endpoints():
             # Check if the function exists in the router
             found = False
             for route in router.routes:
-                if hasattr(route, 'endpoint') and route.endpoint.__name__ == endpoint_name:
+                endpoint = getattr(route, 'endpoint', None)
+                if endpoint and hasattr(endpoint, '__name__') and endpoint.__name__ == endpoint_name:
                     found = True
                     print(f"✅ Found endpoint: {endpoint_name}")
-                    print(f"   Path: {route.path}")
-                    print(f"   Methods: {route.methods}")
+                    path = getattr(route, 'path', 'Unknown')
+                    methods = getattr(route, 'methods', set())
+                    print(f"   Path: {path}")
+                    print(f"   Methods: {methods}")
                     break
             
             if not found:

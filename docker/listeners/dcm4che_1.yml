@@ -1,0 +1,37 @@
+services:
+  dcm4che_1:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.dcm4che-listener
+    container_name: dicom_processor_dcm4che_listener
+    env_file:
+      - ./.env
+    environment:
+      - AXIOM_INSTANCE_ID=dcm4che_1
+      - AXIOM_AETITLE=DCM4CHE
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_QUEUE=default
+      - PYTHONPATH=/app
+    ports:
+      - "11114:11114"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - dicom_incoming:/dicom_data/incoming
+      - ./scripts/watch_and_notify.py:/app/scripts/watch_and_notify.py:ro
+    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/watch_and_notify.py"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.dcm4che-listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"

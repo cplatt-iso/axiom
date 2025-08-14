@@ -1,0 +1,35 @@
+# Dockerfile.dcm4che-listener
+
+# Use a specific, stable version of the dcm4che tools
+FROM dcm4che/dcm4che-tools:5.32.0
+
+# Switch to root user to install packages
+USER root
+
+# Install Python, pip, and cleanup. dcm4che image is debian-based.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create a symbolic link for python to python3
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+# Install the pika library for RabbitMQ communication
+WORKDIR /app
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy the application and script files
+COPY ./app /app/app
+COPY ./scripts /app/scripts
+
+ENV PYTHONPATH=/app
+
+
+
+# Switch back to the default dcm4che user
+# USER dcm4che
+
+# The CMD will be provided by the docker-compose file.
+# The command will now run the refactored python script to start the listener and watcher
+CMD ["/bin/bash", "-c", "/opt/dcm4che-5.32.0/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/watch_and_notify.py"]

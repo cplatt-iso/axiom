@@ -345,15 +345,21 @@ def process_dicom_file_task(
     try:
         db = SessionLocal()
         
-        # No AI portal management needed here with sync wrapper approach
+        try:
+            # No AI portal management needed here with sync wrapper approach
 
-        rules_matched_res, modifications_made_res, final_status_code, final_message, \
-        applied_rules_info_res, dest_statuses_res, processed_ds_res, \
-        instance_uid_res, _ = execute_file_based_task(
-            log, db, dicom_filepath_str, source_type,
-            source_db_id_or_instance_id, task_id, association_info,
-            ai_portal=None # Pass None explicitly
-        )
+            rules_matched_res, modifications_made_res, final_status_code, final_message, \
+            applied_rules_info_res, dest_statuses_res, processed_ds_res, \
+            instance_uid_res, _ = execute_file_based_task(
+                log, db, dicom_filepath_str, source_type,
+                source_db_id_or_instance_id, task_id, association_info,
+                ai_portal=None # Pass None explicitly
+            )
+        except Exception as inner_exc:
+            import traceback
+            log.critical("CRITICAL: Exception occurred INSIDE the main task logic block.", error=str(inner_exc), exc_info=True)
+            traceback.print_exc() # Force traceback to stderr
+            raise inner_exc # Re-raise to be caught by the main handler
 
         if final_status_code.startswith("success"):
             try:
@@ -672,7 +678,7 @@ def health_monitoring_task(self, force_check: bool = False):
         }
         
         # Check DICOMWeb sources
-        dicomweb_sources = crud.dicomweb_source_state.get_multi(db, limit=1000)
+        dicomweb_sources = crud.dicomweb_state.get_all(db, limit=1000)
         for source in dicomweb_sources:
             if not force_check and source.last_health_check:
                 # Skip if checked within the last 10 minutes
@@ -710,7 +716,7 @@ def health_monitoring_task(self, force_check: bool = False):
                 results["dicomweb_sources"]["error"] += 1
         
         # Check DIMSE Q/R sources
-        dimse_qr_sources = crud.dimse_qr_source.get_multi(db, limit=1000)
+        dimse_qr_sources = crud.crud_dimse_qr_source.get_multi(db, limit=1000)
         for source in dimse_qr_sources:
             if not force_check and source.last_health_check:
                 time_since_check = datetime.now(timezone.utc) - source.last_health_check
@@ -738,7 +744,7 @@ def health_monitoring_task(self, force_check: bool = False):
                 else:
                     results["dimse_qr_sources"]["error"] += 1
                 
-                log.info(f"Checked DIMSE Q/R source {source.id} ({source.peer_ae_title}@{source.peer_ip}): {health_status.value}")
+                log.info(f"Checked DIMSE Q/R source {source.id} ({source.remote_ae_title}@{source.remote_host}): {health_status.value}")
                 
             except Exception as e:
                 log.error(f"Error checking DIMSE Q/R source {source.id}: {str(e)}")
@@ -773,7 +779,7 @@ def health_monitoring_task(self, force_check: bool = False):
                 else:
                     results["google_healthcare_sources"]["error"] += 1
                 
-                log.info(f"Checked Google Healthcare source {source.id} (project: {source.project_id}): {health_status.value}")
+                log.info(f"Checked Google Healthcare source {source.id} (project: {source.gcp_project_id}): {health_status.value}")
                 
             except Exception as e:
                 log.error(f"Error checking Google Healthcare source {source.id}: {str(e)}")

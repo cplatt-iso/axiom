@@ -1,10 +1,10 @@
-# /home/icculus/axiom/docker-compose.yml
+
+# /home/icculus/axiom/backend/docker-compose.yml
 # --- Main Axiom Application Stack ---
 
 services:
-  # --- Core Dependencies ---
   db:
-    image: postgres:15-alpine # Use a specific version
+    image: postgres:15-alpine
     container_name: dicom_processor_db
     volumes:
       - postgres_data:/var/lib/postgresql/data/
@@ -12,9 +12,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-dicom_processor_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: ${POSTGRES_DB:-dicom_processor_db}
-      # PGDATA: /var/lib/postgresql/data/pgdata # Default is usually fine
     ports:
-      - "${POSTGRES_PORT:-5432}:5432" # Expose DB port to host (use .env or default)
+      - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
         test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dicom_processor_user} -d ${POSTGRES_DB:-dicom_processor_db}"]
         interval: 5s
@@ -22,13 +21,12 @@ services:
         retries: 5
     restart: unless-stopped
     networks:
-      # Primarily needs default network, but add shared if other external tools need direct PG access by name
       - default
-      - shared # Added shared for potential external access/consistency
-    logging: # <-- ADD THIS
+      - shared
+    logging:
       driver: "fluentd"
       options:
-        fluentd-address: "127.0.0.1:24224" # Use Host IP
+        fluentd-address: "127.0.0.1:24224"
         tag: "axiom.postgres.{{.Name}}"
         mode: non-blocking
         max-buffer-size: "10m"
@@ -43,10 +41,9 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
-      # RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
     ports:
-      - "${RABBITMQ_PORT:-5672}:5672"   # AMQP port
-      - "15672:15672" 
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "15672:15672"
     healthcheck:
         test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
         interval: 10s
@@ -55,12 +52,11 @@ services:
         start_period: 10s
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq/
-    #  - ./my-rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
     restart: unless-stopped
     networks:
       - default
-      - shared # Added shared for potential external access/consistency
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
+      - shared
+    logging:
       driver: "fluentd"
       options:
         mode: non-blocking
@@ -68,17 +64,14 @@ services:
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
         fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.rabbitmq.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
-
+        tag: "axiom.rabbitmq.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"
 
   redis:
-    image: redis:7-alpine # Use a specific alpine version
+    image: redis:7-alpine
     container_name: dicom_processor_redis
-    command: redis-server --save 60 1 --loglevel warning # Optional: Persistence & log level
+    command: redis-server --save 60 1 --loglevel warning
     volumes:
       - redis_data:/data
-    # ports: # Not usually needed unless debugging externally
-    #   - "6379:6379"
     healthcheck:
         test: ["CMD", "redis-cli", "ping"]
         interval: 5s
@@ -87,8 +80,8 @@ services:
     restart: unless-stopped
     networks:
       - default
-      - shared # Added shared for potential external access/consistency
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
+      - shared
+    logging:
       driver: "fluentd"
       options:
         mode: non-blocking
@@ -96,9 +89,8 @@ services:
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
         fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.redis.{{.Name}}" # Consider adding {{.ID}} for scaling: axiom.worker.{{.Name}}.{{.ID}
+        tag: "axiom.redis.{{.Name}}"
 
-  # --- Application Services ---
   api:
     build:
       context: .
@@ -117,39 +109,238 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "8001:80" # Host:Container (uvicorn runs on 80 inside)
+      - "8001:80"
     volumes:
-      - ./app:/app/app # Mount code for reload
+      - ./app:/app/app
       - ./alembic.ini:/app/alembic.ini
       - ./pytest.ini:/app/pytest.ini
       - ./alembic:/app/alembic
-      # Read-only mounts for data directories if API needs to read them
+      - ./seed_dcm4che_listener.py:/app/seed_dcm4che_listener.py
       - dicom_incoming:/dicom_data/incoming:ro
       - dicom_processed:/dicom_data/processed:ro
       - dicom_errors:/dicom_data/errors:ro
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload", "--proxy-headers", "--forwarded-allow-ips='*'"]
     restart: unless-stopped
-    networks: # Needs shared network to talk to DBs AND for logging driver
+    networks:
       - default
       - shared
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
+    logging:
       driver: "fluentd"
       options:
         mode: non-blocking
         max-buffer-size: "10m"
         fluentd-retry-wait: "1s"
         fluentd-max-retries: "60"
-        fluentd-address: "127.0.0.1:24224" # Points to fluent-bit on host
-        tag: "axiom.api.{{.Name}}"          # Example: axiom.api.dicom_processor_api-1
-        # Optional fluentd options:
-        # fluentd-async-connect: "true"
-        # fluentd-retry-wait: "1s"
-        # fluentd-max-retries: "30"
-        # mode: non-blocking
-        # max-buffer-size: "10m"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.api.{{.Name}}"
 
-  # Documentation service (serves on port 8000 for nginx proxy)
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dicom_processor_beat
+    env_file:
+      - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+         condition: service_healthy
+    volumes:
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    command: ["celery", "-A", "app.worker.celery_app.app", "beat", "--loglevel=info"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.beat.{{.Name}}"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dicom_processor_worker
+    env_file:
+      - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - dicom_incoming:/dicom_data/incoming
+      - dicom_processed:/dicom_data/processed
+      - /home/icculus/axiom/axiom-volumes/dicom_errors:/dicom_data/errors
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.worker.{{.Name}}"
+
+  listener:
+    build:
+      context: .
+      dockerfile: Dockerfile.listener
+    container_name: dicom_processor_listener
+    env_file:
+      - .env
+    environment:
+      - AXIOM_INSTANCE_ID=storescp_1
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      - "11112:11112/tcp"
+    volumes:
+      - ./app:/app/app
+      - dicom_incoming:/dicom_data/incoming
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"
+
+  listener_2:
+    build:
+      context: .
+      dockerfile: Dockerfile.listener
+    container_name: dicom_processor_listener_2
+    env_file:
+      - .env
+    environment:
+      - AXIOM_INSTANCE_ID=storescp_2
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      - "11113:11113/tcp"
+    volumes:
+      - ./app:/app/app
+      - dicom_incoming:/dicom_data/incoming
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    restart: unless-stopped
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"
+
+  mllp-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -u -m app.services.mllp_listener
+    container_name: axiom-mllp-listener
+    ports:
+      - "2575:2575"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.mllp_listener.{{.Name}}"
+
+  dcm4che-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile.dcm4che-listener
+    container_name: dicom_processor_dcm4che_listener
+    env_file:
+      - .env
+    environment:
+      - AXIOM_INSTANCE_ID=dcm4che_1
+      - AXIOM_AETITLE=DCM4CHE
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_QUEUE=default
+      - PYTHONPATH=/app
+    ports:
+      - "11114:11114"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - dicom_incoming:/dicom_data/incoming
+      - ./scripts/watch_and_notify.py:/app/scripts/watch_and_notify.py:ro
+    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/watch_and_notify.py"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.dcm4che-listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"
+
   docs:
     build:
       context: .
@@ -170,184 +361,7 @@ services:
         fluentd-address: "127.0.0.1:24224"
         tag: "axiom.docs.{{.Name}}"
 
-  beat:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker # Re-use worker image
-    container_name: dicom_processor_beat
-    env_file:
-      - .env
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      db:
-         condition: service_healthy
-    volumes:
-      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
-    command: ["celery", "-A", "app.worker.celery_app.app", "beat", "--loglevel=info"] # Log level controlled by structlog now
-    restart: unless-stopped
-    networks: # Needs shared network to talk to DBs/Redis AND for logging driver
-      - default
-      - shared
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
-      driver: "fluentd"
-      options:
-        mode: non-blocking
-        max-buffer-size: "10m"
-        fluentd-retry-wait: "1s"
-        fluentd-max-retries: "60"
-        fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.beat.{{.Name}}"
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    container_name: dicom_processor_worker
-    env_file:
-      - .env
-    environment:
-      # Ensure GOOGLE_APPLICATION_CREDENTIALS path is valid if used by worker
-      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      # - ./app:/app/app # Mount code for consistency
-      # Mount data directories if worker needs read/write access
-      - dicom_incoming:/dicom_data/incoming
-      - dicom_processed:/dicom_data/processed
-      - /home/icculus/axiom/axiom-volumes/dicom_errors:/dicom_data/errors # Needs write access?
-      # Mount GCP key if used
-      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
-    # command: # Uses CMD from Dockerfile.worker unless overridden
-    restart: unless-stopped
-    networks: # Needs shared network to talk to DBs/Redis AND for logging driver
-      - default
-      - shared
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
-      driver: "fluentd"
-      options:
-        mode: non-blocking
-        max-buffer-size: "10m"
-        fluentd-retry-wait: "1s"
-        fluentd-max-retries: "60"
-        fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.worker.{{.Name}}" # Consider adding {{.ID}} for scaling: axiom.worker.{{.Name}}.{{.ID}}
-
-  listener:
-    build:
-      context: .
-      dockerfile: Dockerfile.listener
-    container_name: dicom_processor_listener # Example: storescp_1
-    env_file:
-      - .env
-    environment:
-      - AXIOM_INSTANCE_ID=storescp_1 # Unique ID for this instance
-      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-    ports:
-      - "11112:11112/tcp" # Example port mapping
-    volumes:
-      - ./app:/app/app # Mount code for consistency
-      - dicom_incoming:/dicom_data/incoming # Needs write access
-      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
-    restart: unless-stopped
-    networks: # Needs shared network to talk to DBs/Redis AND for logging driver
-      - default
-      - shared
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
-      driver: "fluentd"
-      options:
-        mode: non-blocking
-        max-buffer-size: "10m"
-        fluentd-retry-wait: "1s"
-        fluentd-max-retries: "60"
-        fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
-
-
-  listener_2: # Define the second listener service
-    build:
-      context: .
-      dockerfile: Dockerfile.listener # Can use the same image
-    container_name: dicom_processor_listener_2 # Unique container name
-    env_file:
-      - .env # Use the same common environment variables
-    environment:
-      - AXIOM_INSTANCE_ID=storescp_2 # Unique instance ID matching DB record 2
-      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
-    depends_on: # Same dependencies
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-    ports:
-      # Map host port 11113 to container port 11113 (matching DB config for storescp_2)
-      - "11113:11113/tcp"
-    volumes: # Same volumes
-      - ./app:/app/app
-      - dicom_incoming:/dicom_data/incoming
-      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
-    restart: unless-stopped
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
-      driver: "fluentd"
-      options:
-        mode: non-blocking
-        max-buffer-size: "10m"
-        fluentd-retry-wait: "1s"
-        fluentd-max-retries: "60"
-        fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}" # Include Instance ID in tag
-
-  mllp-listener:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: python -u -m app.services.mllp_listener
-    container_name: axiom-mllp-listener
-    ports:
-      - "2575:2575" # Standard MLLP port
-    volumes:
-      - .:/app
-    env_file:
-      - .env
-    depends_on:
-      - db
-      - redis
-      - rabbitmq
-    restart: unless-stopped
-    networks:
-      - default
-      - shared # Added shared for potential external access/consistency
-    logging: # <-- CONFIGURED LOGGING DRIVER -->
-      driver: "fluentd"
-      options:
-        mode: non-blocking
-        max-buffer-size: "10m"
-        fluentd-retry-wait: "1s"
-        fluentd-max-retries: "60"
-        fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.mllp_listener.{{.Name}}" # Consider adding {{.ID}} for scaling: axiom.worker.{{.Name}}.{{.ID}
-
 # --- Volumes ---
-# Defines named volumes used by services in THIS compose file
 volumes:
   postgres_data:
   rabbitmq_data:
@@ -355,12 +369,11 @@ volumes:
   dicom_processed:
   dicom_errors:
   redis_data:
-  # orthanc_db and crosswalk_mysql_data removed (managed externally)
 
 # --- Networks ---
 networks:
-  default: # Internal network for this stack
+  default:
     driver: bridge
-  shared: # Reference the external network created via 'docker network create axiom_shared_network'
+  shared:
     external: true
     name: axiom_shared_network

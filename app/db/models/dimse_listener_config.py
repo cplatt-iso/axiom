@@ -83,8 +83,17 @@ class DimseListenerConfig(Base):
     )
     # --- End TLS ---
 
+    listener_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="pynetdicom",
+        server_default=text("'pynetdicom'"),
+        index=True,
+        comment="The type of listener implementation to use ('pynetdicom' or 'dcm4che')."
+    )
+
     def __repr__(self):
         tls_status = f"TLS={'Enabled' if self.tls_enabled else 'Disabled'}"
         return (f"<DimseListenerConfig(id={self.id}, name='{self.name}', "
                 f"ae_title='{self.ae_title}', port={self.port}, enabled={self.is_enabled}, "
-                f"instance_id='{self.instance_id}', {tls_status})>") # Updated repr
+                f"instance_id='{self.instance_id}', type='{self.listener_type}', {tls_status})>") # Updated repr

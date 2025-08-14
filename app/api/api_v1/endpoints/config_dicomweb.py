@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 # --- Corrected Imports ---
 from app import crud, schemas
+from app.schemas.enums import HealthStatus
 from app.db import models
 # --- End Corrected Imports ---
 from app.api import deps
@@ -263,7 +264,7 @@ async def test_dicomweb_connection(
             "source_name": db_source.source_name,
             "health_status": health_status.value,
             "test_timestamp": datetime.now(timezone.utc).isoformat(),
-            "success": health_status == schemas.enums.HealthStatus.OK,
+            "success": health_status == HealthStatus.OK,
         }
         
         if error_message:

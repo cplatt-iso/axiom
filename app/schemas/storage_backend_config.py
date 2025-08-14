@@ -31,19 +31,34 @@ class GcsConfig(BaseModel):
     prefix: Optional[str] = Field(None, description="Optional prefix (folder path) within the bucket.")
     # credentials_secret_name: Optional[str] = None # Future
 
-class CStoreConfig(BaseModel):
+class CStoreBackendConfig(StorageBackendConfigBase):
+    """Configuration specific to C-STORE destinations."""
+    backend_type: Literal["cstore"] = "cstore"
     remote_ae_title: str = Field(..., max_length=16, description="AE Title of the remote C-STORE SCP.")
     remote_host: str = Field(..., description="Hostname or IP address of the remote SCP.")
     remote_port: int = Field(..., gt=0, le=65535, description="Network port of the remote SCP.")
-    local_ae_title: Optional[str] = Field("AXIOM_STORE_SCU", max_length=16, description="AE Title OUR SCU will use when associating.")
+    local_ae_title: str = Field("AXIOM_STORE_SCU", max_length=16, description="AE Title OUR SCU will use when associating.")
+    
+    # Transfer syntax negotiation strategy
+    transfer_syntax_strategy: str = Field("conservative", description="Strategy for transfer syntax negotiation (pynetdicom only).")
+    max_association_retries: int = Field(3, description="Max association retries with different strategies (pynetdicom only).")
+
     # TLS fields
     tls_enabled: bool = Field(False, description="Enable TLS for outgoing connections.")
     tls_ca_cert_secret_name: Optional[str] = Field(None, description="REQUIRED if TLS enabled: Secret Manager name for CA cert to verify remote server.")
     tls_client_cert_secret_name: Optional[str] = Field(None, description="Optional (for mTLS): Secret Manager name for OUR client certificate.")
     tls_client_key_secret_name: Optional[str] = Field(None, description="Optional (for mTLS): Secret Manager name for OUR client private key.")
+    sender_type: str = Field("pynetdicom", description="The type of sender to use ('pynetdicom' or 'dcm4che').")
+
+    @field_validator('sender_type')
+    @classmethod
+    def validate_sender_type(cls, value: str) -> str:
+        if value not in ["pynetdicom", "dcm4che"]:
+            raise ValueError("Sender type must be either 'pynetdicom' or 'dcm4che'")
+        return value
 
     @model_validator(mode='after')
-    def check_tls_config(self) -> 'CStoreConfig':
+    def check_tls_config(self) -> 'CStoreBackendConfig':
         if self.tls_enabled and not self.tls_ca_cert_secret_name:
             raise ValueError("`tls_ca_cert_secret_name` is required when TLS is enabled for C-STORE.")
         if (self.tls_client_cert_secret_name and not self.tls_client_key_secret_name) or \
@@ -131,8 +146,8 @@ class StorageBackendConfigCreate_Filesystem(StorageBackendConfigBase, FileSystem
 class StorageBackendConfigCreate_GCS(StorageBackendConfigBase, GcsConfig):
     backend_type: Literal["gcs"] = "gcs"
 
-class StorageBackendConfigCreate_CStore(StorageBackendConfigBase, CStoreConfig):
-    backend_type: Literal["cstore"] = "cstore"
+class StorageBackendConfigCreate_CStore(CStoreBackendConfig):
+    pass
 
 class StorageBackendConfigCreate_GoogleHealthcare(StorageBackendConfigBase, GoogleHealthcareConfig):
     backend_type: Literal["google_healthcare"] = "google_healthcare"
@@ -182,6 +197,7 @@ class StorageBackendConfigUpdate(BaseModel):
     remote_host: Optional[str] = None
     remote_port: Optional[int] = Field(None, gt=0, le=65535)
     local_ae_title: Optional[str] = Field(None, max_length=16)
+    sender_type: Optional[str] = None
     tls_enabled: Optional[bool] = None
     # tls_ca_cert_secret_name is shared by CStore and STOW-RS for their respective custom CAs
     tls_ca_cert_secret_name: Optional[str] = None 
@@ -252,9 +268,8 @@ class StorageBackendConfigRead_GCS(StorageBackendConfigBase, GcsConfig):
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
-class StorageBackendConfigRead_CStore(StorageBackendConfigBase, CStoreConfig):
+class StorageBackendConfigRead_CStore(CStoreBackendConfig):
     id: int
-    backend_type: Literal["cstore"] = "cstore"
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)

@@ -1,0 +1,27 @@
+# /home/icculus/axiom/backend/docker-compose.yml
+# Main Axiom Application Stack
+# This file includes service definitions from the 'compose' directory.
+
+include:
+  - compose/core.yml
+  - compose/app.yml
+  - compose/listeners.yml
+  - compose/docs.yml
+
+# --- Volumes ---
+# Defines named volumes used by services in THIS compose file
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  dicom_incoming:
+  dicom_processed:
+  dicom_errors:
+  redis_data:
+
+# --- Networks ---
+networks:
+  default: # Internal network for this stack
+    driver: bridge
+  shared: # Reference the external network created via 'docker network create axiom_shared_network'
+    external: true
+    name: axiom_shared_network

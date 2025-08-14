@@ -7,12 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
 
-from pynetdicom import AE, evt, build_context
+from pynetdicom import ae, evt
 from pynetdicom.sop_class import (
-    StudyRootQueryRetrieveInformationModelMove,
-    PatientRootQueryRetrieveInformationModelMove,
-    StudyRootQueryRetrieveInformationModelGet,
-    PatientRootQueryRetrieveInformationModelGet,
+    StudyRootQueryRetrieveInformationModelMove,  # type: ignore[attr-defined]
+    PatientRootQueryRetrieveInformationModelMove,  # type: ignore[attr-defined]
+    StudyRootQueryRetrieveInformationModelGet,  # type: ignore[attr-defined]
+    PatientRootQueryRetrieveInformationModelGet,  # type: ignore[attr-defined]
 )
 from pydicom import Dataset
 from sqlalchemy.orm import Session
@@ -36,11 +36,11 @@ class CMoveRequest:
     study_uid: str
     series_uid: Optional[str] = None
     instance_uid: Optional[str] = None
-    destination_ae: str = None
+    destination_ae: Optional[str] = None
     priority: int = 2  # Medium priority
     move_strategy: CMoveStrategy = CMoveStrategy.HYBRID
-    spanner_config_id: int = None
-    requesting_ip: str = None
+    spanner_config_id: Optional[int] = None
+    requesting_ip: Optional[str] = None
     max_concurrent_moves: int = 3
 
 
@@ -51,9 +51,9 @@ class CMoveResult:
     total_instances: int = 0
     moved_instances: int = 0
     failed_instances: int = 0
-    source_ae_title: str = None
-    error_message: str = None
-    strategy_used: CMoveStrategy = None
+    source_ae_title: Optional[str] = None
+    error_message: Optional[str] = None
+    strategy_used: Optional[CMoveStrategy] = None
     duration_seconds: float = 0.0
 
 
@@ -73,7 +73,7 @@ class CMoveProxyService:
         self.active_moves: Dict[str, threading.Event] = {}
         self.move_stats: Dict[str, Dict] = {}
     
-    def execute_cmove_spanning(
+    async def execute_cmove_spanning(
         self,
         move_request: CMoveRequest,
         progress_callback: Optional[Callable[[str, int, int], None]] = None
@@ -95,6 +95,12 @@ class CMoveProxyService:
         
         try:
             # Get spanner configuration
+            if not move_request.spanner_config_id:
+                return CMoveResult(
+                    success=False,
+                    error_message="Spanner config ID is required"
+                )
+                
             spanner_config = crud.crud_spanner_config.get(
                 self.db, id=move_request.spanner_config_id
             )
@@ -118,7 +124,7 @@ class CMoveProxyService:
                 query_level = "SERIES"
             
             # Query spanning to find available sources
-            query_result = self.spanner_engine.execute_spanning_query(
+            query_result = await self.spanner_engine.execute_spanning_query(
                 spanner_config_id=spanner_config.id,
                 query_type="C-FIND",
                 query_level=query_level,
@@ -185,7 +191,19 @@ class CMoveProxyService:
         )
         
         # Create a priority map
-        priority_map = {mapping.source.ae_title: mapping.priority or 999 for mapping in source_mappings}
+        priority_map = {}
+        for mapping in source_mappings:
+            # Get the appropriate source based on mapping type
+            source_ae_title = None
+            if mapping.source_type == "dimse-qr" and mapping.dimse_qr_source:
+                source_ae_title = mapping.dimse_qr_source.remote_ae_title
+            elif mapping.source_type == "dicomweb" and mapping.dicomweb_source:
+                source_ae_title = mapping.dicomweb_source.source_name
+            elif mapping.source_type == "google_healthcare" and mapping.google_healthcare_source:
+                source_ae_title = mapping.google_healthcare_source.name
+            
+            if source_ae_title:  # type: ignore
+                priority_map[source_ae_title] = mapping.priority or 999
         
         # Find sources that have the data
         available_sources = []
@@ -208,16 +226,35 @@ class CMoveProxyService:
         selected_source = available_sources[0]
         
         # Get full source configuration
-        source_mapping = next(
-            (m for m in source_mappings if m.source.ae_title == selected_source['ae_title']),
-            None
-        )
+        source_mapping = None
+        for mapping in source_mappings:
+            # Get the appropriate source based on mapping type
+            source_ae_title = None
+            if mapping.source_type == "dimse-qr" and mapping.dimse_qr_source:
+                source_ae_title = mapping.dimse_qr_source.remote_ae_title
+            elif mapping.source_type == "dicomweb" and mapping.dicomweb_source:
+                source_ae_title = mapping.dicomweb_source.source_name
+            elif mapping.source_type == "google_healthcare" and mapping.google_healthcare_source:
+                source_ae_title = mapping.google_healthcare_source.name
+            
+            if source_ae_title == selected_source['ae_title']:
+                source_mapping = mapping
+                break
         
         if not source_mapping:
             return None
         
+        # Get the actual source object based on mapping type
+        source_obj = None
+        if source_mapping.source_type == "dimse-qr" and source_mapping.dimse_qr_source:
+            source_obj = source_mapping.dimse_qr_source
+        elif source_mapping.source_type == "dicomweb" and source_mapping.dicomweb_source:
+            source_obj = source_mapping.dicomweb_source
+        elif source_mapping.source_type == "google_healthcare" and source_mapping.google_healthcare_source:
+            source_obj = source_mapping.google_healthcare_source
+        
         return {
-            'source': source_mapping.source,
+            'source': source_obj,
             'mapping': source_mapping,
             'query_result': selected_source['result_data']
         }
@@ -367,20 +404,22 @@ class CMoveProxyService:
                 'spanner_config_id': spanner_config_id,
                 'query_type': 'C-MOVE',
                 'query_level': 'STUDY',  # Could be more specific
+                'status': 'SUCCESS' if result.success else 'FAILURE',
+                'sources_queried': 1,
+                'sources_successful': 1 if result.success else 0,
+                'total_results_found': result.total_instances,
+                'deduplicated_results': result.moved_instances,
+                'query_duration_seconds': result.duration_seconds,
                 'query_filters': {
                     'StudyInstanceUID': move_request.study_uid,
                     'destination_ae': move_request.destination_ae,
                     'strategy': result.strategy_used.value if result.strategy_used else 'UNKNOWN'
                 },
-                'total_results': result.total_instances,
-                'successful_results': result.moved_instances,
-                'failed_results': result.failed_instances,
-                'duration_seconds': result.duration_seconds,
                 'requesting_ip': move_request.requesting_ip,
                 'error_message': result.error_message
             }
             
-            crud.crud_spanner_query_log.create(self.db, obj_in=log_data)
+            crud.crud_spanner_query_log.create_log(self.db, **log_data)
             self.db.commit()
             
         except Exception as e:

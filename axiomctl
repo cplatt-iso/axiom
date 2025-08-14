@@ -1,0 +1,12 @@
+#!/bin/bash
+# axiomctl: Wrapper for modular Docker Compose setup
+
+# Compose files to include
+COMPOSE_FILES=(-f core.yml -f docker/app.yml -f docker/docs.yml)
+# Add all listener YAMLs
+for f in docker/listeners/*.yml; do
+  COMPOSE_FILES+=( -f "$f" )
+done
+
+# Pass all arguments to docker compose
+exec docker compose "${COMPOSE_FILES[@]}" "$@"

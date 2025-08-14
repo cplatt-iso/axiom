@@ -1,0 +1,37 @@
+services:
+  storescp_1:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.listener
+    container_name: dicom_processor_storescp_1
+    env_file:
+      - ./.env
+    environment:
+      - AXIOM_INSTANCE_ID=storescp_1
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/g./axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      - "11112:11112/tcp"
+    volumes:
+      - ./app:/app/app
+      - dicom_incoming:/dicom_data/incoming
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"

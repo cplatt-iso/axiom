@@ -26,7 +26,7 @@ router = APIRouter()
         status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Internal server error."},
     }
 )
-def search_studies_spanning(
+async def search_studies_spanning(
     request: Request,
     db: Session = Depends(deps.get_db),
     # Standard QIDO-RS query parameters
@@ -94,7 +94,7 @@ def search_studies_spanning(
     try:
         # Execute spanning query
         spanner_engine = SpannerEngine(db)
-        spanning_result = spanner_engine.execute_spanning_query(
+        spanning_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="QIDO",
             query_level="STUDY",
@@ -130,9 +130,9 @@ def search_studies_spanning(
     description="QIDO-RS series search within a study with query spanning.",
     response_model=List[Dict[str, Any]],
 )
-def search_series_spanning(
+async def search_series_spanning(
+    request: Request,
     study_uid: str = Path(..., description="Study Instance UID"),
-    request: Request = None,
     db: Session = Depends(deps.get_db),
     # Standard QIDO-RS query parameters for series
     SeriesInstanceUID: Optional[str] = Query(None, description="Series Instance UID"),
@@ -178,7 +178,7 @@ def search_series_spanning(
     try:
         # Execute spanning query
         spanner_engine = SpannerEngine(db)
-        spanning_result = spanner_engine.execute_spanning_query(
+        spanning_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="QIDO",
             query_level="SERIES",
@@ -202,10 +202,10 @@ def search_series_spanning(
     description="QIDO-RS instances search within a series with query spanning.",
     response_model=List[Dict[str, Any]],
 )
-def search_instances_spanning(
+async def search_instances_spanning(
+    request: Request,
     study_uid: str = Path(..., description="Study Instance UID"),
     series_uid: str = Path(..., description="Series Instance UID"),
-    request: Request = None,
     db: Session = Depends(deps.get_db),
     # Standard QIDO-RS query parameters for instances
     SOPInstanceUID: Optional[str] = Query(None, description="SOP Instance UID"),
@@ -251,7 +251,7 @@ def search_instances_spanning(
     try:
         # Execute spanning query
         spanner_engine = SpannerEngine(db)
-        spanning_result = spanner_engine.execute_spanning_query(
+        spanning_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="QIDO",
             query_level="INSTANCE",

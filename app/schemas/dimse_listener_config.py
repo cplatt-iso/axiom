@@ -73,7 +73,14 @@ class DimseListenerConfigBase(BaseModel):
 
 class DimseListenerConfigCreate(DimseListenerConfigBase):
     # Inherits TLS fields and validation from Base
-    pass
+    listener_type: str = Field("pynetdicom", description="The type of listener implementation ('pynetdicom' or 'dcm4che').")
+
+    @field_validator('listener_type')
+    @classmethod
+    def validate_listener_type(cls, value: str) -> str:
+        if value not in ["pynetdicom", "dcm4che"]:
+            raise ValueError("Listener type must be either 'pynetdicom' or 'dcm4che'")
+        return value
 
 
 class DimseListenerConfigUpdate(BaseModel):
@@ -84,6 +91,7 @@ class DimseListenerConfigUpdate(BaseModel):
     port: Optional[int] = Field(None, gt=0, lt=65535)
     is_enabled: Optional[bool] = None
     instance_id: Optional[str] = Field(None, min_length=1, max_length=255)
+    listener_type: Optional[str] = None
 
     # --- TLS Fields Added to Update ---
     tls_enabled: Optional[bool] = None
@@ -106,6 +114,13 @@ class DimseListenerConfigUpdate(BaseModel):
         if v is None: return None
         # Call the validator from the Base class
         return DimseListenerConfigBase.validate_instance_id_format(v, info)
+
+    @field_validator('listener_type')
+    @classmethod
+    def validate_update_listener_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in ["pynetdicom", "dcm4che"]:
+            raise ValueError("Listener type must be either 'pynetdicom' or 'dcm4che'")
+        return value
 
     # --- Model Validator for Update Schema ---
     @model_validator(mode='after')
@@ -134,6 +149,7 @@ class DimseListenerConfigRead(DimseListenerConfigBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    listener_type: str
 
     # Ensure the model can be created from ORM attributes
     model_config = ConfigDict(from_attributes=True)

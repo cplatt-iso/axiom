@@ -15,6 +15,7 @@ from app.services.network.dimse.transfer_syntax_negotiation import (
     create_optimized_contexts_for_sop_class
 )
 from app.services.network.dimse.scu_service import store_dataset
+from app.schemas.storage_backend_config import CStoreBackendConfig
 
 from pydicom.dataset import Dataset
 from pydicom.uid import CTImageStorage, ImplicitVRLittleEndian, UID
@@ -93,26 +94,58 @@ def test_c_store_config():
     """Test C-STORE configuration example."""
     print("\nTesting C-STORE configuration...")
     
-    # Example configuration for testing
-    config = {
-        "remote_host": "127.0.0.1",
-        "remote_port": 11112,
-        "remote_ae_title": "TEST_SCP",
-        "local_ae_title": "AXIOM_SCU_TEST",
-        "tls_enabled": False
-    }
+    # Example configuration for testing with pynetdicom
+    config_pynetdicom = CStoreBackendConfig(
+        name="TestSCPPynetdicom",
+        remote_host="127.0.0.1",
+        remote_port=11112,
+        remote_ae_title="PYNETDICOM_SCP",
+        local_ae_title="AXIOM_SCU_TEST",
+        sender_type="pynetdicom",
+        description="Test C-STORE backend for pynetdicom",
+        is_enabled=True,
+        transfer_syntax_strategy="default",
+        max_association_retries=3,
+        tls_enabled=False,
+        tls_ca_cert_secret_name=None,
+        tls_client_cert_secret_name=None,
+        tls_client_key_secret_name=None
+    )
+
+    # Example configuration for testing with dcm4che
+    config_dcm4che = CStoreBackendConfig(
+        name="TestSCPDcm4che",
+        remote_host="127.0.0.1",
+        remote_port=11113, # Assuming dcm4che listener is on a different port
+        remote_ae_title="DCM4CHE_SCP",
+        local_ae_title="AXIOM_SCU_TEST",
+        sender_type="dcm4che",
+        description="Test C-STORE backend for dcm4che",
+        is_enabled=True,
+        transfer_syntax_strategy="default",
+        max_association_retries=3,
+        tls_enabled=False,
+        tls_ca_cert_secret_name=None,
+        tls_client_cert_secret_name=None,
+        tls_client_key_secret_name=None
+    )
     
     dataset = create_sample_dataset()
     
-    print("Configuration:")
-    for key, value in config.items():
-        print(f"  {key}: {value}")
+    print("\nPynetdicom Configuration:")
+    print(config_pynetdicom.model_dump_json(indent=2))
     
-    print(f"Dataset SOP Class: {dataset.SOPClassUID}")
+    print("\nDCM4CHE Configuration:")
+    print(config_dcm4che.model_dump_json(indent=2))
+
+    print(f"\nDataset SOP Class: {dataset.SOPClassUID}")
     print(f"Dataset SOP Instance: {dataset.SOPInstanceUID}")
     
     # Note: This would actually try to connect, so we just show the configuration
-    print("Ready for C-STORE operation (connection not attempted in test)")
+    print("\nReady for C-STORE operation (connection not attempted in test)")
+    print("To test, you would call:")
+    print("store_dataset(config=config_pynetdicom, dataset=dataset)")
+    print("store_dataset(config=config_dcm4che, dataset=dataset)")
 
 if __name__ == "__main__":
     print("Robust C-STORE Test Suite")

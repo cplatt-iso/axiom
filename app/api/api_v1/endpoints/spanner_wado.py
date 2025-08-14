@@ -27,12 +27,12 @@ router = APIRouter()
         status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Internal server error."},
     }
 )
-def retrieve_study_spanning(
+async def retrieve_study_spanning(
+    request: Request,
     study_uid: str = Path(..., description="Study Instance UID"),
-    request: Request = None,
-    db: Session = Depends(deps.get_db),
     spanner_config_id: Optional[int] = Query(None, description="Specific spanner configuration to use"),
     preferred_source: Optional[str] = Query(None, description="Preferred source AE title"),
+    db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_active_user),
 ):
     """
@@ -68,7 +68,7 @@ def retrieve_study_spanning(
         spanner_engine = SpannerEngine(db)
         
         # First, do a quick query to find which sources have this study
-        query_result = spanner_engine.execute_spanning_query(
+        query_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="C-FIND",  # Use C-FIND to locate the study
             query_level="STUDY",
@@ -101,8 +101,17 @@ def retrieve_study_spanning(
             
             target_source = None
             for mapping in source_mappings:
-                if mapping.source.ae_title in available_sources:
-                    target_source = mapping.source.ae_title
+                # Get the appropriate source based on mapping type
+                source_ae_title = None
+                if mapping.source_type == "dimse-qr" and mapping.dimse_qr_source:
+                    source_ae_title = mapping.dimse_qr_source.remote_ae_title
+                elif mapping.source_type == "dicomweb" and mapping.dicomweb_source:
+                    source_ae_title = str(mapping.dicomweb_source.source_name)  # type: ignore[arg-type]
+                elif mapping.source_type == "google_healthcare" and mapping.google_healthcare_source:
+                    source_ae_title = mapping.google_healthcare_source.name
+                
+                if source_ae_title and source_ae_title in available_sources:
+                    target_source = source_ae_title
                     break
             
             if not target_source:
@@ -136,10 +145,10 @@ def retrieve_study_spanning(
     summary="Retrieve Series Across Multiple Sources",
     description="WADO-RS series retrieval with automatic source selection.",
 )
-def retrieve_series_spanning(
+async def retrieve_series_spanning(
+    request: Request,
     study_uid: str = Path(..., description="Study Instance UID"),
     series_uid: str = Path(..., description="Series Instance UID"),
-    request: Request = None,
     db: Session = Depends(deps.get_db),
     spanner_config_id: Optional[int] = Query(None, description="Specific spanner configuration to use"),
     preferred_source: Optional[str] = Query(None, description="Preferred source AE title"),
@@ -169,7 +178,7 @@ def retrieve_series_spanning(
         spanner_engine = SpannerEngine(db)
         
         # Query to find which sources have this series
-        query_result = spanner_engine.execute_spanning_query(
+        query_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="C-FIND",
             query_level="SERIES",
@@ -202,8 +211,17 @@ def retrieve_series_spanning(
             
             target_source = None
             for mapping in source_mappings:
-                if mapping.source.ae_title in available_sources:
-                    target_source = mapping.source.ae_title
+                # Get the appropriate source based on mapping type
+                source_ae_title = None
+                if mapping.source_type == "dimse-qr" and mapping.dimse_qr_source:
+                    source_ae_title = mapping.dimse_qr_source.remote_ae_title
+                elif mapping.source_type == "dicomweb" and mapping.dicomweb_source:
+                    source_ae_title = str(mapping.dicomweb_source.source_name)  # type: ignore[arg-type]
+                elif mapping.source_type == "google_healthcare" and mapping.google_healthcare_source:
+                    source_ae_title = mapping.google_healthcare_source.name
+                
+                if source_ae_title and source_ae_title in available_sources:
+                    target_source = source_ae_title
                     break
             
             if not target_source:
@@ -234,11 +252,11 @@ def retrieve_series_spanning(
     summary="Retrieve Instance Across Multiple Sources",
     description="WADO-RS instance retrieval with automatic source selection.",
 )
-def retrieve_instance_spanning(
+async def retrieve_instance_spanning(
+    request: Request,
     study_uid: str = Path(..., description="Study Instance UID"),
     series_uid: str = Path(..., description="Series Instance UID"),
     instance_uid: str = Path(..., description="SOP Instance UID"),
-    request: Request = None,
     db: Session = Depends(deps.get_db),
     spanner_config_id: Optional[int] = Query(None, description="Specific spanner configuration to use"),
     preferred_source: Optional[str] = Query(None, description="Preferred source AE title"),
@@ -269,7 +287,7 @@ def retrieve_instance_spanning(
         spanner_engine = SpannerEngine(db)
         
         # Query to find which sources have this instance
-        query_result = spanner_engine.execute_spanning_query(
+        query_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="C-FIND",
             query_level="INSTANCE",
@@ -303,8 +321,17 @@ def retrieve_instance_spanning(
             
             target_source = None
             for mapping in source_mappings:
-                if mapping.source.ae_title in available_sources:
-                    target_source = mapping.source.ae_title
+                # Get the appropriate source based on mapping type
+                source_ae_title = None
+                if mapping.source_type == "dimse-qr" and mapping.dimse_qr_source:
+                    source_ae_title = mapping.dimse_qr_source.remote_ae_title
+                elif mapping.source_type == "dicomweb" and mapping.dicomweb_source:
+                    source_ae_title = str(mapping.dicomweb_source.source_name)  # type: ignore[arg-type]
+                elif mapping.source_type == "google_healthcare" and mapping.google_healthcare_source:
+                    source_ae_title = mapping.google_healthcare_source.name
+                
+                if source_ae_title and source_ae_title in available_sources:
+                    target_source = source_ae_title
                     break
             
             if not target_source:
@@ -342,9 +369,9 @@ def retrieve_instance_spanning(
     summary="Get Study Metadata from Best Source",
     description="Retrieve study metadata using source selection logic.",
 )
-def get_study_metadata_spanning(
+async def get_study_metadata_spanning(
+    request: Request,
     study_uid: str = Path(..., description="Study Instance UID"),
-    request: Request = None,
     db: Session = Depends(deps.get_db),
     spanner_config_id: Optional[int] = Query(None, description="Specific spanner configuration to use"),
     current_user: models.User = Depends(deps.get_current_active_user),
@@ -373,7 +400,7 @@ def get_study_metadata_spanning(
         spanner_engine = SpannerEngine(db)
         
         # Get study metadata from all available sources
-        query_result = spanner_engine.execute_spanning_query(
+        query_result = await spanner_engine.execute_spanning_query(
             spanner_config_id=spanner_config.id,
             query_type="C-FIND",
             query_level="STUDY",

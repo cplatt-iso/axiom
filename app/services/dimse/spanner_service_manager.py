@@ -5,11 +5,12 @@ import time
 from typing import Dict, List, Optional, Any
 from contextlib import contextmanager
 
-from pynetdicom import AE
+from pynetdicom import ae
 from sqlalchemy.orm import Session
 
 from app import crud
-from app.db.models import DimseListener
+from app.db.models import DimseListenerConfig
+from app.schemas.dimse_listener_config import DimseListenerConfigCreate
 from app.services.dimse.spanner_scp import SpannerSCP
 from app.services.dimse.cmove_proxy import CMoveProxyService
 from app.services.spanner_engine import SpannerEngine
@@ -56,7 +57,7 @@ class SpannerServiceManager:
                 )
                 
                 for config in spanner_configs:
-                    if config.supports_dimse_scp:
+                    if config.supports_cfind:
                         self._start_scp_service(config)
                     
                     if config.supports_cmove:
@@ -79,8 +80,8 @@ class SpannerServiceManager:
             with self.get_db_session() as db:
                 # Create SCP service
                 scp_service = SpannerSCP(
-                    spanner_config_id=spanner_config.id,
-                    db_session_factory=self.db_session_factory
+                    ae_title=spanner_config.scp_ae_title,
+                    port=getattr(spanner_config, 'scp_port', 11112)
                 )
                 
                 # Get or create DIMSE listener configuration
@@ -163,42 +164,42 @@ class SpannerServiceManager:
             self.active_services[service_id]['status'] = 'error'
             self.active_services[service_id]['error'] = str(e)
     
-    def _get_or_create_listener(self, db: Session, spanner_config) -> Optional[DimseListener]:
+    def _get_or_create_listener(self, db: Session, spanner_config) -> Optional[DimseListenerConfig]:
         """Get or create a DIMSE listener for the spanner configuration."""
         
         # Look for existing listener for this spanner config
         listener_name = f"spanner_{spanner_config.id}_scp"
         
-        listener = crud.crud_dimse_listener.get_by_name(db, name=listener_name)
+        listener = crud.crud_dimse_listener_config.get_by_name(db, name=listener_name)
         
         if not listener:
             # Create a new listener configuration
             # Use available port (start from 11112 for spanner services)
             base_port = 11112
-            used_ports = {l.port for l in crud.crud_dimse_listener.get_multi(db)}
+            used_ports = {l.port for l in crud.crud_dimse_listener_config.get_multi(db)}
             
             port = base_port
             while port in used_ports:
                 port += 1
             
-            listener_data = {
-                'name': listener_name,
-                'ae_title': f'SPANNER_{spanner_config.id}',
-                'host': '0.0.0.0',
-                'port': port,
-                'description': f'Auto-created listener for spanner config {spanner_config.name}',
-                'is_enabled': True,
-                'supports_echo': True,
-                'supports_find': True,
-                'supports_move': spanner_config.supports_cmove,
-                'supports_get': True,
-                'supports_store': False,  # Spanner doesn't accept storage
-            }
+            listener_data = DimseListenerConfigCreate(
+                name=listener_name,
+                ae_title=f'SPANNER_{spanner_config.id}',
+                port=port,
+                listener_type='pynetdicom',
+                description=f'Auto-created listener for spanner config {spanner_config.name}',
+                is_enabled=True,
+                instance_id=None,
+                tls_enabled=False,
+                tls_cert_secret_name=None,
+                tls_key_secret_name=None,
+                tls_ca_cert_secret_name=None
+            )
             
-            listener = crud.crud_dimse_listener.create(db, obj_in=listener_data)
+            listener = crud.crud_dimse_listener_config.create(db, obj_in=listener_data)
             db.commit()
             
-            logger.info(f"Created DIMSE listener for spanner config {spanner_config.id}: {listener.ae_title}@{listener.host}:{listener.port}")
+            logger.info(f"Created DIMSE listener for spanner config {spanner_config.id}: {listener.ae_title}:{listener.port}")
         
         return listener
     

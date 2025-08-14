@@ -364,7 +364,7 @@ def test_spanner_config(
         source_results=[
             {
                 "source_id": mapping.dimse_qr_source_id,
-                "source_name": mapping.dimse_qr_source.name if hasattr(mapping, 'dimse_qr_source') else "Unknown",
+                "source_name": mapping.dimse_qr_source.name if mapping.dimse_qr_source else "Unknown",
                 "status": "SUCCESS",
                 "results_found": 10 + (mapping.id % 5),  # Mock varying results
                 "response_time_seconds": 0.5 + (mapping.priority * 0.1)

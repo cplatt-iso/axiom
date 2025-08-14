@@ -1,17 +1,19 @@
 # app/services/dimse/spanner_scp.py
+import asyncio
 import logging
 from typing import Dict, Any, Optional, List
-from pynetdicom import AE, evt, AllStoragePresentationContexts
+from pynetdicom import AE, evt  # type: ignore[attr-defined]
 from pynetdicom.sop_class import (
-    PatientRootQueryRetrieveInformationModelFind,
-    StudyRootQueryRetrieveInformationModelFind,
-    PatientStudyOnlyQueryRetrieveInformationModelFind
+    PatientRootQueryRetrieveInformationModelFind,  # type: ignore[attr-defined]
+    StudyRootQueryRetrieveInformationModelFind,  # type: ignore[attr-defined]
+    PatientStudyOnlyQueryRetrieveInformationModelFind  # type: ignore[attr-defined]
 )
 from pydicom import Dataset
 from pydicom.uid import generate_uid
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
+from app.db import models
 from app.services.spanner_engine import SpannerEngine
 from app import crud
 
@@ -28,6 +30,7 @@ class SpannerSCP:
         self.ae_title = ae_title
         self.port = port
         self.ae = AE(ae_title=ae_title)
+        self.db_session_factory = SessionLocal
         
         # Add supported presentation contexts for C-FIND
         self.ae.add_supported_context(PatientRootQueryRetrieveInformationModelFind)
@@ -35,7 +38,7 @@ class SpannerSCP:
         self.ae.add_supported_context(PatientStudyOnlyQueryRetrieveInformationModelFind)
         
         # Set up event handlers
-        self.ae.on_c_find = self.handle_c_find
+        self.ae.on_c_find = self.handle_c_find  # type: ignore[attr-defined]
         
         logger.info(f"Initialized Spanner SCP with AE Title: {ae_title}, Port: {port}")
     
@@ -53,6 +56,7 @@ class SpannerSCP:
         """
         logger.info(f"Received C-FIND request from {event.assoc.requestor.ae_title}")
         
+        db = None  # Initialize db variable
         try:
             # Get database session
             db = self.db_session_factory()
@@ -73,16 +77,16 @@ class SpannerSCP:
                 yield 0xC000  # Failure - Unable to process
                 return
             
-            # Execute spanning query
+            # Execute spanning query using asyncio.run to handle async call
             spanner_engine = SpannerEngine(db)
-            spanning_result = spanner_engine.execute_spanning_query(
+            spanning_result = asyncio.run(spanner_engine.execute_spanning_query(
                 spanner_config_id=spanner_config.id,
                 query_type="C-FIND",
                 query_level=query_level,
                 query_filters=query_filters,
                 requesting_ae_title=event.assoc.requestor.ae_title,
                 requesting_ip=event.assoc.requestor.address
-            )
+            ))
             
             # Convert results back to DICOM datasets and yield them
             results = spanning_result.get('results', [])
@@ -100,7 +104,7 @@ class SpannerSCP:
             yield 0xC000  # Failure - Unable to process
         
         finally:
-            if 'db' in locals():
+            if db:
                 db.close()
     
     def _get_query_level(self, abstract_syntax: str) -> str:

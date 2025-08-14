@@ -372,6 +372,10 @@ def run_dimse_server():
             log.warning("Config Disabled: Listener is disabled in config. Listener will not start.", config_name=listener_config.name)
             sys.exit(0) # Exit cleanly if disabled
 
+        if listener_config.listener_type != 'pynetdicom':
+            log.info(f"Listener config '{listener_config.name}' is of type '{listener_config.listener_type}', not 'pynetdicom'. This listener will not start. Exiting.")
+            sys.exit(0)
+
         # Extract config details
         ae_title = listener_config.ae_title
         port = listener_config.port

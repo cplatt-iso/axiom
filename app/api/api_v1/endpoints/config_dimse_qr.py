@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app import crud, schemas
 from app.db import models
 from app.api import deps
+from app.schemas.enums import HealthStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -255,7 +256,7 @@ async def test_dimse_qr_connection(
             "remote_endpoint": f"{db_source.remote_host}:{db_source.remote_port}",
             "health_status": health_status.value,
             "test_timestamp": datetime.now(timezone.utc).isoformat(),
-            "success": health_status == schemas.enums.HealthStatus.OK,
+            "success": health_status == HealthStatus.OK,
         }
         
         if error_message:

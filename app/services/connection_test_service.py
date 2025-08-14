@@ -13,8 +13,15 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Tuple, Optional, List
 import httpx
 import structlog
-from pynetdicom import AE, debug_logger
-from pynetdicom.sop_class import Verification
+from pynetdicom import AE, debug_logger  # type: ignore[attr-defined]
+from pynetdicom.sop_class import Verification  # type: ignore
+
+try:
+    import google.auth.exceptions
+    GOOGLE_AUTH_AVAILABLE = True
+except ImportError:
+    google = None  # type: ignore
+    GOOGLE_AUTH_AVAILABLE = False
 
 from app.core.config import settings
 from app.db.models.dicomweb_source_state import DicomWebSourceState
@@ -27,6 +34,7 @@ try:
     from app.core import gcp_utils
     GCP_UTILS_AVAILABLE = True
 except ImportError:
+    gcp_utils = None  # type: ignore
     GCP_UTILS_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
@@ -42,7 +50,7 @@ class TlsConfigError(Exception):
 
 def _fetch_and_write_secret(secret_name: str, suffix: str) -> str:
     """Fetch secret from GCP Secret Manager and write to temporary file."""
-    if not GCP_UTILS_AVAILABLE:
+    if not GCP_UTILS_AVAILABLE or gcp_utils is None:
         raise TlsConfigError("GCP utils not available for secret fetching")
     
     secret_content = gcp_utils.get_secret(secret_name)
@@ -146,21 +154,21 @@ class ConnectionTestService:
             headers = {"Accept": "application/dicom+json"}
             auth = None
             
-            if source.auth_type == "basic" and source.auth_config:
+            if source.auth_type == "basic" and source.auth_config:  # type: ignore
                 auth = httpx.BasicAuth(
-                    source.auth_config.get("username", ""),
-                    source.auth_config.get("password", "")
+                    source.auth_config.get("username", ""),  # type: ignore
+                    source.auth_config.get("password", "")  # type: ignore
                 )
-            elif source.auth_type == "bearer" and source.auth_config:
-                headers["Authorization"] = f"Bearer {source.auth_config.get('token', '')}"
-            elif source.auth_type == "apikey" and source.auth_config:
-                header_name = source.auth_config.get("header_name", "X-API-Key")
-                headers[header_name] = source.auth_config.get("key", "")
+            elif source.auth_type == "bearer" and source.auth_config:  # type: ignore
+                headers["Authorization"] = f"Bearer {source.auth_config.get('token', '')}"  # type: ignore
+            elif source.auth_type == "apikey" and source.auth_config:  # type: ignore
+                header_name = source.auth_config.get("header_name", "X-API-Key")  # type: ignore
+                headers[header_name] = source.auth_config.get("key", "")  # type: ignore
             
             # Test connection with a simple query (limit to 1 study)
             params = {"limit": 1}
-            if source.search_filters:
-                params.update(source.search_filters)
+            if source.search_filters:  # type: ignore
+                params.update(source.search_filters)  # type: ignore
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
@@ -210,9 +218,9 @@ class ConnectionTestService:
         
         try:
             # Create an Application Entity
-            ae = AE(ae_title=source.local_ae_title)
+            application_entity = AE(ae_title=source.local_ae_title)
             # For C-ECHO (verification), we need to request the presentation context as SCU
-            ae.add_requested_context(Verification)
+            application_entity.add_requested_context(Verification)
             
             # Prepare TLS if enabled
             ssl_context = None
@@ -250,7 +258,7 @@ class ConnectionTestService:
             # Run the connection test in a thread to avoid blocking
             def _test_connection():
                 try:
-                    assoc = ae.associate(**assoc_args)
+                    assoc = application_entity.associate(**assoc_args)
                     if assoc.is_established:
                         # Send C-ECHO
                         status = assoc.send_c_echo()
@@ -359,8 +367,6 @@ class ConnectionTestService:
                         # If we get here without exception, the connection works
                         return True, None
                         
-                except google.auth.exceptions.DefaultCredentialsError as e:
-                    return False, f"Authentication failed - no default credentials: {str(e)}"
                 except httpx.HTTPStatusError as e:
                     # Check for common HTTP error codes
                     if e.response.status_code == 403:
@@ -375,7 +381,12 @@ class ConnectionTestService:
                 except httpx.RequestError as e:
                     return False, f"Network error: {str(e)}"
                 except Exception as e:
-                    return False, f"Unexpected error: {str(e)}"
+                    # Handle auth errors and other exceptions
+                    error_str = str(e)
+                    if "DefaultCredentialsError" in error_str:
+                        return False, f"Authentication failed - no default credentials: {error_str}"
+                    else:
+                        return False, f"Unexpected error: {error_str}"
             
             # Run in thread pool to avoid blocking
             loop = asyncio.get_event_loop()

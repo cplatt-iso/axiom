@@ -1,0 +1,21 @@
+# Documentation service
+services:
+  docs:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.docs
+    container_name: axiom_docs
+    ports:
+      - "8000:80"
+    depends_on:
+      - api
+    networks:
+      - default
+      - shared
+    restart: unless-stopped
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.docs.{{.Name}}"

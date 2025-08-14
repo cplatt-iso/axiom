@@ -2,7 +2,7 @@
 
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import asc, desc, func, update as sql_update, delete as sql_delete, select
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, array
 from sqlalchemy.exc import IntegrityError 
 from typing import List, Optional
 
@@ -208,7 +208,7 @@ def get_rules_by_ai_prompt_config_id(db: Session, *, config_id: int) -> List[Rul
     # Use the @> operator to check if the JSONB array contains the config_id
     # This is compatible with PostgreSQL 9.4+ unlike jsonb_path_exists which requires 12+
     statement = select(Rule).filter(
-        Rule.ai_prompt_config_ids.op('@>')(func.cast([config_id], JSONB))
+        Rule.ai_prompt_config_ids.op('@>')(func.cast(array([config_id]), JSONB))
     )
     return list(db.execute(statement).scalars().all())
 

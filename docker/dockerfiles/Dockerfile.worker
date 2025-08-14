@@ -3,14 +3,25 @@
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# --- Simplified dependencies (removed pkg-config, kept build tools for other libs maybe) ---
+# --- System Dependencies ---
+# Install build tools, mysql client, and now Java + unzip for dcm4che
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     default-libmysqlclient-dev \
-    # python3-dev
-    # Add pyodbc dependencies if needed: unixodbc-dev
+    openjdk-21-jre-headless \
+    unzip \
+    curl \
     && rm -rf /var/lib/apt/lists/*
-# --- END Simplified ---
+
+# --- Install dcm4che tools ---
+# This adds a layer to the image but makes the robust storescu tool available.
+ARG DCM4CHE_VERSION=5.30.0
+RUN curl -fsSL "https://sourceforge.net/projects/dcm4che/files/dcm4che3/${DCM4CHE_VERSION}/dcm4che-${DCM4CHE_VERSION}-bin.zip/download" -o /tmp/dcm4che.zip \
+    && unzip /tmp/dcm4che.zip -d /opt \
+    && rm /tmp/dcm4che.zip
+ENV PATH="/opt/dcm4che-${DCM4CHE_VERSION}/bin:${PATH}"
+# --- End dcm4che install ---
+
 
 RUN python --version
 RUN pip --version

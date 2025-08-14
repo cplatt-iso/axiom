@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app import crud, schemas
 from app.api import deps
 from app.db.models.user import User # Import User model for permission checks if needed
+from app.schemas.enums import HealthStatus
 
 router = APIRouter()
 
@@ -171,7 +172,7 @@ async def test_google_healthcare_connection(
             "gcp_dicom_store_id": db_source.gcp_dicom_store_id,
             "health_status": health_status.value,
             "test_timestamp": datetime.now(timezone.utc).isoformat(),
-            "success": health_status == schemas.enums.HealthStatus.OK,
+            "success": health_status == HealthStatus.OK,
         }
         
         if error_message:

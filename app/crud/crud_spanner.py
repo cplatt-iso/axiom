@@ -236,16 +236,22 @@ class CRUDSpannerSourceMapping:
         db: Session, 
         *, 
         spanner_config_id: int, 
-        dimse_qr_source_id: int
+        source_type: str,
+        source_id: int
     ) -> Optional[models.SpannerSourceMapping]:
-        """Get a mapping by spanner and source IDs."""
-        stmt = (
-            select(models.SpannerSourceMapping)
-            .where(
-                models.SpannerSourceMapping.spanner_config_id == spanner_config_id,
-                models.SpannerSourceMapping.dimse_qr_source_id == dimse_qr_source_id
-            )
-        )
+        """Get a mapping by spanner config ID and source."""
+        conditions = [models.SpannerSourceMapping.spanner_config_id == spanner_config_id]
+        
+        if source_type == "dimse":
+            conditions.append(models.SpannerSourceMapping.dimse_qr_source_id == source_id)
+        elif source_type == "dicomweb":
+            conditions.append(models.SpannerSourceMapping.dicomweb_source_id == source_id)
+        elif source_type == "google_healthcare":
+            conditions.append(models.SpannerSourceMapping.google_healthcare_source_id == source_id)
+        else:
+            return None
+            
+        stmt = select(models.SpannerSourceMapping).where(*conditions)
         return db.execute(stmt).scalar_one_or_none()
     
     def get_multi_by_spanner(
@@ -259,7 +265,11 @@ class CRUDSpannerSourceMapping:
         """Get all mappings for a spanner config."""
         stmt = (
             select(models.SpannerSourceMapping)
-            .options(joinedload(models.SpannerSourceMapping.dimse_qr_source))
+            .options(
+                joinedload(models.SpannerSourceMapping.dimse_qr_source),
+                joinedload(models.SpannerSourceMapping.dicomweb_source),
+                joinedload(models.SpannerSourceMapping.google_healthcare_source)
+            )
             .where(models.SpannerSourceMapping.spanner_config_id == spanner_config_id)
         )
         
@@ -278,20 +288,8 @@ class CRUDSpannerSourceMapping:
         spanner_config_id: int,
         obj_in: schemas_spanner.SpannerSourceMappingCreate
     ) -> models.SpannerSourceMapping:
-        """Create a new source mapping."""
-        logger.info(f"Creating source mapping for spanner {spanner_config_id}, source {obj_in.dimse_qr_source_id}")
-        
-        # Check if mapping already exists
-        existing = self.get_by_spanner_and_source(
-            db, 
-            spanner_config_id=spanner_config_id, 
-            dimse_qr_source_id=obj_in.dimse_qr_source_id
-        )
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Source {obj_in.dimse_qr_source_id} is already mapped to spanner {spanner_config_id}."
-            )
+        """Create a new source mapping for any source type."""
+        logger.info(f"Creating {obj_in.source_type} source mapping for spanner {spanner_config_id}")
         
         # Verify spanner config exists
         spanner_config = db.get(models.SpannerConfig, spanner_config_id)
@@ -301,12 +299,59 @@ class CRUDSpannerSourceMapping:
                 detail=f"Spanner config {spanner_config_id} not found."
             )
         
-        # Verify source exists
-        source = db.get(models.DimseQueryRetrieveSource, obj_in.dimse_qr_source_id)
-        if not source:
+        # Verify the appropriate source exists and check for duplicates
+        source_id = None
+        existing = None
+        
+        if obj_in.source_type == "dimse-qr":
+            source_id = obj_in.dimse_qr_source_id
+            source = db.get(models.DimseQueryRetrieveSource, source_id)
+            if not source:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"DIMSE Q/R source {source_id} not found."
+                )
+            # Check for existing mapping
+            stmt = select(models.SpannerSourceMapping).where(
+                models.SpannerSourceMapping.spanner_config_id == spanner_config_id,
+                models.SpannerSourceMapping.dimse_qr_source_id == source_id
+            )
+            existing = db.execute(stmt).scalar_one_or_none()
+            
+        elif obj_in.source_type == "dicomweb":
+            source_id = obj_in.dicomweb_source_id
+            source = db.get(models.DicomWebSourceState, source_id)
+            if not source:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"DICOMweb source {source_id} not found."
+                )
+            # Check for existing mapping
+            stmt = select(models.SpannerSourceMapping).where(
+                models.SpannerSourceMapping.spanner_config_id == spanner_config_id,
+                models.SpannerSourceMapping.dicomweb_source_id == source_id
+            )
+            existing = db.execute(stmt).scalar_one_or_none()
+            
+        elif obj_in.source_type == "google_healthcare":
+            source_id = obj_in.google_healthcare_source_id
+            source = db.get(models.GoogleHealthcareSource, source_id)
+            if not source:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Google Healthcare source {source_id} not found."
+                )
+            # Check for existing mapping
+            stmt = select(models.SpannerSourceMapping).where(
+                models.SpannerSourceMapping.spanner_config_id == spanner_config_id,
+                models.SpannerSourceMapping.google_healthcare_source_id == source_id
+            )
+            existing = db.execute(stmt).scalar_one_or_none()
+        
+        if existing:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"DIMSE Q/R source {obj_in.dimse_qr_source_id} not found."
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"{obj_in.source_type} source {source_id} is already mapped to spanner {spanner_config_id}."
             )
         
         try:
@@ -317,15 +362,15 @@ class CRUDSpannerSourceMapping:
             db.add(db_obj)
             db.commit()
             db.refresh(db_obj)
-            logger.info(f"Created source mapping ID: {db_obj.id}")
+            logger.info(f"Created {obj_in.source_type} source mapping ID: {db_obj.id}")
             return db_obj
         except IntegrityError as e:
             db.rollback()
             logger.error(f"DB integrity error creating source mapping: {e}", exc_info=True)
-            if "uq_spanner_source_mapping" in str(e.orig):
+            if "uq_spanner_" in str(e.orig):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Source {obj_in.dimse_qr_source_id} is already mapped to spanner {spanner_config_id}."
+                    detail=f"{obj_in.source_type} source {source_id} is already mapped to spanner {spanner_config_id}."
                 )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -410,22 +455,24 @@ class CRUDSpannerSourceMapping:
     ) -> bool:
         """Update statistics for a source mapping."""
         try:
-            update_data = {"last_used": datetime.utcnow()}
+            # Start with the base update statement
+            stmt = sql_update(models.SpannerSourceMapping).where(
+                models.SpannerSourceMapping.id == mapping_id
+            )
+            
+            # Build the values dict for the update
+            values: Dict[str, Any] = {"last_used": datetime.utcnow()}
             
             if query_sent:
-                update_data["queries_sent"] = models.SpannerSourceMapping.queries_sent + 1
+                values["queries_sent"] = models.SpannerSourceMapping.queries_sent + 1
             if query_successful:
-                update_data["queries_successful"] = models.SpannerSourceMapping.queries_successful + 1
+                values["queries_successful"] = models.SpannerSourceMapping.queries_successful + 1
             if retrieval_sent:
-                update_data["retrievals_sent"] = models.SpannerSourceMapping.retrievals_sent + 1
+                values["retrievals_sent"] = models.SpannerSourceMapping.retrievals_sent + 1
             if retrieval_successful:
-                update_data["retrievals_successful"] = models.SpannerSourceMapping.retrievals_successful + 1
+                values["retrievals_successful"] = models.SpannerSourceMapping.retrievals_successful + 1
             
-            stmt = (
-                sql_update(models.SpannerSourceMapping)
-                .where(models.SpannerSourceMapping.id == mapping_id)
-                .values(**update_data)
-            )
+            stmt = stmt.values(**values)
             
             result = db.execute(stmt)
             db.commit()

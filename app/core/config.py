@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     DIMSE_DIMSE_TIMEOUT: int = 60    # Timeout for DIMSE message responses (seconds)
     DIMSE_NETWORK_TIMEOUT: int = 30  # Low-level network activity timeout (seconds)
 
+    # DCM4CHE Settings
+    DCM4CHE_PREFIX: str = "/opt/dcm4che-5.30.0"  # Path to DCM4CHE installation
+
     RULES_CACHE_ENABLED: bool = Field(default=True)
     # RULES_CACHE_ENABLED: bool = False
     RULES_CACHE_TTL_SECONDS: int = Field(default=60)  # in seconds

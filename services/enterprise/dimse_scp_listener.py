@@ -16,19 +16,20 @@ from typing import Dict, Any, Optional
 
 import aio_pika
 import redis.asyncio as redis
-from pynetdicom import AE, evt, debug_logger
+from pynetdicom import AE, evt  # type: ignore[attr-defined]
 from pynetdicom.sop_class import (
-    StudyRootQueryRetrieveInformationModelFind,
-    PatientRootQueryRetrieveInformationModelFind,
-    StudyRootQueryRetrieveInformationModelMove,
-    PatientRootQueryRetrieveInformationModelMove
+    StudyRootQueryRetrieveInformationModelFind,  # type: ignore[attr-defined]
+    PatientRootQueryRetrieveInformationModelFind,  # type: ignore[attr-defined]
+    StudyRootQueryRetrieveInformationModelMove,  # type: ignore[attr-defined]
+    PatientRootQueryRetrieveInformationModelMove  # type: ignore[attr-defined]
 )
 from pydicom import Dataset
 
 logger = logging.getLogger(__name__)
 
 # Disable pynetdicom debug logging
-debug_logger.setLevel(logging.WARNING)
+pynet_logger = logging.getLogger('pynetdicom')
+pynet_logger.setLevel(logging.WARNING)
 
 
 class DIMSESCPListener:
@@ -78,8 +79,8 @@ class DIMSESCPListener:
         self.ae.add_supported_context(PatientRootQueryRetrieveInformationModelMove)
         
         # Bind event handlers
-        self.ae.on_c_find = self._handle_c_find
-        self.ae.on_c_move = self._handle_c_move
+        self.ae.on_c_find = self._handle_c_find  # type: ignore[attr-defined]
+        self.ae.on_c_move = self._handle_c_move  # type: ignore[attr-defined]
         
         logger.info(f"DIMSE SCP Listener initialized: {self.config['ae_title']}")
     
@@ -98,10 +99,11 @@ class DIMSESCPListener:
     
     def _run_server(self):
         """Run the DIMSE SCP server."""
-        self.ae.start_server(
-            (self.config["host"], self.config["port"]),
-            block=True
-        )
+        if self.ae:
+            self.ae.start_server(
+                (self.config["host"], self.config["port"]),
+                block=True
+            )
     
     def _handle_c_find(self, event):
         """Handle incoming C-FIND requests."""
@@ -232,9 +234,10 @@ class DIMSESCPListener:
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT
             )
             
-            await self.rabbitmq_channel.default_exchange.publish(
-                message, routing_key="spanner.retrieval.cmove"
-            )
+            if self.rabbitmq_channel:
+                await self.rabbitmq_channel.default_exchange.publish(
+                    message, routing_key="spanner.retrieval.cmove"
+                )
             
             logger.info(f"C-MOVE task submitted: {move_task['task_id']}")
             
@@ -297,7 +300,7 @@ async def main():
     
     # Get configuration from environment
     listener_config = {
-        "ae_title": os.getenv("AE_TITLE", "SPANNER_SCP"),
+        "ae_title": os.getenv("SPANNER_SCP_AE_TITLE", "AXIOM_SCP"),
         "host": os.getenv("HOST", "0.0.0.0"),
         "port": int(os.getenv("PORT", "11112"))
     }

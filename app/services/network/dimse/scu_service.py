@@ -2,6 +2,8 @@
 import ssl
 import os
 import tempfile
+import subprocess
+import shlex
 # import logging # logging is imported in the except block for structlog
 from contextlib import contextmanager
 from typing import Optional, List, Tuple, Dict, Any, Generator, Union
@@ -19,6 +21,7 @@ from pynetdicom.service_class import VerificationServiceClass
 
 from pydicom.dataset import Dataset
 from app.core.config import settings
+from app.schemas.storage_backend_config import CStoreBackendConfig
 from .transfer_syntax_negotiation import (
     create_presentation_contexts_with_fallback,
     analyze_accepted_contexts,
@@ -518,19 +521,20 @@ def move_study(
 
 
 def store_dataset(
-    config: Dict[str, Any],
+    config: CStoreBackendConfig,
     dataset: Dataset,
     transfer_syntax_strategy: str = "conservative",
     max_retries: int = 3
 ) -> Dict[str, Any]:
     """
     Robust C-STORE operation with automatic transfer syntax fallback.
+    Can use either pynetdicom or dcm4che as the sender.
     
     Args:
-        config: Configuration dictionary with connection details
+        config: Configuration object for the C-STORE destination
         dataset: DICOM dataset to store
-        transfer_syntax_strategy: Initial strategy for transfer syntax negotiation
-        max_retries: Maximum number of retry attempts with different strategies
+        transfer_syntax_strategy: Initial strategy for transfer syntax negotiation (pynetdicom only)
+        max_retries: Maximum number of retry attempts with different strategies (pynetdicom only)
         
     Returns:
         Dictionary with store operation results
@@ -544,11 +548,11 @@ def store_dataset(
     sop_instance_uid = str(dataset.SOPInstanceUID)
     
     current_log_context = {
-        "remote_ae": config.get("remote_ae_title"), 
+        "remote_ae": config.remote_ae_title, 
         "operation": "C-STORE",
         "sop_class_uid": sop_class_uid,
         "sop_instance_uid": sop_instance_uid,
-        "strategy": transfer_syntax_strategy
+        "sender_type": config.sender_type
     }
     
     if hasattr(logger, 'bind'):
@@ -557,6 +561,109 @@ def store_dataset(
         log = logger
     
     log.info("Starting C-STORE operation")
+
+    # Convert config model to dict for pynetdicom functions that expect it
+    config_dict = config.model_dump()
+
+    if config.sender_type == "dcm4che":
+        return _store_dataset_dcm4che(config, dataset, log)
+    else: # Default to pynetdicom
+        return _store_dataset_pynetdicom(config_dict, dataset, transfer_syntax_strategy, max_retries, log)
+
+
+def _store_dataset_dcm4che(config: CStoreBackendConfig, dataset: Dataset, log) -> Dict[str, Any]:
+    """C-STORE implementation using dcm4che's storescu utility."""
+    log.info("Using dcm4che sender for C-STORE")
+    
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".dcm", prefix="storescu-") as tmp_dcm_file:
+        # Save the pydicom dataset to the temporary file
+        dataset.save_as(tmp_dcm_file.name, write_like_original=False)
+        log.debug(f"DICOM data saved to temporary file: {tmp_dcm_file.name}")
+
+        # Build the storescu command
+        # Base command: storescu [options] <aet>@<host>:<port> <file>
+        storescu_path = os.path.join(settings.DCM4CHE_PREFIX, "bin", "storescu")
+        
+        # Basic connection info
+        command = [
+            storescu_path,
+            "-c", f"{config.remote_ae_title}@{config.remote_host}:{config.remote_port}",
+            tmp_dcm_file.name
+        ]
+        
+        # Add our local AE title
+        command.extend(["--bind", config.local_ae_title or "AXIOM_SCU"])
+
+        # Add timeouts
+        command.extend(["--connect-timeout", str(settings.DIMSE_NETWORK_TIMEOUT)])
+        command.extend(["--accept-timeout", str(settings.DIMSE_ACSE_TIMEOUT)])
+        command.extend(["--dimse-timeout", str(settings.DIMSE_DIMSE_TIMEOUT)])
+        command.extend(["--rsp-timeout", str(settings.DIMSE_DIMSE_TIMEOUT)]) # Response timeout
+
+        # TLS configuration
+        if config.tls_enabled:
+            log.info("Configuring TLS for dcm4che storescu")
+            command.append("--tls")
+            
+            # This is a simplification. dcm4che storescu has a complex set of TLS options
+            # that might need more granular control via the config model in the future.
+            # For now, we assume a keystore/truststore setup if specific files are provided.
+            # This part of the code WILL need expansion if you use complex TLS setups.
+            # It's a placeholder for what would be a much more complex secret-fetching logic.
+            log.warning("dcm4che TLS is enabled, but secret handling is NOT IMPLEMENTED.")
+            log.warning("storescu will rely on system-level or pre-configured truststores.")
+            # Example of what would be needed:
+            # if config.tls_ca_cert_secret_name:
+            #     ca_path = _fetch_and_write_secret_scu(...)
+            #     command.extend(["--trust-store", ca_path])
+            #     ... and so on for client certs/keys ...
+
+        log.debug("Executing dcm4che command", command=" ".join(shlex.quote(c) for c in command))
+
+        try:
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False # We check the returncode manually
+            )
+
+            if process.returncode == 0:
+                log.info("dcm4che storescu completed successfully.")
+                return {
+                    "status": "success",
+                    "message": "C-STORE completed successfully via dcm4che.",
+                    "sop_instance_uid": str(dataset.SOPInstanceUID),
+                    "strategy_used": "dcm4che",
+                    "transfer_syntax": "N/A (handled by dcm4che)",
+                    "details": process.stdout
+                }
+            else:
+                log.error("dcm4che storescu failed.", return_code=process.returncode, stderr=process.stderr, stdout=process.stdout)
+                raise DimseCommandError(
+                    "dcm4che storescu failed",
+                    remote_ae=config.remote_ae_title,
+                    details=f"Return Code: {process.returncode}. Stderr: {process.stderr or process.stdout}"
+                )
+
+        except FileNotFoundError:
+            log.critical("storescu command not found.", path=storescu_path)
+            raise DimseScuError("dcm4che executable not found.", details=f"Expected at {storescu_path}")
+        except Exception as e:
+            log.error("An unexpected error occurred during dcm4che execution.", error=str(e))
+            raise DimseScuError("Unexpected error during dcm4che C-STORE.", details=str(e))
+
+
+def _store_dataset_pynetdicom(
+    config: Dict[str, Any],
+    dataset: Dataset,
+    transfer_syntax_strategy: str,
+    max_retries: int,
+    log
+) -> Dict[str, Any]:
+    """The original C-STORE implementation using pynetdicom."""
+    log.info("Using pynetdicom sender for C-STORE")
+    sop_class_uid = str(dataset.SOPClassUID)
     
     try:
         with manage_association_with_fallback(
@@ -613,7 +720,7 @@ def store_dataset(
                     return {
                         "status": "success",
                         "message": "C-STORE completed successfully",
-                        "sop_instance_uid": sop_instance_uid,
+                        "sop_instance_uid": str(dataset.SOPInstanceUID),
                         "strategy_used": metadata.get("strategy_used"),
                         "transfer_syntax": compatible_context.transfer_syntax,
                         "context_id": compatible_context.context_id

@@ -1,6 +1,6 @@
 # app/schemas/spanner.py
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 from enum import Enum
 
@@ -39,6 +39,12 @@ class SpannerConfigBase(BaseModel):
                                       description="Optional description of what this spanner handles.")
     is_enabled: bool = Field(True, 
                             description="Whether this spanner configuration is active.")
+    
+    # AE Title Configuration
+    scp_ae_title: str = Field("AXIOM_SCP", min_length=1, max_length=16,
+                             description="AE Title for the spanner SCP (when receiving incoming queries)")
+    scu_ae_title: str = Field("AXIOM_SPAN", min_length=1, max_length=16,
+                             description="Default AE Title for the spanner SCU (when querying remote sources). Can be overridden per DIMSE source.")
     
     # Protocol Support
     supports_cfind: bool = Field(True, description="Whether this spanner handles C-FIND queries.")
@@ -148,6 +154,12 @@ class SpannerSourceMappingBase(BaseModel):
     priority: int = Field(1, gt=0, description="Priority for this source (1=highest, higher numbers=lower priority)")
     is_enabled: bool = Field(True, description="Whether this source mapping is enabled")
     
+    # Load balancing and failover settings
+    weight: int = Field(1, gt=0, description="Weight for load balancing (higher = more queries)")
+    enable_failover: bool = Field(True, description="Whether to use this source as failover if others fail")
+    max_retries: int = Field(3, ge=0, description="Maximum number of retry attempts for this source") 
+    retry_delay_seconds: int = Field(5, ge=0, description="Delay between retry attempts in seconds")
+    
     # Timeout overrides
     query_timeout_override: Optional[int] = Field(None, gt=0, le=300, 
                                                  description="Override query timeout for this specific source (seconds)")
@@ -175,13 +187,78 @@ class SpannerSourceMappingBase(BaseModel):
 
 # --- Create Schema for Source Mapping ---
 class SpannerSourceMappingCreate(SpannerSourceMappingBase):
-    dimse_qr_source_id: int = Field(..., gt=0, description="ID of the DIMSE Q/R source to map")
+    source_type: Literal["dimse-qr", "dicomweb", "google_healthcare"] = Field(..., description="Type of source to map")
+    dimse_qr_source_id: Optional[int] = Field(None, description="ID of the DIMSE Q/R source (required if source_type is dimse-qr)")
+    dicomweb_source_id: Optional[int] = Field(None, description="ID of the DICOMweb source (required if source_type is dicomweb)")
+    google_healthcare_source_id: Optional[int] = Field(None, description="ID of the Google Healthcare source (required if source_type is google_healthcare)")
+
+    @field_validator('source_type', mode='before')
+    @classmethod
+    def normalize_source_type(cls, v: str) -> str:
+        """Normalize source_type to handle both underscore and hyphen formats."""
+        if v == "dimse_qr":
+            return "dimse-qr"
+        return v
+
+    @field_validator('dimse_qr_source_id', 'dicomweb_source_id', 'google_healthcare_source_id', mode='before')
+    @classmethod
+    def normalize_source_ids(cls, v) -> Optional[int]:
+        """Convert 0 values to None for source IDs."""
+        if v == 0:
+            return None
+        return v
+
+    @model_validator(mode='after')
+    def validate_source_ids(self) -> 'SpannerSourceMappingCreate':
+        """Validate that exactly one source ID is provided based on source_type."""
+        # First validate that provided IDs are > 0
+        if self.dimse_qr_source_id is not None and self.dimse_qr_source_id <= 0:
+            raise ValueError("dimse_qr_source_id must be greater than 0 when provided")
+        if self.dicomweb_source_id is not None and self.dicomweb_source_id <= 0:
+            raise ValueError("dicomweb_source_id must be greater than 0 when provided")
+        if self.google_healthcare_source_id is not None and self.google_healthcare_source_id <= 0:
+            raise ValueError("google_healthcare_source_id must be greater than 0 when provided")
+        
+        # Validate exactly one source ID is provided
+        source_ids = [
+            self.dimse_qr_source_id, 
+            self.dicomweb_source_id, 
+            self.google_healthcare_source_id
+        ]
+        non_null_ids = [id for id in source_ids if id is not None]
+        
+        if len(non_null_ids) != 1:
+            raise ValueError("Exactly one source ID must be provided")
+            
+        if self.source_type == "dimse-qr" and self.dimse_qr_source_id is None:
+            raise ValueError("dimse_qr_source_id is required when source_type is 'dimse-qr'")
+        elif self.source_type == "dicomweb" and self.dicomweb_source_id is None:
+            raise ValueError("dicomweb_source_id is required when source_type is 'dicomweb'")
+        elif self.source_type == "google_healthcare" and self.google_healthcare_source_id is None:
+            raise ValueError("google_healthcare_source_id is required when source_type is 'google_healthcare'")
+            
+        # Ensure other source IDs are None for the selected type
+        if self.source_type == "dimse-qr":
+            if self.dicomweb_source_id is not None or self.google_healthcare_source_id is not None:
+                raise ValueError("Only dimse_qr_source_id should be set when source_type is 'dimse-qr'")
+        elif self.source_type == "dicomweb":
+            if self.dimse_qr_source_id is not None or self.google_healthcare_source_id is not None:
+                raise ValueError("Only dicomweb_source_id should be set when source_type is 'dicomweb'")
+        elif self.source_type == "google_healthcare":
+            if self.dimse_qr_source_id is not None or self.dicomweb_source_id is not None:
+                raise ValueError("Only google_healthcare_source_id should be set when source_type is 'google_healthcare'")
+                
+        return self
 
 
 # --- Update Schema for Source Mapping ---
 class SpannerSourceMappingUpdate(BaseModel):
     priority: Optional[int] = Field(None, gt=0)
     is_enabled: Optional[bool] = None
+    weight: Optional[int] = Field(None, gt=0)
+    enable_failover: Optional[bool] = None
+    max_retries: Optional[int] = Field(None, ge=0)
+    retry_delay_seconds: Optional[int] = Field(None, ge=0)
     query_timeout_override: Optional[int] = Field(None, gt=0, le=300)
     retrieval_timeout_override: Optional[int] = Field(None, gt=0, le=3600)
     additional_query_filters: Optional[Dict[str, Any]] = None
@@ -198,7 +275,12 @@ class SpannerSourceMappingRead(SpannerSourceMappingBase):
     created_at: datetime
     updated_at: datetime
     spanner_config_id: int
-    dimse_qr_source_id: int
+    
+    # Source type and IDs
+    source_type: str
+    dimse_qr_source_id: Optional[int] = None
+    dicomweb_source_id: Optional[int] = None
+    google_healthcare_source_id: Optional[int] = None
     
     # Statistics
     queries_sent: int = Field(0, description="Number of queries sent to this source")
@@ -207,11 +289,22 @@ class SpannerSourceMappingRead(SpannerSourceMappingBase):
     retrievals_successful: int = Field(0, description="Number of successful retrievals from this source")
     last_used: Optional[datetime] = Field(None, description="Timestamp when this mapping was last used")
     
-    # Include basic source info (to avoid full circular reference)
-    source_name: Optional[str] = Field(None, description="Name of the mapped DIMSE Q/R source")
-    source_remote_ae_title: Optional[str] = Field(None, description="AE Title of the mapped source")
+    # Include basic source info (computed at runtime)
+    source_name: Optional[str] = Field(None, description="Name of the mapped source")
+    source_remote_ae_title: Optional[str] = Field(None, description="AE Title or identifier of the mapped source")
 
     model_config = ConfigDict(from_attributes=True)
+    
+    @property
+    def actual_source_id(self) -> Optional[int]:
+        """Get the actual source ID based on source type."""
+        if self.source_type == "dimse-qr":
+            return self.dimse_qr_source_id
+        elif self.source_type == "dicomweb":
+            return self.dicomweb_source_id
+        elif self.source_type == "google_healthcare":
+            return self.google_healthcare_source_id
+        return None
 
 
 # --- Query Log Schema ---

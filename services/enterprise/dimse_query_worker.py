@@ -9,12 +9,15 @@ Consumes tasks from RabbitMQ and publishes results back.
 import asyncio
 import json
 import logging
+import ssl
+import tempfile
+import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Any
-
+from typing import Dict, List, Optional, Any, Tuple
 import aio_pika
-from pynetdicom import AE, debug_logger
+from aio_pika.abc import AbstractChannel, AbstractConnection, AbstractIncomingMessage
+from pynetdicom import AE  # type: ignore[attr-defined]
 from pydicom import Dataset
 from sqlalchemy.orm import Session
 
@@ -27,11 +30,75 @@ from app.services.data_browser_service import (
     RemoteConnectionError,
     RemoteQueryError
 )
+from app.core import gcp_utils
+from app.services.network.dimse.scu_service import TlsConfigError
 
 logger = logging.getLogger(__name__)
 
 # Disable pynetdicom debug logging in production
-debug_logger.setLevel(logging.WARNING)
+pynet_logger = logging.getLogger('pynetdicom')
+pynet_logger.setLevel(logging.WARNING)
+
+
+def _prepare_worker_tls_context(
+    tls_ca_cert_secret: Optional[str],
+    tls_client_cert_secret: Optional[str],
+    tls_client_key_secret: Optional[str]
+) -> Tuple[Optional[ssl.SSLContext], List[str]]:
+    """Prepare TLS context for DIMSE worker queries."""
+    temp_files_created: List[str] = []
+    ssl_context: Optional[ssl.SSLContext] = None
+    
+    if not tls_ca_cert_secret:
+        logger.warning("TLS enabled but no CA certificate secret provided")
+        return None, temp_files_created
+    
+    try:
+        # Fetch CA certificate
+        ca_cert_content = gcp_utils.get_secret(tls_ca_cert_secret)
+        ca_cert_fd, ca_cert_path = tempfile.mkstemp(suffix="-ca.pem", text=True)
+        with os.fdopen(ca_cert_fd, 'w') as f:
+            f.write(ca_cert_content)
+        temp_files_created.append(ca_cert_path)
+        
+        # Create SSL context
+        ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ca_cert_path)
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        
+        # Add client certificate if provided (for mTLS)
+        if tls_client_cert_secret and tls_client_key_secret:
+            # Fetch client certificate
+            client_cert_content = gcp_utils.get_secret(tls_client_cert_secret)
+            client_cert_fd, client_cert_path = tempfile.mkstemp(suffix="-cert.pem", text=True)
+            with os.fdopen(client_cert_fd, 'w') as f:
+                f.write(client_cert_content)
+            temp_files_created.append(client_cert_path)
+            
+            # Fetch client key
+            client_key_content = gcp_utils.get_secret(tls_client_key_secret)
+            client_key_fd, client_key_path = tempfile.mkstemp(suffix="-key.pem", text=True)
+            with os.fdopen(client_key_fd, 'w') as f:
+                f.write(client_key_content)
+            temp_files_created.append(client_key_path)
+            
+            ssl_context.load_cert_chain(certfile=client_cert_path, keyfile=client_key_path)
+            logger.info("TLS context configured with client certificate for mTLS")
+        else:
+            logger.info("TLS context configured for server authentication only")
+            
+        return ssl_context, temp_files_created
+        
+    except Exception as e:
+        # Clean up temp files on error
+        for path in temp_files_created:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        logger.error(f"Failed to prepare TLS context: {e}")
+        raise Exception(f"TLS context preparation failed: {e}") from e
 
 
 class DIMSEQueryWorker:
@@ -46,10 +113,10 @@ class DIMSEQueryWorker:
     - Connection pooling for performance
     """
     
-    def __init__(self, worker_id: str = None):
+    def __init__(self, worker_id: Optional[str] = None):
         self.worker_id = worker_id or f"dimse-worker-{int(time.time())}"
-        self.rabbitmq_connection = None
-        self.rabbitmq_channel = None
+        self.rabbitmq_connection: Optional[AbstractConnection] = None
+        self.rabbitmq_channel: Optional[AbstractChannel] = None
         self.ae_connections = {}  # Connection pool
         self.stats = {
             "queries_processed": 0,
@@ -77,8 +144,9 @@ class DIMSEQueryWorker:
         
         logger.info(f"DIMSE Query Worker {self.worker_id} initialized and consuming")
     
-    async def _process_query_task(self, message: aio_pika.IncomingMessage):
+    async def _process_query_task(self, message: AbstractIncomingMessage):
         """Process a single DIMSE query task."""
+        task_data = None
         async with message.process():
             try:
                 task_data = json.loads(message.body.decode())
@@ -97,9 +165,9 @@ class DIMSEQueryWorker:
                 logger.error(f"Error processing query task: {e}")
                 # Publish error result
                 error_result = {
-                    "query_id": task_data.get("query_id"),
-                    "task_id": task_data.get("task_id"),
-                    "source_id": task_data.get("source_id"),
+                    "query_id": task_data.get("query_id") if task_data else None,
+                    "task_id": task_data.get("task_id") if task_data else None,
+                    "source_id": task_data.get("source_id") if task_data else None,
                     "success": False,
                     "error": str(e),
                     "data": [],
@@ -172,19 +240,24 @@ class DIMSEQueryWorker:
         
         if source_key not in self.ae_connections:
             # Create new AE
-            ae = AE()
-            ae.ae_title = f"SPANNER_{self.worker_id}"
+            ae_instance = AE()
+            # Use the configured local AE title for this specific source
+            # This is the AE title that our SCU will use when connecting to the remote PACS
+            # Priority: source's local_ae_title > spanner config's scu_ae_title > environment default
+            ae_title = source_config.get("local_ae_title")
+            if not ae_title:
+                ae_title = source_config.get("spanner_scu_ae_title", "AXIOM_SPAN")
+            ae_instance.ae_title = ae_title
             
             # Add supported contexts for C-FIND
-            from pynetdicom.sop_class import (
-                StudyRootQueryRetrieveInformationModelFind,
-                PatientRootQueryRetrieveInformationModelFind
-            )
+            # Use UID strings directly since import paths seem to be incorrect
+            study_root_find_uid = "1.2.840.10008.5.1.4.1.2.2.1"
+            patient_root_find_uid = "1.2.840.10008.5.1.4.1.2.1.1"
             
-            ae.add_requested_context(StudyRootQueryRetrieveInformationModelFind)
-            ae.add_requested_context(PatientRootQueryRetrieveInformationModelFind)
+            ae_instance.add_requested_context(study_root_find_uid)
+            ae_instance.add_requested_context(patient_root_find_uid)
             
-            self.ae_connections[source_key] = ae
+            self.ae_connections[source_key] = ae_instance
         
         return self.ae_connections[source_key]
     
@@ -235,26 +308,49 @@ class DIMSEQueryWorker:
     ) -> List[Dict[str, Any]]:
         """Execute C-FIND query and return results."""
         results = []
-        
-        # Establish association
-        assoc = ae.associate(
-            source_config["host"],
-            source_config["port"],
-            ae_title=source_config["ae_title"],
-            max_pdu=16384
-        )
-        
-        if not assoc.is_established:
-            raise ConnectionError(f"Failed to establish association with {source_config['ae_title']}")
+        ssl_context = None
+        temp_files = []
+        assoc = None
         
         try:
-            # Determine SOP Class based on query level
-            from pynetdicom.sop_class import (
-                StudyRootQueryRetrieveInformationModelFind,
-                PatientRootQueryRetrieveInformationModelFind
-            )
+            # Prepare TLS context if needed
+            if source_config.get("tls_enabled", False):
+                logger.info(f"TLS enabled for source {source_config['remote_ae_title']}, preparing TLS context")
+                ssl_context, temp_files = _prepare_worker_tls_context(
+                    source_config.get("tls_ca_cert_secret_name"),
+                    source_config.get("tls_client_cert_secret_name"),
+                    source_config.get("tls_client_key_secret_name")
+                )
             
-            sop_class = StudyRootQueryRetrieveInformationModelFind
+            # Prepare TLS arguments for association
+            tls_args = None
+            if ssl_context:
+                # TLS args require hostname as string or None, but pynetdicom expects string
+                hostname = source_config["host"] if ssl_context.check_hostname else source_config["host"]
+                tls_args = (ssl_context, hostname)
+            
+            # Establish association
+            if tls_args:
+                assoc = ae.associate(
+                    source_config["host"],
+                    source_config["port"],
+                    ae_title=source_config["remote_ae_title"],
+                    tls_args=tls_args,
+                    max_pdu=16384
+                )
+            else:
+                assoc = ae.associate(
+                    source_config["host"],
+                    source_config["port"],
+                    ae_title=source_config["remote_ae_title"],
+                    max_pdu=16384
+                )
+            
+            if not assoc or not assoc.is_established:
+                raise ConnectionError(f"Failed to establish association with {source_config['remote_ae_title']}")
+            
+            # Determine SOP Class based on query level - use UID directly
+            sop_class = "1.2.840.10008.5.1.4.1.2.2.1"  # Study Root Query/Retrieve Information Model - FIND
             
             # Send C-FIND request
             responses = assoc.send_c_find(query_ds, sop_class)
@@ -281,7 +377,7 @@ class DIMSEQueryWorker:
                             
                             if result_dict:
                                 # Add source metadata
-                                result_dict["_source_ae_title"] = source_config["ae_title"]
+                                result_dict["_source_ae_title"] = source_config["remote_ae_title"]
                                 result_dict["_source_host"] = source_config["host"]
                                 result_dict["_source_port"] = source_config["port"]
                                 results.append(result_dict)
@@ -291,14 +387,31 @@ class DIMSEQueryWorker:
                     else:
                         logger.warning(f"C-FIND warning status: 0x{status.Status:04X}")
         
+        except Exception as e:
+            logger.error(f"Error during DIMSE query execution: {e}")
+            raise
+        
         finally:
             # Release association
-            assoc.release()
+            if assoc and assoc.is_established:
+                assoc.release()
+            
+            # Clean up temporary TLS files
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except OSError as e:
+                    logger.warning(f"Failed to cleanup TLS temp file {temp_file}: {e}")
         
         return results
     
     async def _publish_result(self, result: Dict[str, Any]):
         """Publish query result to results queue."""
+        if not self.rabbitmq_channel:
+            logger.error("RabbitMQ channel not initialized")
+            return
+            
         message = aio_pika.Message(
             json.dumps(result, default=str).encode(),
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT

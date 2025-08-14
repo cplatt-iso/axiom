@@ -126,6 +126,13 @@ class CStoreBackendConfig(StorageBackendConfig):
         String(512), nullable=True,
         comment="Optional (for mTLS): Secret Manager resource name for OUR client private key (PEM)."
     )
+    sender_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=True,
+        default="pynetdicom",
+        server_default='pynetdicom',
+        comment="The type of sender to use ('pynetdicom' or 'dcm4che')."
+    )
     __mapper_args__ = {"polymorphic_identity": "cstore"}
     __table_args__ = {'extend_existing': True}
 

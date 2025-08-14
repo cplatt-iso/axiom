@@ -1,0 +1,120 @@
+# Application services
+services:
+  api:
+    bu  beat:
+    build:
+      context: .
+  worker:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.worker  dockerfile: docker/dockerfiles/Dockerfile.worker
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile
+    container_name: dicom_processor_api
+    env_file:
+      - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+      - PYTHONPATH=/app
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8001:80"
+    volumes:
+      - ./app:/app/app
+      - ./alembic.ini:/app/alembic.ini
+      - ./pytest.ini:/app/pytest.ini
+      - ./alembic:/app/alembic
+      - ./seed_dcm4che_listener.py:/app/seed_dcm4che_listener.py
+      - dicom_incoming:/dicom_data/incoming:ro
+      - dicom_processed:/dicom_data/processed:ro
+      - dicom_errors:/dicom_data/errors:ro
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload", "--proxy-headers", "--forwarded-allow-ips='*'"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.api.{{.Name}}"
+
+  beat:
+    build:
+      context: ..
+      dockerfile: docker/dockerfiles/Dockerfile.worker
+    container_name: dicom_processor_beat
+    env_file:
+      - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+         condition: service_healthy
+    volumes:
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    command: ["celery", "-A", "app.worker.celery_app.app", "beat", "--loglevel=info"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.beat.{{.Name}}"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/dockerfiles/Dockerfile.worker
+    container_name: dicom_processor_worker
+    env_file:
+      - .env
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - dicom_incoming:/dicom_data/incoming
+      - dicom_processed:/dicom_data/processed
+      - /home/icculus/axiom/axiom-volumes/dicom_errors:/dicom_data/errors
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    command: ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.worker.{{.Name}}"

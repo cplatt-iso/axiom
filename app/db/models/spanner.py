@@ -1,5 +1,5 @@
 # app/db/models/spanner.py
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
 from datetime import datetime
 from sqlalchemy import String, Integer, Boolean, Text, JSON, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -7,13 +7,18 @@ from sqlalchemy.sql import func, expression
 
 from app.db.base import Base
 
+if TYPE_CHECKING:
+    from .dimse_qr_source import DimseQueryRetrieveSource
+    from .dicomweb_source_state import DicomWebSourceState
+    from .google_healthcare_source import GoogleHealthcareSource
+
 
 class SpannerConfig(Base):
     """
     Database model for DICOM Query Spanning configurations.
     Defines how external queries should be distributed across multiple sources.
     """
-    __tablename__ = "spanner_configs"
+    __tablename__ = "spanner_configs"  # type: ignore[assignment]
 
     # --- Basic Config ---
     name: Mapped[str] = mapped_column(
@@ -27,6 +32,16 @@ class SpannerConfig(Base):
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=expression.true(), index=True,
         comment="Whether this spanner configuration is active."
+    )
+
+    # --- AE Title Configuration ---
+    scp_ae_title: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="AXIOM_SCP",
+        comment="AE Title for the spanner SCP (when receiving incoming queries)"
+    )
+    scu_ae_title: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="AXIOM_SPAN",
+        comment="Default AE Title for the spanner SCU (when querying remote sources). Can be overridden per DIMSE source."
     )
 
     # --- Protocol Support ---
@@ -125,18 +140,32 @@ class SpannerConfig(Base):
 
 class SpannerSourceMapping(Base):
     """
-    Maps a spanner configuration to specific DIMSE Q/R sources with priority and settings.
+    Maps a spanner configuration to various source types (DIMSE Q/R, DICOMweb, Google Healthcare).
     """
-    __tablename__ = "spanner_source_mappings"
+    __tablename__ = "spanner_source_mappings"  # type: ignore[assignment]
 
-    # --- Foreign Keys ---
+    # --- Source Configuration ---
     spanner_config_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("spanner_configs.id", ondelete="CASCADE"), nullable=False,
         comment="Reference to the spanner configuration"
     )
-    dimse_qr_source_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("dimse_qr_sources.id", ondelete="CASCADE"), nullable=False,
-        comment="Reference to the DIMSE Q/R source"
+    
+    # --- Source Type and IDs ---
+    source_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="dimse-qr", index=True,
+        comment="Type of source: dimse-qr, dicomweb, google_healthcare"
+    )
+    dimse_qr_source_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("dimse_qr_sources.id", ondelete="CASCADE"), nullable=True, index=True,
+        comment="Reference to DIMSE Q/R source (if source_type is dimse-qr)"
+    )
+    dicomweb_source_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("dicomweb_source_state.id", ondelete="CASCADE"), nullable=True, index=True,
+        comment="Reference to DICOMweb source (if source_type is dicomweb)"
+    )
+    google_healthcare_source_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("google_healthcare_sources.id", ondelete="CASCADE"), nullable=True, index=True,
+        comment="Reference to Google Healthcare source (if source_type is google_healthcare)"
     )
 
     # --- Mapping Configuration ---
@@ -147,6 +176,24 @@ class SpannerSourceMapping(Base):
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=expression.true(),
         comment="Whether this source mapping is enabled"
+    )
+    
+    # --- Load Balancing and Failover ---
+    weight: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1,
+        comment="Weight for load balancing (higher = more queries)"
+    )
+    enable_failover: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=expression.true(),
+        comment="Whether to use this source as failover if others fail"
+    )
+    max_retries: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3,
+        comment="Maximum number of retry attempts for this source"
+    )
+    retry_delay_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5,
+        comment="Delay between retry attempts in seconds"
     )
     
     # --- Override Timeouts ---
@@ -192,27 +239,68 @@ class SpannerSourceMapping(Base):
         "SpannerConfig", 
         back_populates="source_mappings"
     )
-    dimse_qr_source: Mapped["DimseQueryRetrieveSource"] = relationship(
-        "DimseQueryRetrieveSource"
+    dimse_qr_source: Mapped[Optional["DimseQueryRetrieveSource"]] = relationship(
+        "DimseQueryRetrieveSource", foreign_keys=[dimse_qr_source_id]
+    )
+    dicomweb_source: Mapped[Optional["DicomWebSourceState"]] = relationship(
+        "DicomWebSourceState", foreign_keys=[dicomweb_source_id]
+    )
+    google_healthcare_source: Mapped[Optional["GoogleHealthcareSource"]] = relationship(
+        "GoogleHealthcareSource", foreign_keys=[google_healthcare_source_id]
     )
 
     # --- Constraints ---
     __table_args__ = (
-        UniqueConstraint('spanner_config_id', 'dimse_qr_source_id', 
-                        name='uq_spanner_source_mapping'),
+        # Unique constraints for each source type 
+        UniqueConstraint(
+            'spanner_config_id', 'dimse_qr_source_id',
+            name='uq_spanner_dimse_mapping'
+        ),
+        UniqueConstraint(
+            'spanner_config_id', 'dicomweb_source_id', 
+            name='uq_spanner_dicomweb_mapping'
+        ),
+        UniqueConstraint(
+            'spanner_config_id', 'google_healthcare_source_id',
+            name='uq_spanner_healthcare_mapping'
+        ),
     )
 
     def __repr__(self):
+        source_id = (self.dimse_qr_source_id or self.dicomweb_source_id or 
+                    self.google_healthcare_source_id or "unknown")
         return (f"<SpannerSourceMapping(id={self.id}, "
-                f"spanner={self.spanner_config_id}, source={self.dimse_qr_source_id}, "
-                f"priority={self.priority}, enabled={self.is_enabled})>")
+                f"spanner={self.spanner_config_id}, type={self.source_type}, "
+                f"source_id={source_id}, priority={self.priority}, enabled={self.is_enabled})>")
+
+    @property
+    def source_id(self) -> Optional[int]:
+        """Get the actual source ID based on source type."""
+        if self.source_type == "dimse-qr":
+            return self.dimse_qr_source_id
+        elif self.source_type == "dicomweb":
+            return self.dicomweb_source_id
+        elif self.source_type == "google_healthcare":
+            return self.google_healthcare_source_id
+        return None
+    
+    @property
+    def source_name(self) -> Optional[str]:
+        """Get the source name based on source type."""
+        if self.source_type == "dimse-qr" and self.dimse_qr_source:
+            return self.dimse_qr_source.name
+        elif self.source_type == "dicomweb" and self.dicomweb_source:
+            return self.dicomweb_source.source_name  # type: ignore[return-value]
+        elif self.source_type == "google_healthcare" and self.google_healthcare_source:
+            return self.google_healthcare_source.name
+        return None
 
 
 class SpannerQueryLog(Base):
     """
     Audit log for spanner queries and retrievals.
     """
-    __tablename__ = "spanner_query_logs"
+    __tablename__ = "spanner_query_logs"  # type: ignore[assignment]
 
     # --- Query Info ---
     spanner_config_id: Mapped[int] = mapped_column(
