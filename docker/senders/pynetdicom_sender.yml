@@ -1,0 +1,27 @@
+services:
+  pynetdicom-sender:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.pynetdicom-sender
+    container_name: dicom_processor_pynetdicom_sender
+    env_file:
+      - .env
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - dicom_processed:/dicom_data/processed:ro
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.pynetdicom-sender.{{.Name}}"

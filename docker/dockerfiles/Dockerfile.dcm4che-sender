@@ -1,0 +1,28 @@
+
+# Dockerfile for the dcm4che sender
+
+# Use the same stable base as the listener, which includes Java
+FROM dcm4che/dcm4che-tools:5.32.0
+
+# Switch to root user to install Python and dependencies
+USER root
+
+# Install Python, pip, and then clean up apt cache
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create a symbolic link for python -> python3
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+# Set up the working directory and install Python dependencies
+WORKDIR /app
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy our application code
+COPY ./app /app/app
+
+# Set the entrypoint to run the sender script
+CMD ["python", "-u", "-m", "app.senders.dcm4che_sender"]
+

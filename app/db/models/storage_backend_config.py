@@ -133,6 +133,11 @@ class CStoreBackendConfig(StorageBackendConfig):
         server_default='pynetdicom',
         comment="The type of sender to use ('pynetdicom' or 'dcm4che')."
     )
+    sender_identifier: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Identifier of the sender configuration to use for this destination."
+    )
     __mapper_args__ = {"polymorphic_identity": "cstore"}
     __table_args__ = {'extend_existing': True}
 

@@ -5,6 +5,7 @@ import os
 import json
 import uuid
 import pika
+from pika.adapters.blocking_connection import BlockingChannel
 from pika.exceptions import AMQPConnectionError
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -36,7 +37,7 @@ class DICOMProcessor:
     def __init__(self):
         self.listener_config: Optional[DimseListenerConfig] = None
         self.rabbit_connection: Optional[pika.BlockingConnection] = None
-        self.rabbit_channel: Optional[pika.adapters.blocking_connection.BlockingChannel] = None
+        self.rabbit_channel: Optional[BlockingChannel] = None
 
     def load_config(self) -> bool:
         """Connects to the DB and fetches the DIMSE listener config."""
@@ -70,9 +71,13 @@ class DICOMProcessor:
             logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST}...")
             self.rabbit_connection = pika.BlockingConnection(parameters)
             self.rabbit_channel = self.rabbit_connection.channel()
-            self.rabbit_channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
-            logging.info("Successfully connected to RabbitMQ and declared queue.")
-            return True
+            if self.rabbit_channel:
+                self.rabbit_channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+                logging.info("Successfully connected to RabbitMQ and declared queue.")
+                return True
+            else:
+                logging.error("Failed to create RabbitMQ channel.")
+                return False
         except AMQPConnectionError as e:
             logging.error(f"RabbitMQ connection failed: {e}")
             self.rabbit_connection = None
@@ -114,13 +119,16 @@ class DICOMProcessor:
         )
 
         try:
-            self.rabbit_channel.basic_publish(
-                exchange='',
-                routing_key=RABBITMQ_QUEUE,
-                body=body,
-                properties=properties
-            )
-            logging.debug(f"Successfully sent task for file '{filepath}'")
+            if self.rabbit_channel:
+                self.rabbit_channel.basic_publish(
+                    exchange='',
+                    routing_key=RABBITMQ_QUEUE,
+                    body=body,
+                    properties=properties
+                )
+                logging.debug(f"Successfully sent task for file '{filepath}'")
+            else:
+                logging.error("RabbitMQ channel is not available.")
         except Exception as e:
             logging.error(f"Failed to publish message: {e}. Connection may be closed.", exc_info=True)
             # Attempt to reconnect for the next message
@@ -141,16 +149,17 @@ class NewFileHandler(FileSystemEventHandler):
         if event.is_directory or str(event.dest_path).endswith('.part'):
             return
 
-        logging.info(f"File move detected, processing: {event.dest_path}")
+        dest_path_str = str(event.dest_path)
+        logging.info(f"File move detected, processing: {dest_path_str}")
         
         # Basic check to ensure file is not empty before sending
         try:
-            if os.path.getsize(event.dest_path) > 0:
-                self.processor.send_task(event.dest_path)
+            if os.path.getsize(dest_path_str) > 0:
+                self.processor.send_task(dest_path_str)
             else:
-                logging.warning(f"File is empty, not queueing task: {event.dest_path}")
+                logging.warning(f"File is empty, not queueing task: {dest_path_str}")
         except FileNotFoundError:
-             logging.warning(f"File not found immediately after move event, skipping: {event.dest_path}")
+             logging.warning(f"File not found immediately after move event, skipping: {dest_path_str}")
         except Exception as e:
             logging.error(f"An unexpected error occurred during file processing: {e}", exc_info=True)
 

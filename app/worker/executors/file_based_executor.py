@@ -140,6 +140,76 @@ def execute_file_based_task(
             final_dest_statuses[dest_name] = {"status": "skipped_disabled", "message": "Disabled"}
             continue
 
+        # NEW: RabbitMQ publishing logic
+        if db_storage_model.backend_type == "cstore":
+            try:
+                import pika
+                import json
+                from app.db.models.storage_backend_config import CStoreBackendConfig
+                from app.crud.crud_sender_config import crud_sender_config
+
+                # Cast to CStoreBackendConfig to access cstore-specific fields
+                cstore_config = cast(CStoreBackendConfig, db_storage_model)
+
+                connection = pika.BlockingConnection(pika.ConnectionParameters(host=settings.RABBITMQ_HOST))
+                channel = connection.channel()
+
+                # Determine sender type - first check sender_identifier, then fall back to sender_type
+                sender_type = None
+                if cstore_config.sender_identifier:
+                    # Look up the sender config
+                    sender_config_obj = crud_sender_config.get_by_name(db_session, name=cstore_config.sender_identifier)
+                    if sender_config_obj and sender_config_obj.is_enabled:
+                        sender_type = sender_config_obj.sender_type
+                    else:
+                        log.warning(f"Sender identifier '{cstore_config.sender_identifier}' not found or disabled")
+                        sender_type = cstore_config.sender_type or 'pynetdicom'
+                else:
+                    sender_type = cstore_config.sender_type or 'pynetdicom'
+
+                queue_name = ""
+                if sender_type == "dcm4che":
+                    queue_name = "cstore_dcm4che_jobs"
+                else:
+                    queue_name = "cstore_pynetdicom_jobs"
+                
+                channel.queue_declare(queue=queue_name, durable=True)
+
+                # We need to save the processed file to a shared volume
+                # so the sender container can access it.
+                processed_dir = Path('/dicom_data/processed')
+                processed_dir.mkdir(parents=True, exist_ok=True)
+                processed_filepath = processed_dir / f"{task_id}_{instance_uid_for_filename}.dcm"
+                dataset_to_send.save_as(str(processed_filepath), write_like_original=False)
+
+                # The job payload now contains all necessary info.
+                # The sender container will not need to call the API.
+                job = {
+                    "file_path": str(processed_filepath),
+                    "destination_config": build_storage_backend_config_dict(db_storage_model, task_id)
+                }
+
+                channel.basic_publish(
+                    exchange='',
+                    routing_key=queue_name,
+                    body=json.dumps(job, default=str), # Use default=str for datetimes
+                    properties=pika.BasicProperties(
+                        delivery_mode=2,  # make message persistent
+                    ))
+                
+                connection.close()
+                final_dest_statuses[dest_name] = {"status": "queued", "queue": queue_name}
+                dest_log.info(f"Queued job for {dest_name} to {queue_name}")
+                continue # Move to the next destination
+
+            except Exception as e:
+                dest_log.error(f"Failed to queue job for {dest_name}", error_msg=str(e), exc_info=True)
+                final_dest_statuses[dest_name] = {"status": "error", "message": f"Failed to queue job: {e}"}
+                all_dest_ok = False
+                # Optionally create an exception log for the failure to queue
+                continue
+
+
         actual_storage_config = build_storage_backend_config_dict(db_storage_model, task_id)
         if not actual_storage_config:
             dest_log.warning("Failed to build destination storage config.")

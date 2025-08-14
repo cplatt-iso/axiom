@@ -1,0 +1,25 @@
+services:
+  dcm4che-sender:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.dcm4che-sender
+    container_name: dicom_processor_dcm4che_sender
+    env_file:
+      - .env
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - dicom_processed:/dicom_data/processed:ro
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.dcm4che-sender.{{.Name}}"

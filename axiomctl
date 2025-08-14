@@ -8,5 +8,10 @@ for f in docker/listeners/*.yml; do
   COMPOSE_FILES+=( -f "$f" )
 done
 
+# Add all sender YAMLs
+for f in docker/senders/*.yml; do
+  COMPOSE_FILES+=( -f "$f" )
+done
+
 # Pass all arguments to docker compose
 exec docker compose "${COMPOSE_FILES[@]}" "$@"
