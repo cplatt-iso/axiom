@@ -72,3 +72,15 @@ class HealthStatus(str, enum.Enum):
     OK = "OK"
     DOWN = "DOWN"
     ERROR = "ERROR"
+
+
+class ExamBatchStatus(str, enum.Enum):
+    """
+    Represents the processing status of an exam batch.
+    """
+    PENDING = "PENDING"       # Batch created, waiting for more instances or completion trigger
+    READY = "READY"           # All instances received, ready to send
+    SENDING = "SENDING"       # Currently being sent to destination
+    SENT = "SENT"             # Successfully sent to destination
+    FAILED = "FAILED"         # Failed to send to destination
+    CANCELLED = "CANCELLED"   # Batch was cancelled before sending

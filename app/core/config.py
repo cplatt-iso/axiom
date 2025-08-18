@@ -54,12 +54,18 @@ class Settings(BaseSettings):
     CLEANUP_BATCH_SIZE: int = 100 # How many records to process per cleanup run
     CLEANUP_STALE_DATA_INTERVAL_HOURS: int = 24 # How often to run the cleanup task (e.g., daily)
 
+    # Exam Batch Processing Settings
+    EXAM_BATCH_COMPLETION_TIMEOUT: int = 3   # Seconds to wait before considering a study complete
+    EXAM_BATCH_CHECK_INTERVAL: int = 2       # Seconds between completion checks
+    EXAM_BATCH_SEND_INTERVAL: int = 1        # Seconds between processing READY batches
+    EXAM_BATCH_MAX_CONCURRENT: int = 10      # Maximum concurrent batches to send
+
     CELERY_RESULT_BACKEND: Optional[str] = None
-    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    CELERY_TASK_DEFAULT_QUEUE: str = "rules_engine_intake"
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_DELAY: int = 60
-    CELERY_WORKER_CONCURRENCY: int = 4         # Default concurrency
-    CELERY_PREFETCH_MULTIPLIER: int = 1        # Default prefetch multiplier
+    CELERY_WORKER_CONCURRENCY: int = 8         # Increased concurrency
+    CELERY_PREFETCH_MULTIPLIER: int = 4        # Increased prefetch for better throughput
     CELERY_ACKS_LATE: bool = True              # Default ack setting
 
     EXCEPTION_RETRY_BATCH_SIZE: int = 10

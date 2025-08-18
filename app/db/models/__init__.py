@@ -25,3 +25,4 @@ from .system_setting import SystemSetting
 from .facility import Facility
 from .modality import Modality
 from .spanner import SpannerConfig, SpannerSourceMapping, SpannerQueryLog
+from .exam_batch import ExamBatch, ExamBatchInstance

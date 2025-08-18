@@ -1,4 +1,3 @@
-
 # /home/icculus/axiom/backend/docker-compose.yml
 # --- Main Axiom Application Stack ---
 
@@ -307,7 +306,7 @@ services:
   dcm4che-listener:
     build:
       context: .
-      dockerfile: Dockerfile.dcm4che-listener
+      dockerfile: docker/dockerfiles/Dockerfile.dcm4che-listener
     container_name: dicom_processor_dcm4che_listener
     env_file:
       - .env
@@ -317,7 +316,9 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_USER=${RABBITMQ_USER:-guest}
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
-      - RABBITMQ_QUEUE=default
+      - RABBITMQ_QUEUE=rules_engine_intake
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/axiom
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - PYTHONPATH=/app
     ports:
       - "11114:11114"
@@ -328,8 +329,9 @@ services:
         condition: service_healthy
     volumes:
       - dicom_incoming:/dicom_data/incoming
-      - ./scripts/watch_and_notify.py:/app/scripts/watch_and_notify.py:ro
-    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/watch_and_notify.py"]
+      - ./scripts:/app/scripts:ro
+      - .:/app:ro
+    command: ["python", "/app/scripts/batching_listener.py"]
     restart: unless-stopped
     networks:
       - default

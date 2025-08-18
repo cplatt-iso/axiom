@@ -8,12 +8,11 @@ import shlex
 from contextlib import contextmanager
 from typing import Optional, List, Tuple, Dict, Any, Generator, Union
 
-from pynetdicom.ae import ApplicationEntity as AE  # MODIFIED
-from pynetdicom.association import Association  # MODIFIED
+from pynetdicom.ae import ApplicationEntity as AE
+from pynetdicom.association import Association
 from pynetdicom.presentation import PresentationContext, build_context
-from pynetdicom.sop_class import (  # MODIFIED
+from pynetdicom.sop_class import (
     SOPClass,
-
     StudyRootQueryRetrieveInformationModelFind, # type: ignore[attr-defined]
     StudyRootQueryRetrieveInformationModelMove, # type: ignore[attr-defined]
 )
@@ -65,10 +64,12 @@ except ImportError:
 # Setup logger (structlog preferred, fallback to standard logging)
 try:
     import structlog # type: ignore
-    logger = structlog.get_logger(__name__)
+    logger: structlog.BoundLogger = structlog.get_logger(__name__)  # type: ignore
+    STRUCTLOG_AVAILABLE = True
 except ImportError:
     import logging # Fallback if structlog isn't there
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)  # type: ignore
+    STRUCTLOG_AVAILABLE = False
 
 
 class DimseScuError(Exception):
@@ -84,6 +85,127 @@ class DimseScuError(Exception):
 class TlsConfigError(DimseScuError): pass
 class AssociationError(DimseScuError): pass
 class DimseCommandError(DimseScuError): pass
+
+
+def store_datasets_in_single_association(
+    config: CStoreBackendConfig,
+    datasets: List[Dataset]
+) -> Dict[str, Any]:
+    """
+    Stores a list of DICOM datasets to a remote AE over a single association.
+    
+    Args:
+        config: The C-STORE backend configuration
+        datasets: List of pydicom Dataset objects to store
+    
+    Returns:
+        Dict containing operation results
+    """
+    if not datasets:
+        return {"status": "success", "message": "No datasets to store."}
+
+    # Use structlog bind if available, otherwise use standard logger
+    if hasattr(logger, 'bind'):
+        log = logger.bind(
+            remote_ae=config.remote_ae_title,
+            remote_host=config.remote_host,
+            remote_port=config.remote_port,
+            dataset_count=len(datasets)
+        )
+    else:
+        log = logger
+    
+    log.info("Starting single association batch C-STORE operation")
+
+    try:
+        # Group datasets by SOP Class UID to create appropriate presentation contexts
+        sop_class_groups = {}
+        for ds in datasets:
+            sop_class_uid = ds.SOPClassUID
+            if sop_class_uid not in sop_class_groups:
+                sop_class_groups[sop_class_uid] = []
+            sop_class_groups[sop_class_uid].append(ds)
+
+        # Create Application Entity
+        ae = AE(ae_title=config.local_ae_title)
+        
+        # Add presentation contexts for all SOP classes
+        for sop_class_uid in sop_class_groups.keys():
+            ae.add_requested_context(sop_class_uid)
+
+        # Establish association
+        log.debug("Establishing association for batch C-STORE")
+        assoc = ae.associate(
+            config.remote_host, 
+            config.remote_port, 
+            ae_title=config.remote_ae_title
+        )
+
+        if not assoc.is_established:
+            raise AssociationError(f"Failed to establish association with {config.remote_ae_title}")
+
+        results = []
+        success_count = 0
+        
+        try:
+            # Send all datasets over the single association
+            for ds in datasets:
+                try:
+                    log.debug("Sending C-STORE request", 
+                             sop_instance_uid=ds.SOPInstanceUID,
+                             sop_class_uid=ds.SOPClassUID)
+                    
+                    response = assoc.send_c_store(ds)
+                    
+                    if response.Status == 0x0000:  # Success
+                        success_count += 1
+                        results.append({
+                            "sop_instance_uid": ds.SOPInstanceUID,
+                            "status": "success",
+                            "dimse_status": response.Status
+                        })
+                        log.debug("C-STORE successful", 
+                                 sop_instance_uid=ds.SOPInstanceUID)
+                    else:
+                        results.append({
+                            "sop_instance_uid": ds.SOPInstanceUID,
+                            "status": "failed",
+                            "dimse_status": response.Status,
+                            "error": f"DIMSE status: 0x{response.Status:04X}"
+                        })
+                        log.warning("C-STORE failed", 
+                                   sop_instance_uid=ds.SOPInstanceUID,
+                                   dimse_status=hex(response.Status))
+                        
+                except Exception as e:
+                    results.append({
+                        "sop_instance_uid": ds.SOPInstanceUID,
+                        "status": "error", 
+                        "error": str(e)
+                    })
+                    log.error("Exception during C-STORE", 
+                             sop_instance_uid=ds.SOPInstanceUID,
+                             error=str(e))
+        finally:
+            # Always release the association
+            assoc.release()
+            log.debug("Association released")
+
+        log.info("Batch C-STORE operation completed", 
+                success_count=success_count,
+                total_count=len(datasets))
+
+        return {
+            "status": "success" if success_count == len(datasets) else "partial",
+            "message": f"Sent {success_count}/{len(datasets)} instances successfully",
+            "success_count": success_count,
+            "total_count": len(datasets),
+            "results": results
+        }
+
+    except Exception as e:
+        log.error("Batch C-STORE operation failed", error=str(e), exc_info=True)
+        raise DimseScuError(f"Batch C-STORE to {config.remote_ae_title} failed: {e}") from e
 
 
 def _fetch_and_write_secret_scu(secret_id: str, suffix: str, log_context) -> str:
@@ -597,8 +719,8 @@ def _store_dataset_dcm4che(config: CStoreBackendConfig, dataset: Dataset, log) -
         # Add timeouts
         command.extend(["--connect-timeout", str(settings.DIMSE_NETWORK_TIMEOUT)])
         command.extend(["--accept-timeout", str(settings.DIMSE_ACSE_TIMEOUT)])
-        command.extend(["--dimse-timeout", str(settings.DIMSE_DIMSE_TIMEOUT)])
-        command.extend(["--rsp-timeout", str(settings.DIMSE_DIMSE_TIMEOUT)]) # Response timeout
+        command.extend(["--store-timeout", str(settings.DIMSE_DIMSE_TIMEOUT)])
+        command.extend(["--response-timeout", str(settings.DIMSE_DIMSE_TIMEOUT)]) # Response timeout
 
         # TLS configuration
         if config.tls_enabled:

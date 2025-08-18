@@ -2,12 +2,14 @@
 import logging
 import sys
 from typing import Optional # Import Optional for type hinting
+import asyncio
 
 import structlog # type: ignore # <-- ADDED: Import structlog
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-import asyncio
+import aio_pika
+from aio_pika.abc import AbstractRobustConnection
 
 # Core Application Imports
 from app.core.config import settings # Needs LOG_LEVEL setting
@@ -16,6 +18,11 @@ from app.api import deps # For dependency injection, e.g., getting current user
 from app import schemas # Import Pydantic schemas
 from app.api.api_v1.api import api_router # Import the main V1 router
 from app.db.base import Base # Import Base for table creation
+from app.events import rabbitmq_consumer, ORDERS_EXCHANGE_NAME
+
+# --- Global Variables ---
+rabbitmq_connection: Optional[AbstractRobustConnection] = None
+sse_consumer_task: Optional[asyncio.Task] = None
 
 # --- Configure logging ---
 # Clear existing handlers from the root logger
@@ -219,39 +226,56 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 # --- Startup Event Handler ---
 @app.on_event("startup")
 async def startup_event():
-    """ Actions to perform on application startup. """
-    global rabbitmq_connection, sse_consumer_task
-    logger.info("Application starting up...", api_root_path=app.root_path)
-
-    logger.info("Checking/Creating database tables...")
-    create_tables()
-
-    logger.info("Checking/Seeding default roles...")
-    db: Optional[Session] = None
+    """Initialize services on application startup."""
+    global rabbitmq_connection
+    logger.info("Application starting up...")
+    
+    # Initialize RabbitMQ connection
     try:
-        db = SessionLocal()
-        seed_default_roles(db)
-    except Exception as e:
-        logger.error("Failed to seed roles during startup", error=str(e), exc_info=True)
-    finally:
-        if db:
-            db.close()
-
-    try:
-        logger.info("Connecting to RabbitMQ for SSE...")
         rabbitmq_connection = await aio_pika.connect_robust(settings.RABBITMQ_URL)
-        # Pass the connection to the dependency injection system
         app.state.rabbitmq_connection = rabbitmq_connection
-        
-        # Start the consumer task
-        sse_consumer_task = asyncio.create_task(rabbitmq_consumer(rabbitmq_connection))
-        logger.info("RabbitMQ connection and SSE consumer started successfully.")
+        logger.info("RabbitMQ connection established")
     except Exception as e:
-        logger.error("Failed to connect to RabbitMQ or start SSE consumer during startup.", error=str(e), exc_info=True)
-        # Depending on requirements, you might want to exit if RabbitMQ is essential
-        # For now, we log the error and continue.
-
-    logger.info("Startup complete.")
+        logger.error("Failed to connect to RabbitMQ", error=str(e))
+        # Set to None so dependency knows it's not available
+        app.state.rabbitmq_connection = None
+    
+    # Initialize cache (temporarily disabled - cache_manager missing)
+    # from app.cache.cache_manager import cache_manager
+    # await cache_manager.initialize()
+    # logger.info("Cache manager initialized")
+    
+    # Start background services (temporarily disabled for testing)
+    # from app.services.background.dicom_cleanup_service import dicom_cleanup_service
+    # from app.services.background.system_health_monitor import system_health_monitor
+    # from app.services.immediate_batch_processor import immediate_batch_processor
+    
+    # Start cleanup service (temporarily disabled)
+    # dicom_cleanup_service.start()
+    # logger.info("DICOM cleanup service started")
+    
+    # Start system health monitor (temporarily disabled)
+    # system_health_monitor.start()
+    # logger.info("System health monitor started")
+    
+    # Start immediate batch processor for zero-latency exam batching
+    from app.services.immediate_batch_processor import immediate_batch_processor
+    immediate_batch_processor.start()
+    logger.info("Immediate batch processor started")
+    
+    # Start exam batch completion service
+    from app.services.exam_batch_completion_service import ExamBatchCompletionService
+    completion_service = ExamBatchCompletionService()
+    app.state.completion_service_task = asyncio.create_task(completion_service.start())
+    logger.info("Exam batch completion service started")
+    
+    # Start exam batch sender service  
+    from app.services.exam_batch_sender_service import ExamBatchSenderService
+    sender_service = ExamBatchSenderService()
+    app.state.sender_service_task = asyncio.create_task(sender_service.start())
+    logger.info("Exam batch sender service started")
+    
+    logger.info("Application startup complete")
 
 
 # --- Shutdown Event Handler ---
@@ -260,6 +284,43 @@ async def shutdown_event():
     """ Actions to perform on application shutdown. """
     global rabbitmq_connection, sse_consumer_task
     logger.info("Application shutting down...")
+    
+    # Stop exam batch services 
+    try:
+        logger.info("Stopping exam batch background services...")
+        
+        # Stop immediate batch processor
+        from app.services.immediate_batch_processor import immediate_batch_processor
+        immediate_batch_processor.stop()
+        logger.info("Immediate batch processor stopped")
+        
+        # from app.services.exam_batch_completion_service import stop_completion_service
+        # from app.services.exam_batch_sender_service import stop_sender_service
+        
+        # stop_completion_service()
+        # stop_sender_service()
+        
+        # Cancel the service tasks
+        if hasattr(app.state, 'completion_service_task') and not app.state.completion_service_task.done():
+            app.state.completion_service_task.cancel()
+            try:
+                await app.state.completion_service_task
+            except asyncio.CancelledError:
+                logger.info("Exam batch completion service task cancelled.")
+        
+        if hasattr(app.state, 'sender_service_task') and not app.state.sender_service_task.done():
+            app.state.sender_service_task.cancel()
+            try:
+                await app.state.sender_service_task
+            except asyncio.CancelledError:
+                logger.info("Exam batch sender service task cancelled.")
+                
+        logger.info("Exam batch background services stopped (disabled).")
+    except Exception as e:
+        logger.error("Error stopping exam batch services during shutdown.", error=str(e), exc_info=True)
+    
+    # Stop SSE and RabbitMQ
+    global rabbitmq_connection, sse_consumer_task
     if sse_consumer_task and not sse_consumer_task.done():
         sse_consumer_task.cancel()
         try:
@@ -292,11 +353,3 @@ if __name__ == "__main__":
         # Use default uvicorn access logs unless silenced above
         # use_colors=False # Might help if colors interfere with JSON
     )
-
-import aio_pika
-from aio_pika.abc import AbstractRobustConnection
-from app.events import rabbitmq_consumer, ORDERS_EXCHANGE_NAME
-
-# --- RabbitMQ Connection and SSE Consumer Task ---
-rabbitmq_connection: Optional[AbstractRobustConnection] = None
-sse_consumer_task: Optional[asyncio.Task] = None

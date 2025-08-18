@@ -30,6 +30,4 @@ ENV PYTHONPATH=/app
 # Switch back to the default dcm4che user
 # USER dcm4che
 
-# The CMD will be provided by the docker-compose file.
-# The command will now run the refactored python script to start the listener and watcher
-CMD ["/bin/bash", "-c", "/opt/dcm4che-5.32.0/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/watch_and_notify.py"]
+# The CMD is provided by the docker-compose file.

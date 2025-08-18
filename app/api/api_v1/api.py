@@ -98,6 +98,8 @@ api_router.include_router(
 )
 api_router.include_router(config_google_healthcare_sources.router, prefix="/config/google-healthcare-sources", tags=["Configuration - Google Healthcare Sources"])
 api_router.include_router(config_ai_prompts.router, prefix="/config/ai-prompts", tags=["Configuration - AI Prompts"])
+api_router.include_router(senders.router, prefix="/config/senders", tags=["Configuration - Senders"])
+
 api_router.include_router(
     senders.router,
     prefix="/config/senders",

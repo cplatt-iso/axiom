@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 # Import User if needed for relationship typing, but ForeignKey is primary link
-# from .user import User
+# from .user import User  # Avoid circular import - use string reference instead
 
 class ApiKey(Base):
     """
@@ -33,7 +33,7 @@ class ApiKey(Base):
     is_active: Mapped[bool] = mapped_column(Boolean(), default=True, nullable=False)
 
     # Relationship back to the User (optional but useful)
-    user: Mapped["User"] = relationship(back_populates="api_keys") # type: ignore
+    user: Mapped["User"] = relationship(back_populates="api_keys")  # type: ignore # noqa: F821
 
     def __repr__(self):
         return f"<ApiKey(id={self.id}, name='{self.name}', prefix='{self.prefix}', user_id={self.user_id})>"

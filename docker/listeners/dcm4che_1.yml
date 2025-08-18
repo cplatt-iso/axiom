@@ -12,7 +12,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_USER=${RABBITMQ_USER:-guest}
       - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
-      - RABBITMQ_QUEUE=default
+      - RABBITMQ_QUEUE=rules_engine_intake
       - PYTHONPATH=/app
     ports:
       - "11114:11114"
@@ -23,8 +23,8 @@ services:
         condition: service_healthy
     volumes:
       - dicom_incoming:/dicom_data/incoming
-      - ./scripts/watch_and_notify.py:/app/scripts/watch_and_notify.py:ro
-    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/watch_and_notify.py"]
+      - ./scripts:/app/scripts:ro
+    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/batching_listener.py"]
     restart: unless-stopped
     networks:
       - default

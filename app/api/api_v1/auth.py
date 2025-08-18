@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app import crud, schemas # Make sure crud.__init__ exports user CRUD
 from app.api import deps # Assuming deps.py exists for get_db
 from app.core.security import create_access_token, verify_google_token
-from app.db.models.user import User # Import User model if needed
+# from app.db.models.user import User  # Import User model if needed
 
 router = APIRouter()
 

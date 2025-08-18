@@ -20,3 +20,5 @@ from .crud_mpps import mpps
 from .crud_system_setting import system_setting
 from . import crud_facility
 from . import crud_modality
+from . import crud_exam_batch
+# Note: crud_exam_batch_instance is available as crud_exam_batch.crud_exam_batch_instance

@@ -8,28 +8,26 @@ import pika
 from pika.exceptions import AMQPConnectionError
 import logging
 import time
+from typing import List, Optional
 
 # Add the project root to the Python path to allow importing from 'app'
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import Optional
 from app.db.session import SessionLocal
 from app import crud
 from app.db.models import DimseListenerConfig
 
 # --- Basic Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [AssociationProcessor] - %(message)s')
 
 # --- RabbitMQ Configuration ---
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
 RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
-RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "rules_engine_intake")
-CELERY_TASK_NAME = os.getenv("CELERY_TASK_NAME", "process_dicom_file_task")
-# The instance_id of the dcm4che listener we want to associate the file with.
-# This is set by the AXIOM_INSTANCE_ID env var in the docker-compose file for this service.
+RABBITMQ_QUEUE = "rules_engine_intake"  # Hardcode this for now to debug
+logging.info(f"Using RABBITMQ_QUEUE: {RABBITMQ_QUEUE}")  # Debug logging
+CELERY_TASK_NAME = os.getenv("CELERY_TASK_NAME", "process_dicom_association_task") # New task name for associations
 DCM4CHE_INSTANCE_ID = os.getenv("AXIOM_INSTANCE_ID", "dcm4che_1")
-
 
 def get_dcm4che_listener_config() -> Optional[DimseListenerConfig]:
     """Connects to the DB and fetches the DIMSE listener config for dcm4che."""
@@ -71,24 +69,22 @@ def connect_to_rabbitmq():
     logging.error("Could not connect to RabbitMQ after several retries. Exiting.")
     sys.exit(1)
 
-def send_task_to_celery(filepath: str, listener_config: DimseListenerConfig):
-    """Constructs a Celery task message and sends it to the specified queue."""
-    if not os.path.exists(filepath):
-        logging.error(f"File does not exist, cannot send task: {filepath}")
-        sys.exit(1)
+def send_association_task_to_celery(filepaths: List[str], listener_config: DimseListenerConfig):
+    """Constructs a Celery task for an entire association and sends it to the queue."""
+    if not filepaths:
+        logging.warning("No filepaths provided to process. Exiting.")
+        return
 
-    logging.info(f"Preparing Celery task for file: {filepath}")
+    logging.info(f"Preparing Celery task for an association with {len(filepaths)} files.")
 
-    # This payload structure is what Celery workers expect.
-    # It mimics how a task is sent from another Celery client.
     task_payload = {
         "task": CELERY_TASK_NAME,
         "id": str(uuid.uuid4()),
-        "args": [filepath, "DIMSE_LISTENER", listener_config.instance_id], # Use the fetched instance_id
+        "args": [filepaths, "DIMSE_LISTENER", listener_config.instance_id],
         "kwargs": {
             "association_info": {
                 "calling_ae_title": "UNKNOWN_CALLER", # This could be enhanced if known
-                "called_ae_title": listener_config.ae_title # Use the fetched AE Title
+                "called_ae_title": listener_config.ae_title
             }
         },
         "retries": 0,
@@ -98,53 +94,54 @@ def send_task_to_celery(filepath: str, listener_config: DimseListenerConfig):
         "callbacks": None,
         "errbacks": None,
         "chain": None,
-        "chord": None
     }
-    
-    body = json.dumps(task_payload)
-    properties = pika.BasicProperties(
-        content_type='application/json',
-        content_encoding='utf-8',
-        delivery_mode=2,  # Make message persistent
-    )
 
-    connection = None
+    connection = connect_to_rabbitmq()
     try:
-        connection = connect_to_rabbitmq()
         channel = connection.channel()
-
-        # Declare the queue to ensure it exists. This is idempotent.
         channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
-
-        # Publish the message
+        
         channel.basic_publish(
             exchange='',
             routing_key=RABBITMQ_QUEUE,
-            body=body,
-            properties=properties
+            body=json.dumps(task_payload),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # make message persistent
+                content_type='application/json',
+                content_encoding='utf-8',
+            )
         )
-        logging.info(f"Successfully sent task for file '{filepath}' to queue '{RABBITMQ_QUEUE}'")
-
+        logging.info(f"Successfully sent task {task_payload['id']} for {len(filepaths)} files to queue '{RABBITMQ_QUEUE}'.")
     except Exception as e:
-        logging.error(f"An error occurred while sending task to RabbitMQ: {e}", exc_info=True)
+        logging.critical(f"Failed to send task to RabbitMQ: {e}", exc_info=True)
+        sys.exit(1)
     finally:
-        if connection and connection.is_open:
+        if connection.is_open:
             connection.close()
 
-if __name__ == "__main__":
+def main():
+    """
+    Main entry point. Expects file paths as command-line arguments.
+    These arguments are provided by the dcm4che storescp service on association release.
+    """
     if len(sys.argv) < 2:
-        logging.error("Usage: python notify_rabbitmq.py <path_to_dicom_file>")
+        logging.error("No DICOM files provided as arguments. This script should be called by storescp.")
         sys.exit(1)
+
+    filepaths = sys.argv[1:]
+    logging.info(f"Received {len(filepaths)} files from a single association.")
     
-    dicom_filepath = sys.argv[1]
-    
-    # Fetch the listener config from the database first
-    listener = get_dcm4che_listener_config()
-    
-    if listener:
-        # If the config is found, proceed to send the task
-        send_task_to_celery(dicom_filepath, listener)
-    else:
-        # If no config is found, log an error and exit
-        logging.critical(f"Could not send task for file '{dicom_filepath}' because listener config could not be retrieved.")
+    for f in filepaths:
+        if not os.path.exists(f):
+            logging.error(f"Provided file path does not exist: {f}. Aborting.")
+            sys.exit(1)
+
+    listener_config = get_dcm4che_listener_config()
+    if not listener_config:
+        logging.critical("Could not retrieve listener configuration. Aborting task submission.")
         sys.exit(1)
+
+    send_association_task_to_celery(filepaths, listener_config)
+
+if __name__ == "__main__":
+    main()

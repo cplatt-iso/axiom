@@ -28,6 +28,9 @@ from app.worker.task_utils import build_storage_backend_config_dict, create_exce
 # This might be specific to how you handle retryable SBEs
 from app.worker.task_utils import EXECUTOR_LEVEL_RETRYABLE_STORAGE_ERRORS
 
+from app import schemas
+from app.schemas.exam_batch import ExamBatchCreate, ExamBatchInstanceCreate
+
 def execute_file_based_task(
     task_context_log: StdlibBoundLogger,
     db_session: Session,
@@ -36,7 +39,8 @@ def execute_file_based_task(
     source_db_id_or_instance_id: Union[int, str],
     task_id: str,
     association_info: Optional[Dict[str, str]] = None,
-    ai_portal: Optional['anyio.abc.BlockingPortal'] = None
+    ai_portal: Optional['anyio.abc.BlockingPortal'] = None,
+    queue_immediately: bool = True  # NEW: Control whether to queue jobs immediately or return data for batching
 ) -> Tuple[bool, bool, str, str, List[str], Dict[str, Dict[str, Any]], Optional[pydicom.Dataset], Optional[str], str]:
     original_filepath = Path(dicom_filepath_str)
     instance_uid = "UnknownSOPInstanceUID_FileTaskExec"
@@ -140,159 +144,128 @@ def execute_file_based_task(
             final_dest_statuses[dest_name] = {"status": "skipped_disabled", "message": "Disabled"}
             continue
 
-        # NEW: RabbitMQ publishing logic
+        # NEW: Conditional RabbitMQ publishing logic - only queue if requested
         if db_storage_model.backend_type == "cstore":
             try:
-                import pika
-                import json
-                from app.db.models.storage_backend_config import CStoreBackendConfig
-                from app.crud.crud_sender_config import crud_sender_config
+                study_uid = _safe_get_dicom_value(dataset_to_send, "StudyInstanceUID", "UNKNOWN_STUDY_UID")
+                if study_uid and study_uid != "UNKNOWN_STUDY_UID":
+                    batch = crud.crud_exam_batch.crud_exam_batch.get_by_study_and_destination(db_session, study_instance_uid=study_uid, destination_id=dest_id)
+                    if not batch:
+                        batch = crud.crud_exam_batch.crud_exam_batch.create(db_session, obj_in=ExamBatchCreate(study_instance_uid=study_uid, destination_id=dest_id))
 
-                # Cast to CStoreBackendConfig to access cstore-specific fields
-                cstore_config = cast(CStoreBackendConfig, db_storage_model)
+                    processed_dir = Path('/dicom_data/processed')
+                    processed_dir.mkdir(parents=True, exist_ok=True)
+                    processed_filepath = processed_dir / f"{task_id}_{instance_uid_for_filename}.dcm"
+                    dataset_to_send.save_as(str(processed_filepath), write_like_original=False)
 
-                connection = pika.BlockingConnection(pika.ConnectionParameters(host=settings.RABBITMQ_HOST))
-                channel = connection.channel()
-
-                # Determine sender type - first check sender_identifier, then fall back to sender_type
-                sender_type = None
-                if cstore_config.sender_identifier:
-                    # Look up the sender config
-                    sender_config_obj = crud_sender_config.get_by_name(db_session, name=cstore_config.sender_identifier)
-                    if sender_config_obj and sender_config_obj.is_enabled:
-                        sender_type = sender_config_obj.sender_type
-                    else:
-                        log.warning(f"Sender identifier '{cstore_config.sender_identifier}' not found or disabled")
-                        sender_type = cstore_config.sender_type or 'pynetdicom'
+                    crud.crud_exam_batch.crud_exam_batch_instance.create(
+                        db_session, 
+                        obj_in=ExamBatchInstanceCreate(
+                            batch_id=batch.id,
+                            processed_filepath=str(processed_filepath),
+                            sop_instance_uid=instance_uid_for_filename or "UNKNOWN_SOP_UID"
+                        )
+                    )
+                    
+                    final_dest_statuses[dest_name] = {"status": "batched", "batch_id": batch.id}
+                    dest_log.info(f"Added instance to exam batch {batch.id} for {dest_name}")
                 else:
-                    sender_type = cstore_config.sender_type or 'pynetdicom'
+                    task_context_log.warning("Could not extract valid StudyInstanceUID, skipping batching")
+                    final_dest_statuses[dest_name] = {"status": "error", "message": "Missing StudyInstanceUID"}
 
-                queue_name = ""
-                if sender_type == "dcm4che":
-                    queue_name = "cstore_dcm4che_jobs"
-                else:
-                    queue_name = "cstore_pynetdicom_jobs"
-                
-                channel.queue_declare(queue=queue_name, durable=True)
-
-                # We need to save the processed file to a shared volume
-                # so the sender container can access it.
-                processed_dir = Path('/dicom_data/processed')
-                processed_dir.mkdir(parents=True, exist_ok=True)
-                processed_filepath = processed_dir / f"{task_id}_{instance_uid_for_filename}.dcm"
-                dataset_to_send.save_as(str(processed_filepath), write_like_original=False)
-
-                # The job payload now contains all necessary info.
-                # The sender container will not need to call the API.
-                job = {
-                    "file_path": str(processed_filepath),
-                    "destination_config": build_storage_backend_config_dict(db_storage_model, task_id)
-                }
-
-                channel.basic_publish(
-                    exchange='',
-                    routing_key=queue_name,
-                    body=json.dumps(job, default=str), # Use default=str for datetimes
-                    properties=pika.BasicProperties(
-                        delivery_mode=2,  # make message persistent
-                    ))
-                
-                connection.close()
-                final_dest_statuses[dest_name] = {"status": "queued", "queue": queue_name}
-                dest_log.info(f"Queued job for {dest_name} to {queue_name}")
-                continue # Move to the next destination
-
-            except Exception as e:
-                dest_log.error(f"Failed to queue job for {dest_name}", error_msg=str(e), exc_info=True)
-                final_dest_statuses[dest_name] = {"status": "error", "message": f"Failed to queue job: {e}"}
+            except Exception as batch_error:
+                dest_log.error("Failed to batch cstore job", error=str(batch_error), exc_info=True)
+                create_exception_log_entry(
+                    db=db_session, exc=batch_error, processing_stage=ExceptionProcessingStage.DESTINATION_SEND,
+                    dataset=dataset_to_send, original_source_type=source_type_enum_for_exc_log,
+                    original_source_identifier=source_identifier, target_destination_db_model=db_storage_model,
+                    celery_task_id=task_id, initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED,
+                    retryable=False, commit_on_success=True
+                )
+                final_dest_statuses[dest_name] = {"status": "error", "message": "Failed to batch"}
                 all_dest_ok = False
-                # Optionally create an exception log for the failure to queue
-                continue
-
-
-        actual_storage_config = build_storage_backend_config_dict(db_storage_model, task_id)
-        if not actual_storage_config:
-            dest_log.warning("Failed to build destination storage config.")
-            final_dest_statuses[dest_name] = {"status": "error", "message": "Failed to build storage config"}
-            create_exception_log_entry(
-                db=db_session, exc=RuntimeError(f"Failed to build dest config '{dest_name}' (ID: {dest_id})."),
-                processing_stage=ExceptionProcessingStage.DESTINATION_SEND, dataset=dataset_to_send,
-                original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
-                target_destination_db_model=db_storage_model, celery_task_id=task_id,
-                initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED, retryable=False, commit_on_success=True
-            )
-            all_dest_ok = False; continue
-        
-        # Ensure dataset_to_send is not None before proceeding (already handled by previous check if original_ds was None)
-        if dataset_to_send is None: # This should ideally never be hit if logic above is sound
-            dest_log.critical("dataset_to_send is None unexpectedly before store attempt.")
-            # Log critical error and skip this destination
-            create_exception_log_entry(
-                db=db_session, exc=RuntimeError(f"Critical: dataset_to_send is None for dest '{dest_name}'"),
-                processing_stage=ExceptionProcessingStage.DESTINATION_SEND, dataset=None,
-                original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
-                target_destination_db_model=db_storage_model, celery_task_id=task_id,
-                initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED, retryable=False, commit_on_success=True
-            )
-            all_dest_ok = False; continue
-
-        try:
-            storage_backend = get_storage_backend(actual_storage_config)
-            filename_ctx = f"{instance_uid_for_filename}.dcm" # type: ignore
-            if asyncio.iscoroutinefunction(storage_backend.store):
-                 raise TypeError(f"Async store method for {dest_name} from sync executor.")
-
-            store_result = storage_backend.store(
-                dataset_to_send, original_filepath, filename_ctx, source_identifier
-            )
-            status_key = "duplicate" if store_result == "duplicate" else "success"
-            final_dest_statuses[dest_name] = {"status": status_key, "result": _serialize_result(store_result)}
-            dest_log.info(f"Store to {dest_name} reported: {status_key}")
-        except StorageBackendError as sbe:
-            dest_log.warning(f"StorageBackendError for {dest_name}", error_msg=str(sbe))
-            final_dest_statuses[dest_name] = {"status": "error", "message": str(sbe)}
-            all_dest_ok = False
-
-            is_sbe_retryable = any(isinstance(sbe, retryable_exc_type) for retryable_exc_type in EXECUTOR_LEVEL_RETRYABLE_STORAGE_ERRORS)
-            # Add more refined sbe retryable logic here if needed (e.g. based on sbe.status_code)
-
-            staged_filepath_for_retry: Optional[str] = None
-            if is_sbe_retryable and dataset_to_send:
-                try:
-                    sop_uid_for_stage = _safe_get_dicom_value(dataset_to_send, "SOPInstanceUID", f"NO_SOP_UID_{uuid.uuid4().hex[:8]}")
-                    timestamp_str = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')
-                    staged_filename = f"retry_{task_id}_{sop_uid_for_stage}_{dest_id}_{timestamp_str}.dcm"
-                    settings.DICOM_RETRY_STAGING_PATH.mkdir(parents=True, exist_ok=True)
-                    staged_file_full_path = settings.DICOM_RETRY_STAGING_PATH / staged_filename
-                    dataset_to_send.save_as(str(staged_file_full_path), write_like_original=False)
-                    staged_filepath_for_retry = str(staged_file_full_path)
-                    dest_log.info("Saved processed dataset to staging for retry.", staged_path=staged_filepath_for_retry)
-                except Exception as stage_save_err:
-                    dest_log.error("Failed to save PROCESSED dataset to staging for retry!", error=str(stage_save_err), exc_info=True)
-                    is_sbe_retryable = False # Cannot retry if staging failed
-                    staged_filepath_for_retry = None # Ensure it's None
+        else:
+            # This is the old logic for non-cstore backends
+            actual_storage_config = build_storage_backend_config_dict(db_storage_model, task_id)
+            if not actual_storage_config:
+                dest_log.warning("Failed to build destination storage config.")
+                final_dest_statuses[dest_name] = {"status": "error", "message": "Failed to build storage config"}
+                create_exception_log_entry(
+                    db=db_session, exc=RuntimeError(f"Failed to build dest config '{dest_name}' (ID: {dest_id})."),
+                    processing_stage=ExceptionProcessingStage.DESTINATION_SEND, dataset=dataset_to_send,
+                    original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
+                    target_destination_db_model=db_storage_model, celery_task_id=task_id,
+                    initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED, retryable=False, commit_on_success=True
+                )
+                all_dest_ok = False; continue
             
-            create_exception_log_entry(
-                db=db_session, exc=sbe, processing_stage=ExceptionProcessingStage.DESTINATION_SEND,
-                dataset=dataset_to_send, failed_filepath=staged_filepath_for_retry, # Use staged path
-                original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
-                calling_ae_title=association_info.get("calling_ae_title") if association_info else None,
-                target_destination_db_model=db_storage_model, celery_task_id=task_id,
-                initial_status=ExceptionStatus.RETRY_PENDING if is_sbe_retryable else ExceptionStatus.MANUAL_REVIEW_REQUIRED,
-                retryable=is_sbe_retryable, commit_on_success=True
-            )
-        except Exception as e: # Catch other unexpected errors during store
-            dest_log.error(f"Unexpected error for {dest_name}", error_msg=str(e), exc_info=True)
-            final_dest_statuses[dest_name] = {"status": "error", "message": f"Unexpected: {e}"}
-            all_dest_ok = False
-            create_exception_log_entry(
-                db=db_session, exc=e, processing_stage=ExceptionProcessingStage.DESTINATION_SEND,
-                dataset=dataset_to_send, failed_filepath=None, # No staged file for unexpected errors usually
-                original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
-                calling_ae_title=association_info.get("calling_ae_title") if association_info else None,
-                target_destination_db_model=db_storage_model, celery_task_id=task_id,
-                initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED, retryable=False, commit_on_success=True
-            )
+            if dataset_to_send is None:
+                dest_log.critical("dataset_to_send is None unexpectedly before store attempt.")
+                create_exception_log_entry(
+                    db=db_session, exc=RuntimeError(f"Critical: dataset_to_send is None for dest '{dest_name}'"),
+                    processing_stage=ExceptionProcessingStage.DESTINATION_SEND, dataset=None,
+                    original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
+                    target_destination_db_model=db_storage_model, celery_task_id=task_id,
+                    initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED, retryable=False, commit_on_success=True
+                )
+                all_dest_ok = False; continue
+
+            try:
+                storage_backend = get_storage_backend(actual_storage_config)
+                filename_ctx = f"{instance_uid_for_filename}.dcm"
+                if asyncio.iscoroutinefunction(storage_backend.store):
+                    raise TypeError(f"Async store method for {dest_name} from sync executor.")
+
+                store_result = storage_backend.store(
+                    dataset_to_send, original_filepath, filename_ctx, source_identifier
+                )
+                status_key = "duplicate" if store_result == "duplicate" else "success"
+                final_dest_statuses[dest_name] = {"status": status_key, "result": _serialize_result(store_result)}
+                dest_log.info(f"Store to {dest_name} reported: {status_key}")
+            except StorageBackendError as sbe:
+                dest_log.warning(f"StorageBackendError for {dest_name}", error_msg=str(sbe))
+                final_dest_statuses[dest_name] = {"status": "error", "message": str(sbe)}
+                all_dest_ok = False
+
+                is_sbe_retryable = any(isinstance(sbe, retryable_exc_type) for retryable_exc_type in EXECUTOR_LEVEL_RETRYABLE_STORAGE_ERRORS)
+                
+                staged_filepath_for_retry: Optional[str] = None
+                if is_sbe_retryable and dataset_to_send:
+                    try:
+                        sop_uid_for_stage = _safe_get_dicom_value(dataset_to_send, "SOPInstanceUID", f"NO_SOP_UID_{uuid.uuid4().hex[:8]}")
+                        timestamp_str = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')
+                        staged_filename = f"retry_{task_id}_{sop_uid_for_stage}_{dest_id}_{timestamp_str}.dcm"
+                        settings.DICOM_RETRY_STAGING_PATH.mkdir(parents=True, exist_ok=True)
+                        staged_file_full_path = settings.DICOM_RETRY_STAGING_PATH / staged_filename
+                        dataset_to_send.save_as(str(staged_file_full_path), write_like_original=False)
+                        staged_filepath_for_retry = str(staged_file_full_path)
+                        dest_log.info("Saved processed dataset to staging for retry.", staged_path=staged_filepath_for_retry)
+                    except Exception as stage_save_err:
+                        dest_log.error("Failed to save PROCESSED dataset to staging for retry!", error=str(stage_save_err), exc_info=True)
+                        is_sbe_retryable = False
+                        staged_filepath_for_retry = None
+                
+                create_exception_log_entry(
+                    db=db_session, exc=sbe, processing_stage=ExceptionProcessingStage.DESTINATION_SEND,
+                    dataset=dataset_to_send, failed_filepath=staged_filepath_for_retry,
+                    original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
+                    calling_ae_title=association_info.get("calling_ae_title") if association_info else None,
+                    target_destination_db_model=db_storage_model, celery_task_id=task_id,
+                    initial_status=ExceptionStatus.RETRY_PENDING if is_sbe_retryable else ExceptionStatus.MANUAL_REVIEW_REQUIRED,
+                    retryable=is_sbe_retryable, commit_on_success=True
+                )
+            except Exception as e:
+                dest_log.error(f"Unexpected error for {dest_name}", error_msg=str(e), exc_info=True)
+                final_dest_statuses[dest_name] = {"status": "error", "message": f"Unexpected: {e}"}
+                all_dest_ok = False
+                create_exception_log_entry(
+                    db=db_session, exc=e, processing_stage=ExceptionProcessingStage.DESTINATION_SEND,
+                    dataset=dataset_to_send, failed_filepath=None,  # No staged file for unexpected errors usually
+                    original_source_type=source_type_enum_for_exc_log, original_source_identifier=source_identifier,
+                    calling_ae_title=association_info.get("calling_ae_title") if association_info else None,
+                    target_destination_db_model=db_storage_model, celery_task_id=task_id,
+                    initial_status=ExceptionStatus.MANUAL_REVIEW_REQUIRED, retryable=False, commit_on_success=True
+                )
 
     current_status_code = "success_all_destinations" if all_dest_ok else "partial_failure_destinations"
     current_msg = f"File task processing complete. All destinations OK: {all_dest_ok}."
