@@ -32,6 +32,9 @@ from app.worker.task_utils import (
 )
 from app.worker.task_utils import EXECUTOR_LEVEL_RETRYABLE_STORAGE_ERRORS
 
+# Order matching integration
+from app.worker.order_matching_integration import process_order_matching_for_dicom
+
 async def execute_ghc_task(
     task_context_log: StdlibBoundLogger,
     db_session: Session,
@@ -290,6 +293,22 @@ async def execute_ghc_task(
     except Exception as e_inc:
         log.error("DB error during GHC processed study logging.", error_msg=str(e_inc), exc_info=True) # type: ignore
         if db_session.is_active: await asyncio.to_thread(db_session.rollback)
+
+    # Process order matching for this DICOM object
+    try:
+        order_matching_result = await asyncio.to_thread(
+            process_order_matching_for_dicom,
+            db_session=db_session,
+            dataset=dataset_to_send,
+            applied_rules=applied_rules,
+            destination_statuses=final_dest_statuses,
+            processing_successful=all_dest_ok,
+            source_identifier=source_name_res
+        )
+        if order_matching_result:
+            log.info("Order matching processed", **order_matching_result) # type: ignore
+    except Exception as order_err:
+        log.error("Order matching failed but continuing", error=str(order_err), exc_info=True) # type: ignore
 
     # --- CORRECTED RETURN TUPLE ORDER ---
     return (

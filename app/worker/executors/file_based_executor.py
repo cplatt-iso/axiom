@@ -28,6 +28,9 @@ from app.worker.task_utils import build_storage_backend_config_dict, create_exce
 # This might be specific to how you handle retryable SBEs
 from app.worker.task_utils import EXECUTOR_LEVEL_RETRYABLE_STORAGE_ERRORS
 
+# Order matching integration
+from app.worker.order_matching_integration import process_order_matching_for_dicom
+
 from app import schemas
 from app.schemas.exam_batch import ExamBatchCreate, ExamBatchInstanceCreate
 
@@ -269,5 +272,21 @@ def execute_file_based_task(
 
     current_status_code = "success_all_destinations" if all_dest_ok else "partial_failure_destinations"
     current_msg = f"File task processing complete. All destinations OK: {all_dest_ok}."
+    
+    # Process order matching for this DICOM object
+    try:
+        order_matching_result = process_order_matching_for_dicom(
+            db_session=db_session,
+            dataset=dataset_to_send,
+            applied_rules=applied_rules,
+            destination_statuses=final_dest_statuses,
+            processing_successful=all_dest_ok,
+            source_identifier=source_identifier
+        )
+        if order_matching_result:
+            log.info("Order matching processed", **order_matching_result)
+    except Exception as order_err:
+        log.error("Order matching failed but continuing", error=str(order_err), exc_info=True)
+    
     return (rules_matched_triggered, modifications_made, current_status_code, current_msg,
            applied_rules, final_dest_statuses, dataset_to_send, instance_uid, source_identifier) # Return dataset_to_send

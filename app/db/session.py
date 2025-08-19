@@ -9,7 +9,14 @@ from app.core.config import settings
 # connect_args is optional, used here to set command timeout for psycopg driver
 # 'check_same_thread': False is ONLY needed for SQLite, not PostgreSQL
 # Add pool_pre_ping=True for resilience against db connection drops
-engine_args = {"pool_pre_ping": True}
+# Configure connection pool for production scale with multiple services
+engine_args = {
+    "pool_pre_ping": True,
+    "pool_size": 20,  # Base connection pool size - increased for multiple services
+    "max_overflow": 30,  # Additional connections beyond pool_size
+    "pool_timeout": 60,  # Timeout waiting for connection from pool (seconds)
+    "pool_recycle": 3600,  # Recycle connections every hour to avoid stale connections
+}
 # if "sqlite" in settings.SQLALCHEMY_DATABASE_URI:
 #     engine_args["connect_args"] = {"check_same_thread": False}
 # else:

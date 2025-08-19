@@ -25,6 +25,7 @@ from app.api.api_v1.endpoints import (
     config_ai_prompts,
     dicom_exceptions,
     orders,
+    order_dicom_evidence,
     mpps,
     system_settings,
     facilities,
@@ -51,6 +52,7 @@ api_router.include_router(data_browser.router, prefix="/data-browser", tags=["Da
 api_router.include_router(dicom_exceptions.router, prefix="/exceptions", tags=["DICOM Processing Exceptions"])
 
 api_router.include_router(orders.router, prefix="/orders", tags=["Imaging Orders"])
+api_router.include_router(order_dicom_evidence.router, prefix="/order-evidence", tags=["Order DICOM Evidence"])
 api_router.include_router(mpps.router, prefix="/mpps", tags=["MPPS"])
 
 # Facility and Modality Management

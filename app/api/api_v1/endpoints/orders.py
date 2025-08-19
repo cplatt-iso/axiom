@@ -74,6 +74,59 @@ def read_imaging_order(
     return db_order
 
 
+@router.get("/{order_id}/with-evidence")
+def read_imaging_order_with_evidence(
+    order_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_active_user),
+):
+    """
+    Get a specific imaging order with DICOM evidence summary.
+    This provides a complete view of the order and what DICOM objects matched it.
+    """
+    from app import crud as all_crud  # Import to get access to evidence CRUD
+    
+    # Get the order
+    db_order = all_crud.imaging_order.get(db, id=order_id)
+    if db_order is None:
+        raise HTTPException(status_code=404, detail="Imaging order not found")
+    
+    # Get evidence summary
+    try:
+        evidence_summary = all_crud.crud_order_dicom_evidence.get_summary_for_order(
+            db, imaging_order_id=order_id
+        )
+        
+        # Get detailed evidence list (limited to most recent 50 for performance)
+        evidence_items = all_crud.crud_order_dicom_evidence.get_by_order_id(
+            db, imaging_order_id=order_id
+        )[:50]  # Limit for performance
+        
+        evidence_details = [
+            {
+                "sop_instance_uid": item.sop_instance_uid,
+                "study_instance_uid": item.study_instance_uid,
+                "series_instance_uid": item.series_instance_uid,
+                "match_rule": item.match_rule,
+                "processing_successful": item.processing_successful,
+                "processed_at": item.processed_at,
+                "applied_rule_names": item.applied_rule_names,
+                "source_identifier": item.source_identifier
+            } for item in evidence_items
+        ]
+    except Exception as e:
+        # If evidence retrieval fails, don't break the order retrieval
+        evidence_summary = None
+        evidence_details = []
+    
+    # Convert order to dict and add evidence
+    order_dict = schemas.ImagingOrderRead.model_validate(db_order).model_dump(mode='json')
+    order_dict["evidence_summary"] = evidence_summary.model_dump(mode='json') if evidence_summary else None
+    order_dict["recent_evidence"] = evidence_details
+    
+    return order_dict
+
+
 @router.post("/", response_model=schemas.ImagingOrderRead, status_code=201)
 async def create_imaging_order(
     *,

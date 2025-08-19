@@ -275,6 +275,15 @@ async def startup_event():
     app.state.sender_service_task = asyncio.create_task(sender_service.start())
     logger.info("Exam batch sender service started")
     
+    # Start SSE RabbitMQ consumer for real-time order events
+    global sse_consumer_task
+    if rabbitmq_connection:
+        sse_consumer_task = asyncio.create_task(rabbitmq_consumer(rabbitmq_connection))
+        app.state.sse_consumer_task = sse_consumer_task
+        logger.info("SSE RabbitMQ consumer started for order events")
+    else:
+        logger.warning("SSE consumer not started - RabbitMQ connection failed")
+    
     logger.info("Application startup complete")
 
 
@@ -314,6 +323,14 @@ async def shutdown_event():
                 await app.state.sender_service_task
             except asyncio.CancelledError:
                 logger.info("Exam batch sender service task cancelled.")
+        
+        # Stop SSE consumer task
+        if hasattr(app.state, 'sse_consumer_task') and not app.state.sse_consumer_task.done():
+            app.state.sse_consumer_task.cancel()
+            try:
+                await app.state.sse_consumer_task
+            except asyncio.CancelledError:
+                logger.info("SSE consumer task cancelled.")
                 
         logger.info("Exam batch background services stopped (disabled).")
     except Exception as e:

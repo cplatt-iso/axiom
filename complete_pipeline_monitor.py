@@ -61,8 +61,9 @@ class CompletePipelineMonitor:
                 cwd="/home/icculus/axiom/backend"
             )
             
-            for line in process.stdout:
-                self.process_listener_line(line.strip())
+            if process.stdout:
+                for line in process.stdout:
+                    self.process_listener_line(line.strip())
         except Exception as e:
             print(f"Error monitoring listener logs: {e}")
             
@@ -77,8 +78,9 @@ class CompletePipelineMonitor:
                 cwd="/home/icculus/axiom/backend"
             )
             
-            for line in process.stdout:
-                self.process_worker_line(line.strip())
+            if process.stdout:
+                for line in process.stdout:
+                    self.process_worker_line(line.strip())
         except Exception as e:
             print(f"Error monitoring worker logs: {e}")
             
@@ -93,8 +95,9 @@ class CompletePipelineMonitor:
                 cwd="/home/icculus/axiom/backend"
             )
             
-            for line in process.stdout:
-                self.process_sender_line(line.strip())
+            if process.stdout:
+                for line in process.stdout:
+                    self.process_sender_line(line.strip())
         except Exception as e:
             print(f"Error monitoring sender logs: {e}")
             
@@ -109,8 +112,9 @@ class CompletePipelineMonitor:
                 cwd="/home/icculus/axiom/backend"
             )
             
-            for line in process.stdout:
-                self.process_api_line(line.strip())
+            if process.stdout:
+                for line in process.stdout:
+                    self.process_api_line(line.strip())
         except Exception as e:
             print(f"Error monitoring API logs: {e}")
     
@@ -657,6 +661,7 @@ if __name__ == "__main__":
             processing_duration = (times['processing_complete'] - times['ingress_start']).total_seconds()
             print(f"⚙️ PROCESSING: {processing_duration:.3f}s (Ingress → Processing Complete)")
         
+        batch_wait = 0.0  # Initialize batch_wait
         if times.get('processing_complete') and times.get('batch_ready'):
             batch_wait = (times['batch_ready'] - times['processing_complete']).total_seconds()
             print(f"⏳ BATCH TIMEOUT WAIT: {batch_wait:.3f}s (Processing → Batch Ready)")

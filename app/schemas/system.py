@@ -42,7 +42,6 @@ class DicomWebPollersStatusResponse(BaseModel):
 
 
 # --- Listener Status Schemas ---
-# ... (DimseListenerStatus and DimseListenersStatusResponse remain the same) ...
 class DimseListenerStatus(BaseModel):
     """Schema representing the status of a DIMSE listener instance."""
     id: int
@@ -61,9 +60,36 @@ class DimseListenerStatus(BaseModel):
 
     model_config = ConfigDict(from_attributes=True) # Use ConfigDict for Pydantic v2
 
+class DimseListenerFullStatus(BaseModel):
+    """Schema representing the full status of a DIMSE listener including configuration."""
+    # Configuration fields
+    config_id: int = Field(..., description="Configuration ID")
+    name: str = Field(..., description="Listener configuration name")
+    description: Optional[str] = Field(None, description="Configuration description")
+    listener_type: str = Field(..., description="Type of listener (pynetdicom, dcm4che)")
+    ae_title: str = Field(..., description="Application Entity Title")
+    port: int = Field(..., description="Network port")
+    is_enabled: bool = Field(..., description="Whether the configuration is enabled")
+    instance_id: Optional[str] = Field(None, description="Instance ID for runtime identification")
+    tls_enabled: bool = Field(False, description="Whether TLS is enabled")
+    
+    # Runtime status fields (optional if listener is not reporting)
+    runtime_status: Optional[str] = Field(None, description="Current runtime status")
+    status_message: Optional[str] = Field(None, description="Status message")
+    runtime_host: Optional[str] = Field(None, description="Runtime host")
+    last_heartbeat: Optional[datetime] = Field(None, description="Last heartbeat timestamp")
+    received_instance_count: int = Field(0, description="Total instances received")
+    processed_instance_count: int = Field(0, description="Total instances processed")
+    
+    model_config = ConfigDict(from_attributes=True)
+
 class DimseListenersStatusResponse(BaseModel):
     """Schema for the API response containing all DIMSE listener statuses."""
     listeners: List[DimseListenerStatus] = []
+
+class DimseListenersFullStatusResponse(BaseModel):
+    """Schema for the API response containing all DIMSE listener configurations with status."""
+    listeners: List[DimseListenerFullStatus] = []
 
 # --- DIMSE Q/R Source Status Schemas ---
 class DimseQrSourceStatus(BaseModel):

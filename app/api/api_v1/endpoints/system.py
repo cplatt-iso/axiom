@@ -36,6 +36,8 @@ from app.schemas.system import (
     DicomWebSourceStatus,
     DimseListenerStatus,
     DimseListenersStatusResponse,
+    DimseListenerFullStatus,
+    DimseListenersFullStatusResponse,
     DimseQrSourceStatus,
     DimseQrSourcesStatusResponse,
     GoogleHealthcareSourceStatus,
@@ -181,7 +183,7 @@ def get_dicomweb_pollers_status(
 # --- DIMSE Listener Status Endpoint ---
 @router.get(
     "/dimse-listeners/status",
-    response_model=DimseListenersStatusResponse,
+    response_model=DimseListenersFullStatusResponse,
     summary="Get Status of All DIMSE Listeners",
     dependencies=[Depends(deps.get_current_active_user)],
     tags=["System Status"],
@@ -191,17 +193,44 @@ def get_dimse_listeners_status(
     db: Session = Depends(deps.get_db),
     skip: int = 0,
     limit: int = 100
-) -> DimseListenersStatusResponse:
+) -> DimseListenersFullStatusResponse:
     """
-    Retrieves the current status of all DIMSE C-STORE listeners reporting to the database.
+    Retrieves the current status of all configured DIMSE listeners, including 
+    both pynetdicom and dcm4che listener types, with their runtime status if available.
     """
-    logger.debug("Request received for all DIMSE Listeners status.")
+    logger.debug("Request received for all DIMSE Listeners status (full configuration + runtime status).")
     try:
-        listener_states_db: List[models.DimseListenerState] = crud.crud_dimse_listener_state.get_all_listener_states(db=db, skip=skip, limit=limit)
-        response_listeners = [DimseListenerStatus.model_validate(ls) for ls in listener_states_db]
-        return DimseListenersStatusResponse(listeners=response_listeners)
+        # Get all configured listeners with their status
+        listener_data: List[tuple] = crud.crud_dimse_listener_state.get_all_listeners_with_status(db=db, skip=skip, limit=limit)
+        
+        response_listeners = []
+        for config, listener_state in listener_data:
+            # Build the combined status object
+            full_status = DimseListenerFullStatus(
+                # Configuration fields
+                config_id=config.id,
+                name=config.name,
+                description=config.description,
+                listener_type=config.listener_type,
+                ae_title=config.ae_title,
+                port=config.port,
+                is_enabled=config.is_enabled,
+                instance_id=config.instance_id,
+                tls_enabled=config.tls_enabled,
+                
+                # Runtime status fields (optional if listener is not reporting)
+                runtime_status=listener_state.status if listener_state else None,
+                status_message=listener_state.status_message if listener_state else None,
+                runtime_host=listener_state.host if listener_state else None,
+                last_heartbeat=listener_state.last_heartbeat if listener_state else None,
+                received_instance_count=listener_state.received_instance_count if listener_state else 0,
+                processed_instance_count=listener_state.processed_instance_count if listener_state else 0,
+            )
+            response_listeners.append(full_status)
+            
+        return DimseListenersFullStatusResponse(listeners=response_listeners)
     except AttributeError as ae:
-        logger.error(f"AttributeError accessing CRUD method for DIMSE listener status: {ae}. Verify 'get_all_listener_states' exists.", exc_info=True)
+        logger.error(f"AttributeError accessing CRUD method for DIMSE listener status: {ae}. Verify 'get_all_listeners_with_status' exists.", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Server configuration error (listeners).")
     except Exception as e:
         logger.error(f"Error retrieving DIMSE Listeners status from DB: {e}", exc_info=True)

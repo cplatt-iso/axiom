@@ -6,6 +6,7 @@ from typing import List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .user import User
     from .mpps import Mpps
+    from .order_dicom_evidence import OrderDicomEvidence
 
 from app.db.base import Base
 from app.schemas.enums import OrderStatus # We'll add this enum
@@ -83,6 +84,11 @@ class ImagingOrder(Base):
     creator_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
     creator: Mapped[Optional["User"]] = relationship("User", back_populates="imaging_orders")
     mpps_messages: Mapped[List["Mpps"]] = relationship("Mpps", back_populates="imaging_order")
+    dicom_evidence: Mapped[List["OrderDicomEvidence"]] = relationship(
+        "OrderDicomEvidence", 
+        back_populates="imaging_order",
+        cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<ImagingOrder(id={self.id}, accn='{self.accession_number}', status='{self.order_status.value}')>"

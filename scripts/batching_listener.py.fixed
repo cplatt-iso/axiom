@@ -37,7 +37,6 @@ class HeartbeatManager:
     
     def _load_listener_config(self):
         """Load the listener configuration from the database."""
-        db = None
         try:
             db = SessionLocal()
             config = crud_dimse_listener_config.get_by_instance_id(db=db, instance_id=self.listener_id)
@@ -49,15 +48,14 @@ class HeartbeatManager:
         except Exception as e:
             logging.error(f"Failed to load listener config: {e}")
         finally:
-            if db:
+            if 'db' in locals():
                 db.close()
     
-    def _update_status(self, status: str, message: str = ""):
+    def _update_status(self, status: str, message: str = None):
         """Update listener status in database."""
-        db = None
         try:
             db = SessionLocal()
-            crud_dimse_listener_state.update_listener_state(
+            crud_dimse_listener_state.update_or_create_listener_state(
                 db=db,
                 listener_id=self.listener_id,
                 status=status,
@@ -69,15 +67,14 @@ class HeartbeatManager:
             db.commit()
         except Exception as e:
             logging.error(f"Failed to update status: {e}")
-            if db:
+            if 'db' in locals():
                 db.rollback()
         finally:
-            if db:
+            if 'db' in locals():
                 db.close()
     
     def _send_heartbeat(self):
         """Send heartbeat to database."""
-        db = None
         try:
             db = SessionLocal()
             crud_dimse_listener_state.update_listener_heartbeat(db=db, listener_id=self.listener_id)
@@ -85,10 +82,10 @@ class HeartbeatManager:
             logging.debug("Heartbeat sent successfully")
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
-            if db:
+            if 'db' in locals():
                 db.rollback()
         finally:
-            if db:
+            if 'db' in locals():
                 db.close()
     
     def _heartbeat_loop(self):
@@ -144,14 +141,13 @@ class AssociationBatcher:
                 logging.info(f"Added file to batch: {filepath} (batch size: {len(self.file_queue)})")
                 
                 # Update received count in database
-                db = None
                 try:
                     db = SessionLocal()
                     crud_dimse_listener_state.increment_received_count(db=db, listener_id=self.listener_id, count=1)
                 except Exception as e:
                     logging.error(f"Failed to update received count: {e}")
                 finally:
-                    if db:
+                    if 'db' in locals():
                         db.close()
     
     def process_batch_if_ready(self):
@@ -172,14 +168,13 @@ class AssociationBatcher:
                     logging.info(f"Successfully processed batch of {len(files_to_process)} files")
                     
                     # Update processed count in database
-                    db = None
                     try:
                         db = SessionLocal()
                         crud_dimse_listener_state.increment_processed_count(db=db, listener_id=self.listener_id, count=len(files_to_process))
                     except Exception as e:
                         logging.error(f"Failed to update processed count: {e}")
                     finally:
-                        if db:
+                        if 'db' in locals():
                             db.close()
                             
                 except subprocess.CalledProcessError as e:
@@ -217,18 +212,15 @@ def monitor_directory():
     try:
         while True:
             try:
-                # List all files in the directory (dcm4che stores without .dcm extension)
+                # List all .dcm files in the directory
                 dicom_dir_path = Path(DICOM_DIR)
-                current_files = set(f for f in dicom_dir_path.glob("*") if f.is_file())
+                current_files = set(dicom_dir_path.glob("*.dcm"))
                 
                 # Find new files
                 new_files = current_files - known_files
                 
                 for file_path in new_files:
                     if file_path.is_file():
-                        if file_path.name.endswith('.part'):
-                            logging.debug(f"Skipping .part file: {file_path}")
-                            continue
                         batcher.add_file(str(file_path))
                         known_files.add(file_path)
                 

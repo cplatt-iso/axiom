@@ -1,6 +1,6 @@
 # app/crud/crud_dimse_listener_state.py
 import logging
-from typing import Optional, List
+from typing import Optional, List, Any
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -158,6 +158,35 @@ class CRUDDimseListenerState:
         except Exception as e:
             logger.error(f"DB error incrementing processed count for '{listener_id}': {e}", exc_info=True); db.rollback()
         return success
+
+    def get_all_listeners_with_status(self, db: Session, *, skip: int = 0, limit: int = 100) -> List[Any]:
+        """
+        Retrieves all configured DIMSE listeners with their status information.
+        Returns a list of tuples: (DimseListenerConfig, Optional[DimseListenerState])
+        """
+        from app.db.models import DimseListenerConfig
+        from sqlalchemy import outerjoin
+        
+        logger.debug(f"Querying all configured listeners with status (skip={skip}, limit={limit})")
+        
+        # Join DimseListenerConfig with DimseListenerState on instance_id = listener_id
+        statement = (
+            select(DimseListenerConfig, models.DimseListenerState)
+            .select_from(
+                outerjoin(
+                    DimseListenerConfig, 
+                    models.DimseListenerState,
+                    DimseListenerConfig.instance_id == models.DimseListenerState.listener_id
+                )
+            )
+            .order_by(DimseListenerConfig.name)
+            .offset(skip)
+            .limit(limit)
+        )
+        
+        results = list(db.execute(statement).all())
+        logger.debug(f"Found {len(results)} configured listeners with status.")
+        return results
 
 # Create a singleton instance
 crud_dimse_listener_state = CRUDDimseListenerState()
