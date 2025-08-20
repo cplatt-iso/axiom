@@ -3,6 +3,7 @@
 
 # Compose files to include
 COMPOSE_FILES=(-f core.yml -f docker/app.yml -f docker/docs.yml)
+
 # Add all listener YAMLs
 for f in docker/listeners/*.yml; do
   COMPOSE_FILES+=( -f "$f" )
@@ -11,6 +12,18 @@ done
 # Add all sender YAMLs
 for f in docker/senders/*.yml; do
   COMPOSE_FILES+=( -f "$f" )
+done
+
+# Add spanner core services if they exist
+if [ -f "docker/spanner/spanner-core.yml" ]; then
+  COMPOSE_FILES+=( -f "docker/spanner/spanner-core.yml" )
+fi
+
+# Add all spanner listener YAMLs
+for f in docker/spanner/listeners/*.yml; do
+  if [ -f "$f" ]; then
+    COMPOSE_FILES+=( -f "$f" )
+  fi
 done
 
 # Pass all arguments to docker compose

@@ -1,0 +1,40 @@
+services:
+  # DIMSE SCP Listener for External Spanning Queries
+  spanner_scp:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.dimse-scp
+    container_name: axiom-spanner-scp-listener
+    ports:
+      - "11120:11120"  # Use consistent port mapping
+    environment:
+      AXIOM_INSTANCE_ID: spanner_scp
+      SPANNER_MODE: listener
+      DICOM_SCP_AE_TITLE: ${SPANNER_SCP_AE_TITLE:-AXIOM_SCP}
+      DICOM_SCP_PORT: "11120"
+      GOOGLE_APPLICATION_CREDENTIALS: /etc/gcp/axiom-flow-gcs-key.json
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+      - ./app:/app/app
+    networks:
+      - default
+      - shared
+    restart: unless-stopped
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.spanner_scp_listener.{{.Name}}"
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"

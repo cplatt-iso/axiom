@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app import crud
+from app.crud.crud_spanner import crud_spanner_config, crud_spanner_source_mapping
 from app.schemas.spanner import QueryStatus, FailureStrategy, DeduplicationStrategy
 
 logger = logging.getLogger(__name__)
@@ -173,18 +174,17 @@ class SpannerCoordinator:
     async def _process_spanning_query(self, spanning_query: SpanningQuery):
         """Process a spanning query by breaking it into tasks."""
         try:
-            # Get spanner configuration
-            db = SessionLocal()
-            try:
-                spanner_config = crud.crud_spanner_config.get(
+            # Get the spanner configuration
+            with SessionLocal() as db:
+                spanner_config = crud_spanner_config.get(
                     db, id=spanning_query.spanner_config_id
                 )
                 if not spanner_config:
                     await self._fail_query(spanning_query.query_id, "Spanner config not found")
                     return
                 
-                # Get source mappings
-                source_mappings = crud.crud_spanner_source_mapping.get_multi_by_spanner(
+                # Get source mappings for this spanner configuration
+                source_mappings = crud_spanner_source_mapping.get_multi_by_spanner(
                     db, 
                     spanner_config_id=spanning_query.spanner_config_id,
                     include_disabled=False,
@@ -194,9 +194,6 @@ class SpannerCoordinator:
                 if not source_mappings:
                     await self._fail_query(spanning_query.query_id, "No sources configured")
                     return
-                
-            finally:
-                db.close()
             
             # Create tasks for each source
             tasks = []
@@ -504,6 +501,68 @@ async def get_spanning_query_status(query_id: str):
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "spanner-coordinator"}
+
+
+@app.get("/backends")
+async def list_configured_backends():
+    """List all configured spanner backends and their sources."""
+    db = SessionLocal()
+    try:
+        # Get all enabled spanner configs with their mappings
+        configs = crud_spanner_config.get_multi(db, skip=0, limit=100)
+        
+        backend_info = []
+        for config in configs:
+            # Get source mappings for this config
+            mappings = crud_spanner_source_mapping.get_multi_by_spanner(
+                db, spanner_config_id=config.id, include_disabled=False
+            )
+            
+            sources = []
+            for mapping in mappings:
+                source_info = {
+                    "mapping_id": mapping.id,
+                    "source_type": mapping.source_type,
+                    "priority": mapping.priority,
+                    "weight": mapping.weight,
+                    "enabled": mapping.is_enabled
+                }
+                
+                # Add source-specific details
+                if mapping.dimse_qr_source_id:
+                    dimse_source = crud.crud_dimse_qr_source.get(db, id=mapping.dimse_qr_source_id)
+                    if dimse_source:
+                        source_info.update({
+                            "source_id": dimse_source.id,
+                            "name": dimse_source.name,
+                            "remote_ae_title": dimse_source.remote_ae_title,
+                            "remote_host": dimse_source.remote_host,
+                            "remote_port": dimse_source.remote_port,
+                            "source_enabled": dimse_source.is_enabled
+                        })
+                
+                sources.append(source_info)
+            
+            backend_info.append({
+                "config_id": config.id,
+                "name": config.name,
+                "description": config.description,
+                "enabled": config.is_enabled,
+                "scp_ae_title": config.scp_ae_title,
+                "scu_ae_title": config.scu_ae_title,
+                "supports_cfind": config.supports_cfind,
+                "supports_cmove": config.supports_cmove,
+                "sources_count": len(sources),
+                "sources": sources
+            })
+        
+        return {
+            "total_configs": len(backend_info),
+            "backends": backend_info
+        }
+        
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,70 @@
+services:
+  # Spanner Query Coordinator - orchestrates spanning queries across multiple PACS
+  spanner-coordinator:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.spanner-coordinator
+    container_name: axiom-spanner-coordinator
+    ports:
+      - "8002:8000"  # Separate port for spanner coordinator API
+    environment:
+      AXIOM_INSTANCE_ID: spanner_coordinator
+      SPANNER_MODE: coordinator
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    networks:
+      - default
+      - shared
+    restart: unless-stopped
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.spanner_coordinator.{{.Name}}"
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+
+  # DIMSE Query Workers for Spanning - handles the actual query work
+  dimse-query-worker:
+    build:
+      context: .
+      dockerfile: docker/dockerfiles/Dockerfile.dimse-worker
+    environment:
+      AXIOM_INSTANCE_ID: dimse_query_worker
+      WORKER_TYPE: dimse-query
+      SPANNER_MODE: worker
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    networks:
+      - default
+      - shared
+    restart: unless-stopped
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.dimse_query_worker.{{.Name}}"
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
