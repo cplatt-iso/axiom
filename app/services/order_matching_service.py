@@ -144,6 +144,11 @@ class OrderMatchingService:
         # Record evidence for each matched order
         for order, match_rule in matched_orders:
             try:
+                # Skip if Study Instance UID is missing - required for DICOM compliance
+                if not study_instance_uid:
+                    log.warning("Skipping evidence creation: Study Instance UID is missing")
+                    continue
+                    
                 evidence = crud_order_dicom_evidence.create_or_update_evidence_with_events(
                     db=self.db,
                     imaging_order_id=order.id,

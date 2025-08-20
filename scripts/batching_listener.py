@@ -164,14 +164,9 @@ def process_study_directory(study_path: Path, listener_id: str):
 
     except subprocess.CalledProcessError as e:
         logging.error(f"Error processing {study_path}: {e.stderr}")
-        # Update failed count in the database
-        try:
-            db = SessionLocal()
-            crud_dimse_listener_state.increment_failed_count(db=db, listener_id=listener_id, count=len(files_to_process))
-            db.commit()
-        except Exception as db_e:
-            logging.error(f"Failed to update failed count for {study_path}: {db_e}")
-            if db: db.rollback()
+        # Note: Failed count tracking not yet implemented in DimseListenerState
+        # For now, we just log the failure without updating database counts
+        logging.warning(f"Failed to process {len(files_to_process)} files from {study_path}")
 
     except Exception as e:
         logging.error(f"An unexpected error occurred during processing of {study_path}: {e}")

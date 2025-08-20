@@ -49,6 +49,7 @@ def init_db():
     from app.db.base import Base
     # Import all models here so they register with Base.metadata
     from app.db.models import User, Role, RuleSet, Rule # noqa F401
+    from app.db.models.maintenance import MaintenanceConfig, MaintenanceTask, DataCleanerConfig # noqa F401
     print("Creating database tables...")
     try:
         Base.metadata.create_all(bind=engine)

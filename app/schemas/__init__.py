@@ -6,6 +6,27 @@ from .mpps import (
     MppsRead,
 )
 
+# --- Maintenance Schemas ---
+from .maintenance import (
+    MaintenanceConfigBase,
+    MaintenanceConfigCreate,
+    MaintenanceConfigUpdate,
+    MaintenanceConfigRead,
+    MaintenanceConfigWithDataCleaner,
+    MaintenanceTaskBase,
+    MaintenanceTaskCreate,
+    MaintenanceTaskUpdate,
+    MaintenanceTaskRead,
+    MaintenanceTaskWithDetails,
+    DataCleanerConfigBase,
+    DataCleanerConfigCreate,
+    DataCleanerConfigUpdate,
+    DataCleanerConfigRead,
+    MaintenanceStatusResponse,
+    TaskExecutionRequest,
+    TaskExecutionResponse,
+)
+
 # --- Facility and Modality Schemas ---
 from .facility import (
     FacilityBase,

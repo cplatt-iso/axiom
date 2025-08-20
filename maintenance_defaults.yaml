@@ -1,0 +1,93 @@
+# Axiom Flow - Default Maintenance Configuration
+#
+# This file contains the default maintenance service configuration that is
+# loaded into the database on first startup. After the initial load, all
+# maintenance configuration is managed through the API/database - this file
+# becomes just a reference for what the defaults were.
+#
+# You know, like that employee manual that nobody reads after orientation.
+
+maintenance_defaults:
+  # DICOM Incoming Directory Cleaner
+  # Keeps the incoming DICOM directory from becoming a digital hoarder's paradise
+  incoming_dicom_cleaner:
+    name: "DICOM Incoming Directory Cleaner"
+    description: "Prevents the incoming DICOM directory from filling up the disk and bringing down the system like a house of cards"
+    task_type: "data_cleaner"
+    enabled: true
+    monitor_interval_seconds: 300  # Check every 5 minutes
+    
+    # Data cleaner specific settings
+    target_directory: "/dicom_data/incoming"
+    cleanup_mode: "free_space_percentage"  # Options: high_water_mark, keep_empty, free_space_percentage
+    deletion_strategy: "oldest_first"     # Options: oldest_first, fifo, lifo
+    target_free_space_percentage: 10.0    # Keep 10% free space on the volume
+    minimum_file_age_hours: 1             # Don't delete files newer than 1 hour
+    minimum_free_space_gb: 1.0            # Always keep at least 1GB free (safety valve)
+    dry_run: true                         # Start in dry run mode for safety - change to false when you trust it
+    file_pattern: "*.dcm"                 # Only consider DICOM files
+    exclude_pattern: null                 # No exclusions by default
+    batch_size: 100                       # Process files in batches of 100
+    max_files_per_run: 10000             # Don't process more than 10k files in one go
+
+  # DICOM Processed Directory Cleaner  
+  # Manages the processed directory with a high water mark approach
+  processed_dicom_cleaner:
+    name: "DICOM Processed Directory Cleaner"
+    description: "Keeps the processed DICOM directory under control using a high water mark strategy"
+    task_type: "data_cleaner"
+    enabled: true
+    monitor_interval_seconds: 900         # Check every 15 minutes
+    
+    target_directory: "/dicom_data/processed"
+    cleanup_mode: "high_water_mark"
+    deletion_strategy: "oldest_first"
+    high_water_mark_bytes: 53687091200   # 50GB maximum
+    minimum_file_age_hours: 24           # Don't delete files newer than 24 hours
+    minimum_free_space_gb: 5.0           # Keep at least 5GB free
+    dry_run: true                        # Start safely
+    file_pattern: "*.dcm"
+    exclude_pattern: null
+    batch_size: 50                       # Smaller batches for processed files
+    max_files_per_run: 5000              # More conservative limit
+    
+  # Emergency Cleaner - for when things go REALLY wrong
+  # This one is disabled by default and should only be used in emergencies
+  emergency_cleaner:
+    name: "Emergency DICOM Directory Cleaner"
+    description: "Nuclear option for when disk space is critically low - handle with care!"
+    task_type: "data_cleaner"
+    enabled: false                       # DISABLED by default - only enable in emergencies
+    monitor_interval_seconds: 60         # Check every minute when enabled
+    
+    target_directory: "/dicom_data/incoming"
+    cleanup_mode: "keep_empty"           # Delete EVERYTHING
+    deletion_strategy: "fifo"            # First in, first out
+    minimum_file_age_hours: 0            # Delete files of any age
+    minimum_free_space_gb: 0.1           # Minimal safety valve
+    dry_run: true                        # ALWAYS start in dry run mode
+    file_pattern: "*"                    # Consider all files
+    exclude_pattern: null
+    batch_size: 200                      # Larger batches for speed
+    max_files_per_run: 50000            # High limit for emergency cleanup
+
+  # Error Directory Cleaner
+  # Cleans up the error directory where problematic DICOM files accumulate
+  error_directory_cleaner:
+    name: "DICOM Error Directory Cleaner"
+    description: "Cleans up accumulated error files that didn't process correctly"
+    task_type: "data_cleaner"
+    enabled: true
+    monitor_interval_seconds: 3600       # Check hourly
+    
+    target_directory: "/dicom_data/errors"
+    cleanup_mode: "high_water_mark"
+    deletion_strategy: "oldest_first"
+    high_water_mark_bytes: 1073741824    # 1GB maximum
+    minimum_file_age_hours: 168          # Keep error files for 1 week
+    minimum_free_space_gb: 0.5           # Minimal safety valve
+    dry_run: true
+    file_pattern: "*"                    # All files in error directory
+    exclude_pattern: "*.log"             # Keep log files
+    batch_size: 100
+    max_files_per_run: 1000

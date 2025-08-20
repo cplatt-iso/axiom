@@ -34,6 +34,7 @@ from app.api.api_v1.endpoints import (
     spanner_wado,
     spanner_services,
     senders,
+    maintenance,
 )
 
 api_router = APIRouter()
@@ -108,6 +109,9 @@ api_router.include_router(
     tags=["Configuration - Senders"]
 )
 api_router.include_router(system_settings.router, prefix="/system-settings", tags=["System Settings"])
+
+# Maintenance Service
+api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance Service"])
 
 # Spanner DICOMweb Endpoints
 api_router.include_router(

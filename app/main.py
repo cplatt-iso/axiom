@@ -275,6 +275,11 @@ async def startup_event():
     app.state.sender_service_task = asyncio.create_task(sender_service.start())
     logger.info("Exam batch sender service started")
     
+    # Start maintenance service - the digital janitor
+    from app.services.maintenance_service import maintenance_service
+    app.state.maintenance_service_task = asyncio.create_task(maintenance_service.start())
+    logger.info("Maintenance service started - digital janitor is on the job!")
+    
     # Start SSE RabbitMQ consumer for real-time order events
     global sse_consumer_task
     if rabbitmq_connection:
@@ -323,6 +328,16 @@ async def shutdown_event():
                 await app.state.sender_service_task
             except asyncio.CancelledError:
                 logger.info("Exam batch sender service task cancelled.")
+        
+        # Stop maintenance service
+        if hasattr(app.state, 'maintenance_service_task') and not app.state.maintenance_service_task.done():
+            from app.services.maintenance_service import maintenance_service
+            await maintenance_service.stop()
+            app.state.maintenance_service_task.cancel()
+            try:
+                await app.state.maintenance_service_task
+            except asyncio.CancelledError:
+                logger.info("Maintenance service task cancelled - janitor has clocked out.")
         
         # Stop SSE consumer task
         if hasattr(app.state, 'sse_consumer_task') and not app.state.sse_consumer_task.done():
