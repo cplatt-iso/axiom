@@ -24,7 +24,7 @@ services:
     volumes:
       - dicom_incoming:/dicom_data/incoming
       - ./scripts:/app/scripts:ro
-    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory /dicom_data/incoming & python /app/scripts/batching_listener.py"]
+    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory \"/dicom_data/incoming\" --filepath \"{00080020}/{0020000d}/{00080018}.dcm\" & python /app/scripts/batching_listener.py --watch-dirs"]
     restart: unless-stopped
     networks:
       - default

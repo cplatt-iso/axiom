@@ -8,6 +8,7 @@ import threading
 from collections import defaultdict, deque
 from pathlib import Path
 import logging
+import argparse
 
 # Add the project root to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,8 +21,11 @@ from app.crud import crud_dimse_listener_state, crud_dimse_listener_config
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [AssociationBatcher] - %(message)s')
 
 DICOM_DIR = "/dicom_data/incoming"
-BATCH_TIMEOUT = 5.0  # Wait 5 seconds after the last file before processing the batch
 PROCESS_ASSOCIATION_SCRIPT = "/app/scripts/process_association.py"
+# Timeout to wait for more files in a study directory after the last one arrived.
+STUDY_INACTIVITY_TIMEOUT = 5.0
+# How often to scan for new study directories.
+SCAN_INTERVAL = 1.0
 HEARTBEAT_INTERVAL = 30  # Send heartbeat every 30 seconds
 LISTENER_INSTANCE_ID = os.getenv("AXIOM_INSTANCE_ID", "dcm4che_1")
 
@@ -125,160 +129,136 @@ class HeartbeatManager:
             self.heartbeat_thread.join(timeout=2.0)
         self._update_status("stopped", "DCM4CHE listener stopped")
 
-class AssociationBatcher:
-    """Handles batching of incoming DICOM files for processing."""
-    
-    def __init__(self, listener_id: str):
-        self.listener_id = listener_id
-        self.file_queue = set()  # Use set to avoid duplicates
-        self.last_file_time = None
-        self.lock = threading.Lock()
-        self.running = True
-    
-    def add_file(self, filepath):
-        """Add a file to the current batch."""
-        with self.lock:
-            if filepath not in self.file_queue:
-                self.file_queue.add(filepath)
-                self.last_file_time = time.time()
-                logging.info(f"Added file to batch: {filepath} (batch size: {len(self.file_queue)})")
-                
-                # Update received count in database
-                db = None
-                try:
-                    db = SessionLocal()
-                    crud_dimse_listener_state.increment_received_count(db=db, listener_id=self.listener_id, count=1)
-                except Exception as e:
-                    logging.error(f"Failed to update received count: {e}")
-                finally:
-                    if db:
-                        db.close()
-    
-    def process_batch_if_ready(self):
-        """Process the current batch if enough time has passed since the last file."""
-        with self.lock:
-            if not self.file_queue:
-                return
-                
-            if self.last_file_time and (time.time() - self.last_file_time) >= BATCH_TIMEOUT:
-                files_to_process = list(self.file_queue)
-                self.file_queue.clear()
-                logging.info(f"Processing batch of {len(files_to_process)} files")
-                
-                try:
-                    # Call our process_association.py script with all the files
-                    cmd = [PROCESS_ASSOCIATION_SCRIPT] + files_to_process
-                    subprocess.run(cmd, check=True)
-                    logging.info(f"Successfully processed batch of {len(files_to_process)} files")
-                    
-                    # Update processed count in database
-                    db = None
-                    try:
-                        db = SessionLocal()
-                        crud_dimse_listener_state.increment_processed_count(db=db, listener_id=self.listener_id, count=len(files_to_process))
-                    except Exception as e:
-                        logging.error(f"Failed to update processed count: {e}")
-                    finally:
-                        if db:
-                            db.close()
-                            
-                except subprocess.CalledProcessError as e:
-                    logging.error(f"Error processing batch: {e}")
-                except Exception as e:
-                    logging.error(f"Unexpected error processing batch: {e}")
-    
-    def monitor_loop(self):
-        """Continuously monitor for batches that are ready to process."""
-        while self.running:
-            try:
-                self.process_batch_if_ready()
-                time.sleep(1.0)  # Check every second
-            except Exception as e:
-                logging.error(f"Error in monitor loop: {e}")
-                time.sleep(1.0)
-    
-    def stop(self):
-        """Stop the monitoring loop."""
-        self.running = False
+def process_study_directory(study_path: Path, listener_id: str):
+    """Processes all DICOM files in a given study directory."""
+    files_to_process = [str(f) for f in study_path.glob('*.dcm')]
+    if not files_to_process:
+        logging.warning(f"Study directory {study_path} is empty, skipping.")
+        return
 
-def monitor_directory():
-    """Monitor the DICOM directory for new files."""
-    batcher = AssociationBatcher(LISTENER_INSTANCE_ID)
-    
-    # Start the batch processing monitor in a separate thread
-    monitor_thread = threading.Thread(target=batcher.monitor_loop, daemon=True)
-    monitor_thread.start()
-    
-    logging.info(f"Starting to monitor directory: {DICOM_DIR}")
-    
-    # Keep track of files we've already seen
-    known_files = set()
-    
+    logging.info(f"Processing {len(files_to_process)} files from {study_path}...")
+    db = None
     try:
-        while True:
-            try:
-                # List all files in the directory (dcm4che stores without .dcm extension)
-                dicom_dir_path = Path(DICOM_DIR)
-                current_files = set(f for f in dicom_dir_path.glob("*") if f.is_file())
-                
-                # Find new files
-                new_files = current_files - known_files
-                
-                for file_path in new_files:
-                    if file_path.is_file():
-                        if file_path.name.endswith('.part'):
-                            logging.debug(f"Skipping .part file: {file_path}")
-                            continue
-                        batcher.add_file(str(file_path))
-                        known_files.add(file_path)
-                
-                time.sleep(0.5)  # Check every 0.5 seconds
-            except Exception as e:
-                logging.error(f"Error monitoring directory: {e}")
-                time.sleep(1.0)
-                
-    except KeyboardInterrupt:
-        logging.info("Received interrupt signal, stopping...")
-    finally:
-        batcher.stop()
+        # Construct the command to run the processing script
+        command = ["python", PROCESS_ASSOCIATION_SCRIPT] + files_to_process
+        
+        # Execute the script
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        
+        logging.info(f"Successfully processed batch for {study_path}.")
+        logging.debug(f"Processing script output:\n{result.stdout}")
 
-# The storescp process is now managed by Docker directly
-# This script only handles heartbeat and file monitoring
+        # Update processed count in the database
+        try:
+            db = SessionLocal()
+            crud_dimse_listener_state.increment_processed_count(db=db, listener_id=listener_id, count=len(files_to_process))
+            db.commit()
+        except Exception as e:
+            logging.error(f"Failed to update processed count for {study_path}: {e}")
+            if db: db.rollback()
+        
+        # Simple cleanup: remove the processed study directory.
+        import shutil
+        shutil.rmtree(study_path)
+        logging.info(f"Removed processed directory: {study_path}")
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error processing {study_path}: {e.stderr}")
+        # Update failed count in the database
+        try:
+            db = SessionLocal()
+            crud_dimse_listener_state.increment_failed_count(db=db, listener_id=listener_id, count=len(files_to_process))
+            db.commit()
+        except Exception as db_e:
+            logging.error(f"Failed to update failed count for {study_path}: {db_e}")
+            if db: db.rollback()
+
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during processing of {study_path}: {e}")
+    finally:
+        if db:
+            db.close()
+
+
+def watch_directories(listener_id: str):
+    """
+    Watches for new study directories and processes them after a period of inactivity.
+    Directory structure: /dicom_data/incoming/{StudyDate}/{StudyInstanceUID}/files.dcm
+    """
+    active_studies = {}  # {study_path: last_modified_time}
+    logging.info(f"Starting to watch for new study directories in {DICOM_DIR}")
+    db = None
+
+    while True:
+        now = time.time()
+        
+        # Discover new or updated study directories
+        try:
+            if not os.path.exists(DICOM_DIR):
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            for study_date_dir in Path(DICOM_DIR).iterdir():
+                if not study_date_dir.is_dir():
+                    continue
+                for study_dir in study_date_dir.iterdir():
+                    if not study_dir.is_dir():
+                        continue
+                    
+                    # Check if the study has .dcm files and add to tracking if new
+                    if any(study_dir.glob('*.dcm')):
+                        if study_dir not in active_studies:
+                            active_studies[study_dir] = now
+
+        except Exception as e:
+            logging.error(f"Error scanning for new files: {e}")
+
+        # Process timed-out studies
+        processed_studies = []
+        for study_path, last_seen_time in active_studies.items():
+            if now - last_seen_time > STUDY_INACTIVITY_TIMEOUT:
+                logging.info(f"Study '{study_path.name}' from date '{study_path.parent.name}' is complete (inactivity timeout).")
+                process_study_directory(study_path, listener_id)
+                processed_studies.append(study_path)
+
+        # Clean up processed studies from the active list
+        if processed_studies:
+            active_studies = {k: v for k, v in active_studies.items() if k not in processed_studies}
+            if active_studies:
+                logging.info(f"Remaining active studies to track: {len(active_studies)}")
+
+        time.sleep(SCAN_INTERVAL)
+
 
 def main():
-    """Main entry point."""
-    logging.info("Starting dcm4che listener with association batching and heartbeat")
-    
-    heartbeat_manager = None
-    
+    """Main entry point for the listener script."""
+    parser = argparse.ArgumentParser(description="Axiom DICOM Batching Listener")
+    parser.add_argument(
+        '--watch-dirs',
+        action='store_true',
+        help='Enable directory watching mode for structured dcm4che output.'
+    )
+    args = parser.parse_args()
+
+    heartbeat_manager = HeartbeatManager(LISTENER_INSTANCE_ID)
     try:
-        # Initialize heartbeat manager
-        heartbeat_manager = HeartbeatManager(LISTENER_INSTANCE_ID)
-        
-        # Start heartbeat reporting
         heartbeat_manager.start()
         
-        # Note: storescp is started by Docker, we only handle file monitoring
-        logging.info("Heartbeat started, beginning directory monitoring")
-        
-        # Start monitoring the directory for incoming files
-        monitor_directory()
-        
+        if args.watch_dirs:
+            watch_directories(LISTENER_INSTANCE_ID)
+        else:
+            # Fallback to old logic if needed, or just error out.
+            logging.error("This script is now intended to be run with the --watch-dirs flag.")
+            # old_main_loop(LISTENER_INSTANCE_ID) # Or whatever the old main loop was called
+            sys.exit(1)
+
     except KeyboardInterrupt:
-        logging.info("Received interrupt, shutting down...")
+        logging.info("Shutdown signal received.")
     except Exception as e:
-        logging.error(f"Fatal error: {e}")
-        if heartbeat_manager:
-            heartbeat_manager._update_status("error", f"Fatal error: {str(e)}")
-        return 1
+        logging.critical(f"A critical error occurred in the main loop: {e}", exc_info=True)
     finally:
-        # Clean up heartbeat manager
-        if heartbeat_manager:
-            heartbeat_manager.stop()
-            
-        logging.info("Shutdown complete")
-        
-    return 0
+        heartbeat_manager.stop()
+        logging.info("Listener has been shut down.")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
