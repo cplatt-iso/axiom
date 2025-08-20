@@ -35,4 +35,3 @@ services:
         mode: non-blocking
         fluentd-address: "127.0.0.1:24224"
         tag: "axiom.dcm4che-listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"
-d
