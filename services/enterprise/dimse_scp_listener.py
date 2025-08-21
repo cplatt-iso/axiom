@@ -136,7 +136,7 @@ class DIMSESCPListener:
                 
                 # Yield each result as a DICOM dataset
                 for result in results:
-                    dataset = self._result_to_dataset(result)
+                    dataset = self._result_to_dataset(result, query_level)
                     yield 0xFF00, dataset  # Pending status with data
                 
                 # Final success status
@@ -347,7 +347,10 @@ class DIMSESCPListener:
                 if 'StudyDescription' in query_filters:
                     query_ds.StudyDescription = query_filters['StudyDescription']
                 
-                # Ensure required empty fields are present for C-FIND
+                # Ensure ALL required fields are present for C-FIND based on query level
+                # This is critical - DICOM C-FIND only returns fields that are explicitly requested
+                
+                # Common fields for all levels
                 if not hasattr(query_ds, 'StudyInstanceUID'):
                     query_ds.StudyInstanceUID = ''
                 if not hasattr(query_ds, 'PatientName'):
@@ -356,8 +359,53 @@ class DIMSESCPListener:
                     query_ds.PatientID = ''
                 if not hasattr(query_ds, 'StudyDate'):
                     query_ds.StudyDate = ''
+                if not hasattr(query_ds, 'StudyTime'):
+                    query_ds.StudyTime = ''
                 if not hasattr(query_ds, 'AccessionNumber'):
                     query_ds.AccessionNumber = ''
+                if not hasattr(query_ds, 'PatientBirthDate'):
+                    query_ds.PatientBirthDate = ''
+                if not hasattr(query_ds, 'PatientSex'):
+                    query_ds.PatientSex = ''
+                if not hasattr(query_ds, 'SpecificCharacterSet'):
+                    query_ds.SpecificCharacterSet = ''
+                
+                # Study level fields
+                if query_level.upper() in ['STUDY', 'SERIES', 'IMAGE', 'INSTANCE']:
+                    if not hasattr(query_ds, 'StudyDescription'):
+                        query_ds.StudyDescription = ''
+                    if not hasattr(query_ds, 'StudyID'):
+                        query_ds.StudyID = ''
+                    if not hasattr(query_ds, 'ModalitiesInStudy'):
+                        query_ds.ModalitiesInStudy = ''
+                    if not hasattr(query_ds, 'ReferringPhysicianName'):
+                        query_ds.ReferringPhysicianName = ''
+                    if not hasattr(query_ds, 'NumberOfStudyRelatedSeries'):
+                        query_ds.NumberOfStudyRelatedSeries = ''
+                    if not hasattr(query_ds, 'NumberOfStudyRelatedInstances'):
+                        query_ds.NumberOfStudyRelatedInstances = ''
+                
+                # Series level fields
+                if query_level.upper() in ['SERIES', 'IMAGE', 'INSTANCE']:
+                    if not hasattr(query_ds, 'SeriesInstanceUID'):
+                        query_ds.SeriesInstanceUID = ''
+                    if not hasattr(query_ds, 'SeriesNumber'):
+                        query_ds.SeriesNumber = ''
+                    if not hasattr(query_ds, 'Modality'):
+                        query_ds.Modality = ''
+                    if not hasattr(query_ds, 'SeriesDescription'):
+                        query_ds.SeriesDescription = ''
+                    if not hasattr(query_ds, 'NumberOfSeriesRelatedInstances'):
+                        query_ds.NumberOfSeriesRelatedInstances = ''
+                
+                # Instance/Image level fields
+                if query_level.upper() in ['IMAGE', 'INSTANCE']:
+                    if not hasattr(query_ds, 'SOPInstanceUID'):
+                        query_ds.SOPInstanceUID = ''
+                    if not hasattr(query_ds, 'SOPClassUID'):
+                        query_ds.SOPClassUID = ''
+                    if not hasattr(query_ds, 'InstanceNumber'):
+                        query_ds.InstanceNumber = ''
                 
                 # Convert query level string to QueryLevel enum
                 if query_level.upper() == 'STUDY':
@@ -412,7 +460,7 @@ class DIMSESCPListener:
             # Only return fallback data if there's a critical error
             return []
 
-    def _result_to_dataset(self, result_data) -> Dataset:
+    def _result_to_dataset(self, result_data, query_level: str = 'STUDY') -> Dataset:
         """Convert query result to DICOM Dataset format."""
         try:
             ds = Dataset()
@@ -429,30 +477,152 @@ class DIMSESCPListener:
                 else:
                     result = result_data
             
-            # Map common DICOM fields with safe access
-            if 'StudyInstanceUID' in result and result['StudyInstanceUID']:
-                ds.StudyInstanceUID = str(result['StudyInstanceUID'])
+            # DICOM tag to field mapping (handling both keyword and tag format)
+            tag_mappings = {
+                # Standard DICOM field names
+                'StudyInstanceUID': ('StudyInstanceUID', '0020000D'),
+                'PatientID': ('PatientID', '00100020'), 
+                'PatientName': ('PatientName', '00100010'),
+                'StudyDate': ('StudyDate', '00080020'),
+                'StudyTime': ('StudyTime', '00080030'),
+                'AccessionNumber': ('AccessionNumber', '00080050'),
+                'StudyDescription': ('StudyDescription', '00081030'),
+                'StudyID': ('StudyID', '00200010'),
+                'ModalitiesInStudy': ('ModalitiesInStudy', '00080061'),
+                'ReferringPhysicianName': ('ReferringPhysicianName', '00080090'),
+                'NumberOfStudyRelatedSeries': ('NumberOfStudyRelatedSeries', '00201206'),
+                'NumberOfStudyRelatedInstances': ('NumberOfStudyRelatedInstances', '00201208'),
+                'PatientBirthDate': ('PatientBirthDate', '00100030'),
+                'PatientSex': ('PatientSex', '00100040'),
+                # Series level fields
+                'SeriesInstanceUID': ('SeriesInstanceUID', '0020000E'),
+                'SeriesNumber': ('SeriesNumber', '00200011'),
+                'Modality': ('Modality', '00080060'),
+                'SeriesDescription': ('SeriesDescription', '0008103E'),
+                'NumberOfSeriesRelatedInstances': ('NumberOfSeriesRelatedInstances', '00201209'),
+                # Instance level fields
+                'SOPInstanceUID': ('SOPInstanceUID', '00080018'),
+                'SOPClassUID': ('SOPClassUID', '00080016'),
+                'InstanceNumber': ('InstanceNumber', '00200013'),
+            }
             
-            if 'PatientID' in result and result['PatientID']:
-                ds.PatientID = str(result['PatientID'])
+            # Helper function to extract actual value from DICOM VR format
+            def extract_dicom_value(raw_value):
+                """Extract the actual value from DICOM VR dictionary format."""
+                if raw_value is None:
+                    return None
+                    
+                # If it's already a simple value, return as-is
+                if isinstance(raw_value, (int, float, list)):
+                    return raw_value
+                    
+                # Handle string values that might be DICOM VR format
+                if isinstance(raw_value, str):
+                    # Check for DICOM VR dictionary format like "{'vr': 'PN', 'Value': [{'Alphabetic': 'GARCIA^RYAN^E'}]}"
+                    if raw_value.startswith("{'vr'"):
+                        try:
+                            import ast
+                            vr_dict = ast.literal_eval(raw_value)
+                            
+                            # Check if this is just a VR type without a value (e.g., "{'vr': 'IS'}")
+                            if 'Value' not in vr_dict:
+                                # No actual value, return None
+                                return None
+                            
+                            if 'Value' in vr_dict and vr_dict['Value']:
+                                value_list = vr_dict['Value']
+                                
+                                # Handle different VR types
+                                if isinstance(value_list[0], dict) and 'Alphabetic' in value_list[0]:
+                                    # Person Name (PN) format
+                                    return value_list[0]['Alphabetic']
+                                elif isinstance(value_list[0], str):
+                                    # Simple string values (LO, SH, UI, etc.)
+                                    return value_list[0]
+                                else:
+                                    return str(value_list[0])
+                            else:
+                                return None
+                        except Exception as e:
+                            logger.warning(f"Error parsing DICOM VR value '{raw_value}': {e}")
+                            # Try to extract basic string if parsing fails, but only if it looks like it has a value
+                            if "Value': [" in raw_value:
+                                try:
+                                    start = raw_value.find("Value': [") + 9
+                                    end = raw_value.find("]", start)
+                                    inner = raw_value[start:end].strip("'\"")
+                                    if inner.startswith("'") or inner.startswith('"'):
+                                        return inner[1:-1]
+                                    return inner
+                                except:
+                                    pass
+                            # If it's just a VR type like "{'vr': 'IS'}", return None
+                            if raw_value.strip().endswith("'}") and "'vr':" in raw_value and "Value" not in raw_value:
+                                return None
+                            return str(raw_value)
+                    else:
+                        # Regular string, return as-is
+                        return raw_value
+                
+                # Handle dictionary format directly (actual dict, not string representation)
+                if isinstance(raw_value, dict) and 'Value' in raw_value:
+                    try:
+                        value_list = raw_value['Value']
+                        if isinstance(value_list[0], dict) and 'Alphabetic' in value_list[0]:
+                            return value_list[0]['Alphabetic']
+                        elif isinstance(value_list, list) and value_list:
+                            return value_list[0]
+                    except (KeyError, IndexError, TypeError):
+                        pass
+                elif isinstance(raw_value, dict) and 'vr' in raw_value and 'Value' not in raw_value:
+                    # Dictionary with just VR type, no value
+                    return None
+                
+                # Fallback to string conversion
+                return str(raw_value)
             
-            if 'PatientName' in result and result['PatientName']:
-                ds.PatientName = str(result['PatientName'])
+            # Map data from result to DICOM dataset
+            for field_name, (dicom_keyword, tag_hex) in tag_mappings.items():
+                raw_value = None
                 
-            if 'StudyDate' in result and result['StudyDate']:
-                # Handle different date formats
-                study_date = str(result['StudyDate'])
-                # Remove any dashes or spaces
-                study_date = study_date.replace('-', '').replace(' ', '')[:8]
-                ds.StudyDate = study_date
+                # Try to get value by keyword first, then by tag
+                if dicom_keyword in result and result[dicom_keyword]:
+                    raw_value = result[dicom_keyword]
+                elif tag_hex in result and result[tag_hex]:
+                    raw_value = result[tag_hex]
+                
+                if raw_value is not None:
+                    # Extract clean value from DICOM VR format
+                    value = extract_dicom_value(raw_value)
+                    
+                    if value is not None:
+                        # Handle special formatting for specific fields
+                        if field_name == 'StudyDate':
+                            # Ensure proper DICOM date format (YYYYMMDD)
+                            study_date = str(value).replace('-', '').replace(' ', '')[:8]
+                            ds.StudyDate = study_date
+                        elif field_name == 'StudyTime':
+                            # Ensure proper DICOM time format (HHMMSS)
+                            study_time = str(value).replace(':', '')[:6]
+                            ds.StudyTime = study_time
+                        elif field_name in ['NumberOfStudyRelatedSeries', 'NumberOfStudyRelatedInstances']:
+                            # Convert to integer if possible
+                            try:
+                                int_value = int(str(value))
+                                setattr(ds, dicom_keyword, int_value)
+                            except (ValueError, TypeError):
+                                setattr(ds, dicom_keyword, str(value))
+                        elif field_name == 'ModalitiesInStudy':
+                            # Handle list or string values
+                            if isinstance(value, list):
+                                setattr(ds, dicom_keyword, value)
+                            else:
+                                setattr(ds, dicom_keyword, str(value))
+                        else:
+                            # Default string conversion
+                            setattr(ds, dicom_keyword, str(value))
             
-            if 'AccessionNumber' in result and result['AccessionNumber']:
-                ds.AccessionNumber = str(result['AccessionNumber'])
-                
-            if 'StudyDescription' in result and result['StudyDescription']:
-                ds.StudyDescription = str(result['StudyDescription'])
-                
-            # Add other common study-level fields with defaults if missing
+            # Ensure required fields have defaults if missing
             if not hasattr(ds, 'StudyInstanceUID') or not ds.StudyInstanceUID:
                 ds.StudyInstanceUID = f"1.2.826.0.1.3680043.8.498.{hash(str(result)) % 999999999}"
                 
@@ -474,8 +644,8 @@ class DIMSESCPListener:
             if not hasattr(ds, 'StudyDescription'):
                 ds.StudyDescription = ''
                 
-            # Set query/retrieve level
-            ds.QueryRetrieveLevel = 'STUDY'
+            # Set query/retrieve level based on input parameter
+            ds.QueryRetrieveLevel = query_level.upper()
             
             logger.info(f"Converted result to dataset: PatientID={getattr(ds, 'PatientID', '')}, StudyUID={getattr(ds, 'StudyInstanceUID', '')[:20]}...")
             return ds
@@ -490,7 +660,7 @@ class DIMSESCPListener:
             ds.PatientName = 'Error^Converting^Result'
             ds.StudyDate = datetime.now().strftime('%Y%m%d')
             ds.StudyTime = datetime.now().strftime('%H%M%S')
-            ds.QueryRetrieveLevel = 'STUDY'
+            ds.QueryRetrieveLevel = query_level.upper()
             ds.AccessionNumber = ''
             ds.StudyDescription = 'CONVERSION ERROR'
             return ds
