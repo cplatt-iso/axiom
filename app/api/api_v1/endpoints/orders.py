@@ -189,7 +189,7 @@ async def delete_imaging_order(
         raise HTTPException(status_code=404, detail="Imaging order not found")
     
     # Store order data for the event before deletion
-    order_data = schemas.ImagingOrderRead.from_orm(db_order).dict()
+    order_data = schemas.ImagingOrderRead.model_validate(db_order).model_dump(mode='json')
     
     # Delete the order
     try:

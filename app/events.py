@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, date
 from typing import List, Dict, Any, Coroutine
 from fastapi import Request
 import aio_pika
@@ -13,6 +14,17 @@ log = structlog.get_logger(__name__)
 
 # RabbitMQ Exchange for broadcasting order events
 ORDERS_EXCHANGE_NAME = "orders_events_exchange"
+
+
+def json_serializer(obj):
+    """
+    Custom JSON serializer for objects not serializable by default json code.
+    Handles datetime, date, and other common SQLAlchemy types.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    # Handle any other problematic types here
+    return str(obj)
 
 class SSEManager:
     """
@@ -38,7 +50,7 @@ class SSEManager:
 
     async def broadcast(self, event: str, data: Dict[str, Any]):
         """Broadcasts an event and data to all connected clients."""
-        message = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+        message = f"event: {event}\ndata: {json.dumps(data, default=json_serializer)}\n\n"
         if not self.connections:
             log.debug("SSE broadcast skipped: no clients connected.", event_name=event)
             return
@@ -147,7 +159,7 @@ async def publish_order_event(
             exchange = await channel.declare_exchange(
                 ORDERS_EXCHANGE_NAME, aio_pika.ExchangeType.FANOUT, durable=True
             )
-            message_body = json.dumps({"event_type": event_type, "payload": payload})
+            message_body = json.dumps({"event_type": event_type, "payload": payload}, default=json_serializer)
             message = aio_pika.Message(
                 body=message_body.encode(),
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
@@ -178,7 +190,7 @@ def publish_order_event_sync(
                     exchange = await channel.declare_exchange(
                         ORDERS_EXCHANGE_NAME, aio_pika.ExchangeType.FANOUT, durable=True
                     )
-                    message_body = json.dumps({"event_type": event_type, "payload": payload})
+                    message_body = json.dumps({"event_type": event_type, "payload": payload}, default=json_serializer)
                     message = aio_pika.Message(
                         body=message_body.encode(),
                         delivery_mode=aio_pika.DeliveryMode.PERSISTENT,

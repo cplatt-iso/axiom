@@ -178,7 +178,7 @@ class CRUDImagingOrder(CRUDBase[ImagingOrder, ImagingOrderCreate, ImagingOrderUp
             try:
                 await publish_order_event(
                     event_type="order_updated",
-                    payload=schemas.ImagingOrderRead.from_orm(db_obj).dict(),
+                    payload=schemas.ImagingOrderRead.model_validate(db_obj).model_dump(mode='json'),
                     connection=connection
                 )
                 logger.info("Order status updated with SSE event published", order_id=order_id, new_status=new_status.value)
