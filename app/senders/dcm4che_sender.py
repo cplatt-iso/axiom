@@ -5,8 +5,15 @@ import subprocess
 import shlex
 import tempfile
 import pika
+import uuid
+from datetime import datetime
 from pydantic import BaseModel
 from typing import Dict, Any, List, Union, Optional
+
+# Import dustbin service for confirmations
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.services.dustbin_service import dustbin_service
 
 # Basic configuration from environment variables
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
@@ -36,6 +43,13 @@ def send_with_dcm4che(job: CStoreJob):
 
     print(f"Processing dcm4che job for {len(file_paths)} file(s)")
     print(f"Destination: {config.get('remote_ae_title')}")
+    
+    # Get destination name for confirmation tracking
+    destination_name = config.get('remote_ae_title', 'UNKNOWN_DESTINATION')
+    
+    # Extract verification info if present (for dustbin confirmations)
+    verification_id = config.get('verification_id')
+    task_id = config.get('task_id')
 
     # Validate all files exist
     for file_path in file_paths:
@@ -79,8 +93,38 @@ def send_with_dcm4che(job: CStoreJob):
         print(f"Output: {process.stdout}")
         
         # Log each successful file
+        successful_files = []
         for file_path in file_paths:
             print(f"Successfully sent: {file_path}")
+            successful_files.append(file_path)
+        
+        # MEDICAL SAFETY: Send confirmation to dustbin verification system
+        if verification_id and successful_files:
+            try:
+                confirmation_details = {
+                    'destination_name': destination_name,
+                    'transmission_timestamp': datetime.now().isoformat(),
+                    'files_transmitted': len(successful_files),
+                    'transmission_method': 'dcm4che_storescu',
+                    'dcm4che_command': ' '.join([shlex.quote(arg) for arg in command[:5]]) + '...',  # Log command (truncated for security)
+                    'files_confirmed': successful_files
+                }
+                
+                success = dustbin_service.verify_destination_receipt(
+                    verification_id=verification_id,
+                    destination_name=destination_name,
+                    success=True,
+                    confirmation_details=confirmation_details
+                )
+                
+                if success:
+                    print(f"MEDICAL SAFETY: Transmission confirmed for verification {verification_id} to dustbin system")
+                else:
+                    print(f"WARNING: Failed to confirm transmission to dustbin system for verification {verification_id}")
+                    
+            except Exception as conf_err:
+                print(f"ERROR: Failed to send dustbin confirmation: {conf_err}")
+                # Continue execution - don't fail the transmission due to confirmation failure
             
     except FileNotFoundError:
         print(f"CRITICAL: storescu command not found at {storescu_path}")
@@ -93,6 +137,32 @@ def send_with_dcm4che(job: CStoreJob):
         print("Files that were attempted:")
         for file_path in file_paths:
             print(f"  - {file_path}")
+        
+        # MEDICAL SAFETY: Send failure confirmation to dustbin verification system
+        if verification_id:
+            try:
+                failure_details = {
+                    'destination_name': destination_name,
+                    'failure_timestamp': datetime.now().isoformat(),
+                    'files_attempted': len(file_paths),
+                    'transmission_method': 'dcm4che_storescu',
+                    'error_code': e.returncode,
+                    'error_message': str(e.stderr) if e.stderr else 'Unknown error',
+                    'files_failed': file_paths
+                }
+                
+                dustbin_service.verify_destination_receipt(
+                    verification_id=verification_id,
+                    destination_name=destination_name,
+                    success=False,
+                    confirmation_details=failure_details
+                )
+                
+                print(f"MEDICAL SAFETY: Transmission failure confirmed for verification {verification_id} to dustbin system")
+                
+            except Exception as conf_err:
+                print(f"ERROR: Failed to send dustbin failure confirmation: {conf_err}")
+        
         raise
     except Exception as e:
         print(f"An unexpected error occurred during dcm4che execution: {e}")

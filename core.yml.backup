@@ -92,29 +92,8 @@ volumes:
   postgres_data:
   rabbitmq_data:
   dicom_incoming:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/icculus/axiom/axiom-volumes/dicom_incoming
   dicom_processed:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/icculus/axiom/axiom-volumes/dicom_processed
   dicom_errors:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/icculus/axiom/axiom-volumes/dicom_errors
-  dicom_dustbin:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /home/icculus/axiom/axiom-volumes/dicom_dustbin
   redis_data:
 
 networks:

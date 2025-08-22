@@ -96,7 +96,8 @@ services:
     volumes:
       - dicom_incoming:/dicom_data/incoming
       - dicom_processed:/dicom_data/processed
-      - /home/icculus/axiom/axiom-volumes/dicom_errors:/dicom_data/errors
+      - dicom_errors:/dicom_data/errors
+      - dicom_dustbin:/dicom_data/dustbin
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
     command: ["celery", "-A", "app.worker.celery_app.app", "worker", "--loglevel=info"]
     restart: unless-stopped

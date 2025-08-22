@@ -157,10 +157,11 @@ def process_study_directory(study_path: Path, listener_id: str):
             logging.error(f"Failed to update processed count for {study_path}: {e}")
             if db: db.rollback()
         
-        # Simple cleanup: remove the processed study directory.
-        import shutil
-        shutil.rmtree(study_path)
-        logging.info(f"Removed processed directory: {study_path}")
+        # MEDICAL-GRADE SAFETY: DO NOT delete the directory - let association task handle it
+        # The association task with dustbin system will properly process and safely dispose of files
+        # import shutil
+        # shutil.rmtree(study_path)
+        logging.info(f"Batching complete for {study_path} - files left for association task processing")
 
     except subprocess.CalledProcessError as e:
         logging.error(f"Error processing {study_path}: {e.stderr}")

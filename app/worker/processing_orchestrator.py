@@ -137,9 +137,9 @@ def process_instance_against_rules(
                 
                 # Ensure modified_ds is a deepcopy if we haven't made one yet and actions might occur
                 if modified_ds is None: # Check before applying actions
-                    # Only deepcopy if there are modifications or AI tags or destinations to process.
+                    # Only deepcopy if there are modifications or AI configs or destinations to process.
                     # A rule might match but have no actions/destinations.
-                    if rule.tag_modifications or rule.ai_standardization_tags or rule.destinations:
+                    if rule.tag_modifications or rule.ai_prompt_config_ids or rule.destinations:
                         log.debug("First potential modification/action; creating deepcopy of dataset.")
                         modified_ds = deepcopy(original_ds)
                     else:
@@ -150,7 +150,7 @@ def process_instance_against_rules(
 
                 # 4a. Apply Actions (Standard modifications + AI Standardization)
                 rule_changed_dataset = False
-                if rule.tag_modifications or rule.ai_standardization_tags: # Only call if actions are defined
+                if rule.tag_modifications or rule.ai_prompt_config_ids: # Only call if actions are defined
                     rule_changed_dataset = apply_actions_for_rule(
                         dataset_for_actions, rule, source_identifier, db_session
                     )

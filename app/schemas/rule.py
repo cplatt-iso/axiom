@@ -252,7 +252,7 @@ class RuleBase(BaseModel):
     description: Optional[str] = None
     is_active: bool = True
     priority: int = 0
-    match_criteria: List[MatchCriterion] = Field(default_factory=list)
+    match_criteria: Optional[List[MatchCriterion]] = Field(None, description="If None or empty, matches all DICOM objects")
     association_criteria: Optional[List[AssociationMatchCriterion]] = Field(None)
     tag_modifications: List[TagModification] = Field(default_factory=list)
     applicable_sources: Optional[List[str]] = Field(None)
@@ -271,6 +271,12 @@ class RuleBase(BaseModel):
                 raise ValueError("applicable_sources must be a list of strings or null")
             if any(not isinstance(s, str) or not s.strip() for s in v):
                 raise ValueError("Each item in applicable_sources must be a non-empty string")
+            
+            # Warn about suspicious source identifiers that look like auto-generated IDs
+            for source in v:
+                if source.startswith('dimse_listener-id-') or source.startswith('dicomweb_source-id-'):
+                    # This is likely a frontend bug showing internal IDs instead of real source names
+                    raise ValueError(f"Invalid source identifier '{source}'. Source identifiers should be human-readable names like 'DCM4CHE_LISTENER', 'STOW_RS_ENDPOINT', etc., not auto-generated IDs.")
         return v
 
     @field_validator('ai_prompt_config_ids')

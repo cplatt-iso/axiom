@@ -26,6 +26,8 @@ from app.worker.executors import (
     execute_stow_task
 )
 
+from app.services.dustbin_service import dustbin_service
+
 # from app.services import ai_assist_service  # Still needed for initial check
 
 from app.db.models.dicom_exception_log import DicomExceptionLog  # The SQLAlchemy model
@@ -381,6 +383,110 @@ def _move_to_error_dir(filepath: Path, task_id: str, context_log: Any):
             f"CRITICAL - Could not move file to error dir. Task ID: {task_id}, Original Filepath: {str(filepath)}, Target Error Dir: {str(error_dir) if 'error_dir' in locals() else 'UnknownErrorDir'}, Error: {str(move_err)}", exc_info=True)
 
 
+def _handle_final_file_disposition_with_dustbin(
+        original_filepath: Path,
+        was_successful: bool,
+        rules_matched_and_triggered_actions: bool,
+        modifications_made: bool,
+        any_destination_failures: bool,
+        context_log: Any,
+        task_id: str,
+        study_instance_uid: Optional[str] = None,
+        sop_instance_uid: Optional[str] = None,
+        destinations_confirmed: Optional[List[str]] = None):
+    """
+    Medical-grade file disposition that uses dustbin service instead of immediate deletion.
+    NEVER deletes files immediately - always moves to dustbin with verification.
+    """
+    if not original_filepath or not original_filepath.exists():
+        return
+    
+    # Extract DICOM UIDs if not provided
+    if not study_instance_uid or not sop_instance_uid:
+        try:
+            ds = pydicom.dcmread(str(original_filepath))
+            study_instance_uid = study_instance_uid or ds.get('StudyInstanceUID', 'UNKNOWN_STUDY_UID')
+            sop_instance_uid = sop_instance_uid or ds.get('SOPInstanceUID', 'UNKNOWN_SOP_UID')
+        except Exception as e:
+            context_log.warning("Could not read DICOM UIDs for dustbin", error=str(e))
+            study_instance_uid = study_instance_uid or f"UNKNOWN_STUDY_{task_id}"
+            sop_instance_uid = sop_instance_uid or f"UNKNOWN_SOP_{task_id}"
+    
+    destinations_confirmed = destinations_confirmed or []
+    
+    if was_successful and not any_destination_failures:
+        # File was processed successfully - move to dustbin with full confirmation
+        success = dustbin_service.move_to_dustbin(
+            source_file_path=str(original_filepath),
+            study_instance_uid=study_instance_uid,
+            sop_instance_uid=sop_instance_uid,
+            task_id=task_id,
+            destinations_confirmed=destinations_confirmed,
+            reason="processing_complete_all_destinations_successful"
+        )
+        if success:
+            context_log.info("MEDICAL SAFETY: File moved to dustbin after successful processing with all destinations confirmed")
+        else:
+            context_log.error("CRITICAL: Failed to move successfully processed file to dustbin - FILE KEPT FOR SAFETY")
+            
+    elif not rules_matched_and_triggered_actions:
+        if settings.DELETE_UNMATCHED_FILES:
+            # Even unmatched files go to dustbin for safety
+            success = dustbin_service.move_to_dustbin(
+                source_file_path=str(original_filepath),
+                study_instance_uid=study_instance_uid,
+                sop_instance_uid=sop_instance_uid,
+                task_id=task_id,
+                destinations_confirmed=[],
+                reason="no_rules_matched_or_triggered"
+            )
+            if success:
+                context_log.info("MEDICAL SAFETY: Unmatched file moved to dustbin instead of immediate deletion")
+            else:
+                context_log.error("CRITICAL: Failed to move unmatched file to dustbin - FILE KEPT FOR SAFETY")
+        else:
+            context_log.info("Kept original file as no rules matched/triggered (per configuration)")
+            
+    elif any_destination_failures:
+        if settings.MOVE_TO_ERROR_ON_PARTIAL_FAILURE:
+            context_log.warning("Partial destination failure. Moving original file to error directory.")
+            _move_to_error_dir(original_filepath, task_id, context_log)
+        elif settings.DELETE_ON_PARTIAL_FAILURE_IF_MODIFIED and modifications_made:
+            # Even partial failures with modifications go to dustbin for safety
+            success = dustbin_service.move_to_dustbin(
+                source_file_path=str(original_filepath),
+                study_instance_uid=study_instance_uid,
+                sop_instance_uid=sop_instance_uid,
+                task_id=task_id,
+                destinations_confirmed=destinations_confirmed,
+                reason="partial_failure_but_modified"
+            )
+            if success:
+                context_log.info("MEDICAL SAFETY: Modified file with partial failures moved to dustbin instead of immediate deletion")
+            else:
+                context_log.error("CRITICAL: Failed to move partially failed modified file to dustbin - FILE KEPT FOR SAFETY")
+        else:
+            context_log.info("Kept original file despite partial destination failure (per configuration)")
+            
+    elif rules_matched_and_triggered_actions and not any_destination_failures and modifications_made and settings.DELETE_ON_NO_DESTINATION:
+        # Even files with no destinations go to dustbin for safety
+        success = dustbin_service.move_to_dustbin(
+            source_file_path=str(original_filepath),
+            study_instance_uid=study_instance_uid,
+            sop_instance_uid=sop_instance_uid,
+            task_id=task_id,
+            destinations_confirmed=[],
+            reason="rules_matched_modifications_made_no_destinations"
+        )
+        if success:
+            context_log.info("MEDICAL SAFETY: File with rules/modifications but no destinations moved to dustbin")
+        else:
+            context_log.error("CRITICAL: Failed to move no-destination file to dustbin - FILE KEPT FOR SAFETY")
+    
+    else:
+        context_log.info("File disposition: No action taken, file kept for safety")
+
+
 def _handle_final_file_disposition(
         original_filepath: Path,
         was_successful: bool,
@@ -389,6 +495,13 @@ def _handle_final_file_disposition(
         any_destination_failures: bool,
         context_log: Any,
         task_id: str):
+    """
+    DEPRECATED: Legacy file disposition function.
+    This function has been replaced with _handle_final_file_disposition_with_dustbin
+    for medical-grade safety. Keeping for reference but should not be used.
+    """
+    context_log.warning("DEPRECATED: Using legacy file disposition - should use dustbin service instead")
+    
     if not original_filepath or not original_filepath.exists():
         return
     if was_successful and not any_destination_failures:
@@ -595,7 +708,7 @@ def process_dicom_file_task(self,
                 d.get("status") == "error" for d in dest_statuses_res.values())
             status_for_disposition = final_status_code if 'final_status_code' in locals(
             ) else 'unknown_error_state'
-            _handle_final_file_disposition(
+            _handle_final_file_disposition_with_dustbin(
                 original_filepath=original_filepath,
                 was_successful=(
                     status_for_disposition.startswith("success") and not any_dest_failed_final),
@@ -603,7 +716,11 @@ def process_dicom_file_task(self,
                 modifications_made=modifications_made_res,
                 any_destination_failures=any_dest_failed_final,
                 context_log=log,
-                task_id=task_id)
+                task_id=task_id,
+                study_instance_uid=processed_ds_res.get('StudyInstanceUID') if processed_ds_res else None,
+                sop_instance_uid=processed_ds_res.get('SOPInstanceUID') if processed_ds_res else None,
+                destinations_confirmed=[]  # Will be populated by sender confirmations
+            )
         log.info("Task finished: process_dicom_file_task.",
                  final_task_status=final_status_code)
 
@@ -630,6 +747,11 @@ def process_dicom_association_task(self,
     and should be sent together, avoiding multiple separate associations to the PACS.
     """
     task_id = self.request.id
+    
+    # Initialize medical-grade dustbin service for file safety  
+    from app.services.dustbin_service import DustbinService
+    dustbin_service = DustbinService()
+    
     log_source_display_name = f"{source_type}_{source_db_id_or_instance_id}"
     log = logger.bind(
         task_id=task_id,
@@ -688,8 +810,8 @@ def process_dicom_association_task(self,
                     instance_uid, _ = execute_file_based_task(
                         file_log, db, filepath_str, source_type,
                         source_db_id_or_instance_id, f"{task_id}_file_{i + 1}", association_info,
-                        # NEW: Don't queue immediately, batch instead
-                        ai_portal=None, queue_immediately=False
+                        # NEW: Don't queue immediately, batch instead & defer cleanup
+                        ai_portal=None, queue_immediately=False, defer_file_cleanup=True
                     )
 
                 file_result = {
@@ -726,13 +848,16 @@ def process_dicom_association_task(self,
                         file_log.info(
                             f"Adding file to study batch: Study={study_uid}, Instance={instance_uid}")
 
-                        # Save processed file to shared volume for senders
-                        processed_dir = Path('/dicom_data/processed')
-                        processed_dir.mkdir(parents=True, exist_ok=True)
-                        processed_filepath = processed_dir / \
-                            f"{task_id}_file_{i + 1}_{instance_uid}.dcm"
-                        processed_ds.save_as(
-                            str(processed_filepath), write_like_original=False)
+                        # Save processed file using medical-grade dustbin system
+                        
+                        # Save to dustbin instead of directly to processed directory
+                        dustbin_filepath = dustbin_service.save_processed_file_to_dustbin(
+                            processed_ds=processed_ds,
+                            original_filepath=filepath_str,
+                            task_id=f"{task_id}_file_{i + 1}",
+                            instance_uid=instance_uid or "UNKNOWN_SOP_UID"
+                        )
+                        processed_filepath = Path(dustbin_filepath)
 
                         # Group by Study UID and destination for batch sending
                         for dest_name, dest_result in dest_statuses.items():
@@ -866,24 +991,61 @@ def process_dicom_association_task(self,
                  failed_files=len(failed_files),
                  overall_success=overall_success)
 
-        # Clean up files that were successfully processed
-        if settings.DELETE_ON_SUCCESS and processed_files:
-            cleanup_count = 0
+        # MEDICAL-GRADE SAFETY: Move successfully processed files to dustbin instead of immediate deletion
+        if processed_files:
+            dustbin_count = 0
             for file_info in processed_files:
                 try:
                     filepath = Path(file_info["filepath"])
                     if filepath.exists():
-                        filepath.unlink(missing_ok=True)
-                        cleanup_count += 1
-                except OSError as e:
-                    log.warning(
-                        "Failed to delete processed file from association.",
-                        filepath=file_info["filepath"],
-                        error=str(e))
+                        # Extract DICOM UIDs from file_info or file directly
+                        study_uid = file_info.get("study_instance_uid", "UNKNOWN_STUDY_UID")
+                        sop_uid = file_info.get("sop_instance_uid", "UNKNOWN_SOP_UID")
+                        destinations_confirmed = file_info.get("destinations_confirmed", [])
+                        
+                        # If UIDs not in file_info, try to read from file
+                        if study_uid == "UNKNOWN_STUDY_UID" or sop_uid == "UNKNOWN_SOP_UID":
+                            try:
+                                ds = pydicom.dcmread(str(filepath))
+                                study_uid = ds.get('StudyInstanceUID', study_uid)
+                                sop_uid = ds.get('SOPInstanceUID', sop_uid)
+                            except Exception:
+                                pass  # Keep the UNKNOWN values
+                        
+                        success = dustbin_service.move_to_dustbin(
+                            source_file_path=str(filepath),
+                            study_instance_uid=study_uid,
+                            sop_instance_uid=sop_uid,
+                            task_id=task_id,
+                            destinations_confirmed=destinations_confirmed,
+                            reason="association_processing_complete"
+                        )
+                        
+                        if success:
+                            dustbin_count += 1
+                        else:
+                            log.error(
+                                "CRITICAL: Failed to move successfully processed file to dustbin - FILE KEPT FOR SAFETY",
+                                filepath=str(filepath),
+                                study_uid=study_uid,
+                                sop_uid=sop_uid,
+                                task_id=task_id
+                            )
+                            
+                except Exception as e:
+                    log.error(
+                        "CRITICAL: Exception while moving processed file to dustbin - FILE KEPT FOR SAFETY",
+                        filepath=file_info.get("filepath", "UNKNOWN"),
+                        error=str(e),
+                        exc_info=True
+                    )
             
-            if cleanup_count > 0:
-                log.info("Cleaned up successfully processed files from association.",
-                        files_deleted=cleanup_count)
+            if dustbin_count > 0:
+                log.info(
+                    "MEDICAL SAFETY: Successfully processed files moved to dustbin for verification",
+                    files_moved_to_dustbin=dustbin_count,
+                    total_processed=len(processed_files)
+                )
 
         return {
             "status": final_status,

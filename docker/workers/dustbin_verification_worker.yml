@@ -1,21 +1,24 @@
 services:
-  pynetdicom-sender:
+  dustbin-verification-worker:
     build:
       context: .
-      dockerfile: docker/dockerfiles/Dockerfile.pynetdicom-sender
-    container_name: dicom_processor_pynetdicom_sender
+      dockerfile: docker/dockerfiles/Dockerfile.worker
+    container_name: dicom_processor_dustbin_verification
     env_file:
       - .env
     environment:
-      - RABBITMQ_HOST=rabbitmq
       - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
     depends_on:
       rabbitmq:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      db:
+         condition: service_healthy
     volumes:
-      - dicom_processed:/dicom_data/processed:ro
       - dicom_dustbin:/dicom_data/dustbin
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+    command: ["python", "-m", "app.worker.dustbin_verification_worker"]
     restart: unless-stopped
     networks:
       - default
@@ -24,5 +27,8 @@ services:
       driver: "fluentd"
       options:
         mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
         fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.pynetdicom-sender.{{.Name}}"
+        tag: "axiom.dustbin-verification.{{.Name}}"

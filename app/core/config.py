@@ -154,11 +154,19 @@ class Settings(BaseSettings):
     DICOM_ERROR_PATH: Path = Path("/dicom_data/errors")
     FILESYSTEM_STORAGE_PATH: Path = Path("/dicom_data/processed")
     DICOM_RETRY_STAGING_PATH: Path = Path("/dicom_data/retry_staging")
+    DICOM_DUSTBIN_PATH: Path = Path("/dicom_data/dustbin")  # NEW: Dustbin directory
     TEMP_DIR: Optional[Path] = None
-    DELETE_ON_SUCCESS: bool = True
+    
+    # DEPRECATED: Legacy file deletion settings (use dustbin system instead)
+    DELETE_ON_SUCCESS: bool = False  # CHANGED: Disabled immediate deletion for medical safety
     DELETE_UNMATCHED_FILES: bool = False
     DELETE_ON_NO_DESTINATION: bool = False
     DELETE_ON_PARTIAL_FAILURE_IF_MODIFIED: bool = False # <-- ADD THIS LINE (defaulting to False)
+    
+    # NEW: Medical-grade dustbin system settings
+    USE_DUSTBIN_SYSTEM: bool = True  # Enable medical-grade file safety
+    DUSTBIN_RETENTION_DAYS: int = 30  # How long to keep files in dustbin
+    DUSTBIN_VERIFICATION_TIMEOUT_HOURS: int = 24  # Max time to wait for destination confirmations
 
     MOVE_TO_ERROR_ON_PARTIAL_FAILURE: bool = True
 

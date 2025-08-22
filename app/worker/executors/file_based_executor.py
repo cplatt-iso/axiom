@@ -43,7 +43,8 @@ def execute_file_based_task(
     task_id: str,
     association_info: Optional[Dict[str, str]] = None,
     ai_portal: Optional['anyio.abc.BlockingPortal'] = None,
-    queue_immediately: bool = True  # NEW: Control whether to queue jobs immediately or return data for batching
+    queue_immediately: bool = True,  # NEW: Control whether to queue jobs immediately or return data for batching
+    defer_file_cleanup: bool = False  # NEW: Don't clean up files immediately (for association processing)
 ) -> Tuple[bool, bool, str, str, List[str], Dict[str, Dict[str, Any]], Optional[pydicom.Dataset], Optional[str], str]:
     original_filepath = Path(dicom_filepath_str)
     instance_uid = "UnknownSOPInstanceUID_FileTaskExec"
@@ -156,6 +157,8 @@ def execute_file_based_task(
                     if not batch:
                         batch = crud.crud_exam_batch.crud_exam_batch.create(db_session, obj_in=ExamBatchCreate(study_instance_uid=study_uid, destination_id=dest_id))
 
+                    # MEDICAL-GRADE SAFETY: Use dustbin system instead of processed directory
+                    # Still use processed directory temporarily for backward compatibility with senders
                     processed_dir = Path('/dicom_data/processed')
                     processed_dir.mkdir(parents=True, exist_ok=True)
                     processed_filepath = processed_dir / f"{task_id}_{instance_uid_for_filename}.dcm"
