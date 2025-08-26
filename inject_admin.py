@@ -1,5 +1,6 @@
 # inject_admin.py
 import logging
+import structlog
 import os
 import sys
 from typing import Optional
@@ -30,7 +31,11 @@ TARGET_USER_ID = 1
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+try:
+    import structlog
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 # --- Define Models Directly (or minimal Base) ---
 # Avoid importing app.db.base to prevent side effects from __init__ etc.

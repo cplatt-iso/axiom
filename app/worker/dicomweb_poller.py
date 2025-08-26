@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 
+import structlog
 from sqlalchemy.orm import Session
 from celery import shared_task
 
@@ -16,7 +17,7 @@ from app.worker.tasks import process_dicomweb_metadata_task
 
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 @shared_task(name="poll_all_dicomweb_sources")
 def poll_all_dicomweb_sources() -> Dict[str, Any]:

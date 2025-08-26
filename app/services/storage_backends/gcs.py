@@ -1,6 +1,7 @@
 # app/services/storage_backends/gcs.py
 
 import logging
+import structlog
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,7 +19,7 @@ except ImportError:
 
 from .base_backend import BaseStorageBackend, StorageBackendError
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class GcsStorage(BaseStorageBackend):
 

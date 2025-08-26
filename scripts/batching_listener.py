@@ -18,7 +18,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.db.session import SessionLocal
 from app.crud import crud_dimse_listener_state, crud_dimse_listener_config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [AssociationBatcher] - %(message)s')
+# Configure JSON logging - always use structured logging for ELK stack
+from app.core.logging_config import configure_json_logging
+logger = configure_json_logging("dcm4che_batching_listener")
 
 DICOM_DIR = "/dicom_data/incoming"
 PROCESS_ASSOCIATION_SCRIPT = "/app/scripts/process_association.py"
@@ -47,11 +49,11 @@ class HeartbeatManager:
             config = crud_dimse_listener_config.get_by_instance_id(db=db, instance_id=self.listener_id)
             if config:
                 self.listener_config = config
-                logging.info(f"Loaded config for listener '{config.name}' (AE: {config.ae_title})")
+                logger.info(f"Loaded config for listener '{config.name}' (AE: {config.ae_title})")
             else:
-                logging.error(f"No config found for listener instance: {self.listener_id}")
+                logger.error(f"No config found for listener instance: {self.listener_id}")
         except Exception as e:
-            logging.error(f"Failed to load listener config: {e}")
+            logger.error(f"Failed to load listener config: {e}")
         finally:
             if db:
                 db.close()
@@ -72,7 +74,7 @@ class HeartbeatManager:
             )
             db.commit()
         except Exception as e:
-            logging.error(f"Failed to update status: {e}")
+            logger.error(f"Failed to update status: {e}")
             if db:
                 db.rollback()
         finally:
@@ -86,9 +88,9 @@ class HeartbeatManager:
             db = SessionLocal()
             crud_dimse_listener_state.update_listener_heartbeat(db=db, listener_id=self.listener_id)
             db.commit()
-            logging.debug("Heartbeat sent successfully")
+            logger.debug("Heartbeat sent successfully")
         except Exception as e:
-            logging.error(f"Failed to send heartbeat: {e}")
+            logger.error(f"Failed to send heartbeat: {e}")
             if db:
                 db.rollback()
         finally:
@@ -97,13 +99,13 @@ class HeartbeatManager:
     
     def _heartbeat_loop(self):
         """Main heartbeat loop running in background thread."""
-        logging.info(f"Starting heartbeat loop (interval: {HEARTBEAT_INTERVAL}s)")
+        logger.info(f"Starting heartbeat loop (interval: {HEARTBEAT_INTERVAL}s)")
         while self.running:
             try:
                 self._send_heartbeat()
                 self.last_heartbeat = time.time()
             except Exception as e:
-                logging.error(f"Error in heartbeat loop: {e}")
+                logger.error(f"Error in heartbeat loop: {e}")
             
             # Sleep in small intervals to allow for quick shutdown
             for _ in range(HEARTBEAT_INTERVAL * 10):  # 0.1s intervals
@@ -119,11 +121,11 @@ class HeartbeatManager:
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
         self._update_status("running", "DCM4CHE listener active and monitoring")
-        logging.info("Heartbeat manager started")
+        logger.info("Heartbeat manager started")
     
     def stop(self):
         """Stop the heartbeat manager."""
-        logging.info("Stopping heartbeat manager")
+        logger.info("Stopping heartbeat manager")
         self.running = False
         if self.heartbeat_thread and self.heartbeat_thread.is_alive():
             self.heartbeat_thread.join(timeout=2.0)
@@ -133,10 +135,10 @@ def process_study_directory(study_path: Path, listener_id: str):
     """Processes all DICOM files in a given study directory."""
     files_to_process = [str(f) for f in study_path.glob('*.dcm')]
     if not files_to_process:
-        logging.warning(f"Study directory {study_path} is empty, skipping.")
+        logger.warning(f"Study directory {study_path} is empty, skipping.")
         return
 
-    logging.info(f"Processing {len(files_to_process)} files from {study_path}...")
+    logger.info(f"Processing {len(files_to_process)} files from {study_path}...")
     db = None
     try:
         # Construct the command to run the processing script
@@ -145,8 +147,8 @@ def process_study_directory(study_path: Path, listener_id: str):
         # Execute the script
         result = subprocess.run(command, check=True, capture_output=True, text=True)
         
-        logging.info(f"Successfully processed batch for {study_path}.")
-        logging.debug(f"Processing script output:\n{result.stdout}")
+        logger.info(f"Successfully processed batch for {study_path}.")
+        logger.debug(f"Processing script output:\n{result.stdout}")
 
         # Update processed count in the database
         try:
@@ -154,23 +156,23 @@ def process_study_directory(study_path: Path, listener_id: str):
             crud_dimse_listener_state.increment_processed_count(db=db, listener_id=listener_id, count=len(files_to_process))
             db.commit()
         except Exception as e:
-            logging.error(f"Failed to update processed count for {study_path}: {e}")
+            logger.error(f"Failed to update processed count for {study_path}: {e}")
             if db: db.rollback()
         
         # MEDICAL-GRADE SAFETY: DO NOT delete the directory - let association task handle it
         # The association task with dustbin system will properly process and safely dispose of files
         # import shutil
         # shutil.rmtree(study_path)
-        logging.info(f"Batching complete for {study_path} - files left for association task processing")
+        logger.info(f"Batching complete for {study_path} - files left for association task processing")
 
     except subprocess.CalledProcessError as e:
-        logging.error(f"Error processing {study_path}: {e.stderr}")
+        logger.error(f"Error processing {study_path}: {e.stderr}")
         # Note: Failed count tracking not yet implemented in DimseListenerState
         # For now, we just log the failure without updating database counts
-        logging.warning(f"Failed to process {len(files_to_process)} files from {study_path}")
+        logger.warning(f"Failed to process {len(files_to_process)} files from {study_path}")
 
     except Exception as e:
-        logging.error(f"An unexpected error occurred during processing of {study_path}: {e}")
+        logger.error(f"An unexpected error occurred during processing of {study_path}: {e}")
     finally:
         if db:
             db.close()
@@ -182,7 +184,7 @@ def watch_directories(listener_id: str):
     Directory structure: /dicom_data/incoming/{StudyDate}/{StudyInstanceUID}/files.dcm
     """
     active_studies = {}  # {study_path: last_modified_time}
-    logging.info(f"Starting to watch for new study directories in {DICOM_DIR}")
+    logger.info(f"Starting to watch for new study directories in {DICOM_DIR}")
     db = None
 
     while True:
@@ -207,13 +209,13 @@ def watch_directories(listener_id: str):
                             active_studies[study_dir] = now
 
         except Exception as e:
-            logging.error(f"Error scanning for new files: {e}")
+            logger.error(f"Error scanning for new files: {e}")
 
         # Process timed-out studies
         processed_studies = []
         for study_path, last_seen_time in active_studies.items():
             if now - last_seen_time > STUDY_INACTIVITY_TIMEOUT:
-                logging.info(f"Study '{study_path.name}' from date '{study_path.parent.name}' is complete (inactivity timeout).")
+                logger.info(f"Study '{study_path.name}' from date '{study_path.parent.name}' is complete (inactivity timeout).")
                 process_study_directory(study_path, listener_id)
                 processed_studies.append(study_path)
 
@@ -221,7 +223,7 @@ def watch_directories(listener_id: str):
         if processed_studies:
             active_studies = {k: v for k, v in active_studies.items() if k not in processed_studies}
             if active_studies:
-                logging.info(f"Remaining active studies to track: {len(active_studies)}")
+                logger.info(f"Remaining active studies to track: {len(active_studies)}")
 
         time.sleep(SCAN_INTERVAL)
 
@@ -244,17 +246,17 @@ def main():
             watch_directories(LISTENER_INSTANCE_ID)
         else:
             # Fallback to old logic if needed, or just error out.
-            logging.error("This script is now intended to be run with the --watch-dirs flag.")
+            logger.error("This script is now intended to be run with the --watch-dirs flag.")
             # old_main_loop(LISTENER_INSTANCE_ID) # Or whatever the old main loop was called
             sys.exit(1)
 
     except KeyboardInterrupt:
-        logging.info("Shutdown signal received.")
+        logger.info("Shutdown signal received.")
     except Exception as e:
-        logging.critical(f"A critical error occurred in the main loop: {e}", exc_info=True)
+        logger.critical(f"A critical error occurred in the main loop: {e}", exc_info=True)
     finally:
         heartbeat_manager.stop()
-        logging.info("Listener has been shut down.")
+        logger.info("Listener has been shut down.")
 
 if __name__ == "__main__":
     main()

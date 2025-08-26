@@ -1,6 +1,7 @@
 # app/services/spanner_engine.py
 import asyncio
 import logging
+import structlog
 import time
 import json
 import uuid
@@ -26,7 +27,7 @@ from app.services.data_browser_service import (
 )
 from app.schemas.spanner import QueryStatus, FailureStrategy, DeduplicationStrategy
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class SpannerQueryResult:

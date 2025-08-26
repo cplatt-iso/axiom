@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+import structlog
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -10,7 +11,7 @@ from app.db import models
 from app.api import deps
 from app.services.dimse.cmove_proxy import CMoveProxyService, CMoveRequest, CMoveStrategy
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # This would be injected from your application context

@@ -25,8 +25,12 @@ from app.db.session import SessionLocal
 from app import crud
 from app.crud.crud_spanner import crud_spanner_config, crud_spanner_source_mapping
 from app.schemas.spanner import QueryStatus, FailureStrategy, DeduplicationStrategy
+from app.core.logging_config import configure_json_logging
+import structlog
 
-logger = logging.getLogger(__name__)
+# Configure JSON logging for enterprise service
+configure_json_logging("spanner_coordinator")
+logger = structlog.get_logger(__name__)
 
 app = FastAPI(title="Spanner Coordinator", version="1.0.0")
 

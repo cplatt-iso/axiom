@@ -1,105 +1,39 @@
 # app/worker/celery_app.py
 from datetime import timedelta
 import logging
-import logging.config  # Use the config submodule
 import sys
 import traceback
 import structlog
 from celery import Celery, signals
 from celery.schedules import crontab
 from app.core.config import settings
+from app.core.logging_config import configure_celery_logging
 
 # ---------------------------------------------------------------------------
-# --- THE NEW, SIMPLER, AND MORE BRUTAL LOGGING SETUP ---
+# --- FORCE LOGGING SETUP ON IMPORT ---
 # ---------------------------------------------------------------------------
 
-# This is the one signal to rule them all. It runs when the worker process
-# initializes, BEFORE Celery can set up its own shitty loggers. This is our
-# chance to take control of the entire process's logging config.
+# Force configure logging when this module is imported
+# This ensures it happens regardless of signal timing
+try:
+    configure_celery_logging()
+    # Also configure general JSON logging for beat scheduler and other logs
+    from app.core.logging_config import configure_json_logging
+    configure_json_logging("celery")
+    logger = structlog.get_logger(__name__)
+    logger.info("Celery JSON logging configured on import", log_level=str(settings.LOG_LEVEL))
+except Exception as e:
+    print(f"ERROR: Failed to configure logging on import: {e}")
+
+# Disable Celery's automatic logging configuration to prevent conflicts
 @signals.setup_logging.connect
-def setup_celery_logging(loglevel=settings.LOG_LEVEL, **kwargs):
+def setup_celery_logging(**kwargs):
     """
-    This function is connected to the 'setup_logging' signal from Celery.
-    It completely replaces Celery's default logging configuration with our
-    own structlog-based JSON configuration. This ensures that ALL logs
-    (from Celery, kombu, our tasks, etc.) are emitted as structured JSON.
+    Celery setup_logging signal handler.
+    We disable this to prevent conflicts with our logging configuration.
     """
-    # A standard Python logging configuration dictionary.
-    # This is the modern, correct way to configure logging.
-    logging_config = {
-        "version": 1,
-        "disable_existing_loggers": False,  # Let us override existing loggers
-        "formatters": {
-            # The structlog formatter that will handle rendering to JSON.
-            "json_formatter": {
-                "()": "structlog.stdlib.ProcessorFormatter",
-                "processor": structlog.processors.JSONRenderer(),
-                # These processors will be applied to logs from non-structlog libraries (like celery itself)
-                "foreign_pre_chain": [
-                    structlog.stdlib.add_logger_name,
-                    structlog.stdlib.add_log_level,
-                    structlog.processors.TimeStamper(fmt="iso"),
-                ],
-            },
-        },
-        "handlers": {
-            # All logs will go to the console (stdout) through this handler.
-            "console": {
-                "class": "logging.StreamHandler",
-                "formatter": "json_formatter",
-            },
-        },
-        "loggers": {
-            # The root logger: all logs start here.
-            # We configure it to use our console handler.
-            "": {
-                "handlers": ["console"],
-                "level": loglevel.upper(),
-                "propagate": True,
-            },
-            # We can quiet down noisy libraries here.
-            "celery": {
-                "level": "INFO",
-                "propagate": False, # Do not pass celery logs to the root logger, handle them here.
-                "handlers": ["console"],
-            },
-            "celery.app.trace": {
-                # THIS IS THE KEY: We are grabbing Celery's annoying task trace logger...
-                "level": "INFO",
-                "propagate": False,
-                # ...AND SENDING ITS OUTPUT TO DEV/NULL by giving it no handlers.
-                # Your custom 'task_postrun' signal handler is the correct way
-                # to log task outcomes, so we silence the default one completely.
-                "handlers": [],
-            },
-            "kombu": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-            "amqp": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-        },
-    }
-
-    # Apply the configuration.
-    logging.config.dictConfig(logging_config)
-
-    # Now, configure structlog itself to process logs before they hit the handler.
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            # This must be the last processor in the chain.
-            structlog.stdlib.render_to_log_kwargs,
-        ],
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
-    structlog.get_logger(__name__).info("Structlog JSON logging configured for Celery Worker.", log_level=loglevel)
+    # Do nothing - our logging is already configured
+    pass
 
 
 # Your custom task outcome logger is excellent. Keep it exactly as it is.

@@ -1,5 +1,6 @@
 # app/api/deps.py
 import logging
+import structlog
 from typing import Generator, Optional, Any
 
 from fastapi import Depends, HTTPException, status, Request
@@ -15,7 +16,7 @@ from app.core import security
 from app.core.config import settings
 from app.db.session import SessionLocal
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # OAuth2 Password Bearer flow configuration for JWT tokens.
 # tokenUrl should point to the endpoint that issues tokens (used for OpenAPI docs).

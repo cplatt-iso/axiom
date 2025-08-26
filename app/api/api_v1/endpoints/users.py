@@ -3,13 +3,14 @@ import logging
 from typing import List, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
+import structlog
 from sqlalchemy.orm import Session
 
 from app.db import models
 from app.api import deps
 from app import crud, schemas
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 @router.get(

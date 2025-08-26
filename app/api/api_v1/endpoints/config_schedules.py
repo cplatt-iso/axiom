@@ -3,13 +3,14 @@ import logging
 from typing import List, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+import structlog
 from sqlalchemy.orm import Session
 
 from app import crud, schemas # Import top-level packages
 from app.db import models # Import DB models
 from app.api import deps # Import API dependencies
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # --- Dependency to get schedule config by ID ---

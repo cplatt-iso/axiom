@@ -1,13 +1,14 @@
 # app/api/api_v1/endpoints/ai_assist.py
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
+import structlog
 
 from app import schemas
 from app.api import deps
 from app.services import ai_assist_service # Import the new service
 from app.core.config import settings # Import settings to check API key
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 @router.post(

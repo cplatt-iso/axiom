@@ -17,10 +17,11 @@ from app.db.models.storage_backend_config import (
     StowRsBackendConfig,
     #ALLOWED_BACKEND_TYPES # Might be useful
 )
+import structlog
 # Import the specific Pydantic Read/Create/Update schemas
 from app.schemas import storage_backend_config as schemas_storage # Use alias
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # --- Mapping from backend_type string to Model Class ---
 # This helps in creating the correct SQLAlchemy model instance

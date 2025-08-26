@@ -13,6 +13,7 @@ from aio_pika.abc import AbstractRobustConnection
 
 # Core Application Imports
 from app.core.config import settings # Needs LOG_LEVEL setting
+from app.core.logging_config import configure_json_logging
 from app.db.session import get_db, engine, SessionLocal, try_connect_db # Import necessary DB components
 from app.api import deps # For dependency injection, e.g., getting current user
 from app import schemas # Import Pydantic schemas
@@ -25,72 +26,8 @@ rabbitmq_connection: Optional[AbstractRobustConnection] = None
 sse_consumer_task: Optional[asyncio.Task] = None
 
 # --- Configure logging ---
-# Clear existing handlers from the root logger
-# to prevent duplicate logs when uvicorn/FastAPI initializes its own handlers
-logging.basicConfig(handlers=[logging.NullHandler()]) # <-- CHANGED: Prevent basicConfig output
-
-# Determine log level from settings or default
-log_level_str = getattr(settings, 'LOG_LEVEL', "INFO").upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
-
-def configure_logging():
-    """Configures logging using structlog to output JSON."""
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
-            structlog.processors.TimeStamper(fmt="iso"), # ISO 8601 timestamp
-            structlog.processors.format_exc_info, # Render exception info if present
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
-
-    formatter = structlog.stdlib.ProcessorFormatter(
-        # Processor to render logs as JSON
-        processor=structlog.processors.JSONRenderer(),
-        # foreign_pre_chain: Process logs from other libraries (optional but good)
-        # Order matters: Add level/name, timestamp, then render
-        foreign_pre_chain=[
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
-            structlog.processors.TimeStamper(fmt="iso"),
-        ],
-    )
-
-    # Get the root logger and remove existing handlers
-    # This helps prevent duplicate outputs, especially when using --reload
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-
-    # Add a new handler to output logs to stdout using our JSON formatter
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-    root_logger.addHandler(handler)
-
-    # Set the overall logging level for the root logger
-    root_logger.setLevel(log_level)
-
-    # Optionally silence overly verbose libraries
-    # logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-    # logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-
-    # Get a logger for this module AFTER configuration
-    logger = structlog.get_logger(__name__)
-    logger.info(
-        "Structlog logging configured for FastAPI",
-        log_level=log_level_str,
-        config_source=f"settings.LOG_LEVEL={settings.LOG_LEVEL}" if hasattr(settings, 'LOG_LEVEL') else "Default=INFO"
-    )
-    return logger # Return the configured logger instance
-
-# Call configure_logging() immediately to set up logging system-wide
-# and get the logger instance for this module
-logger = configure_logging()
+configure_json_logging("api")
+logger = structlog.get_logger(__name__)
 
 
 # --- Database Table Creation Function ---
@@ -372,7 +309,7 @@ if __name__ == "__main__":
     import uvicorn
     dev_port = getattr(settings, 'DEV_SERVER_PORT', 8000)
     # Use the globally configured log_level
-    log_level_cli = log_level_str.lower()
+    log_level_cli = settings.LOG_LEVEL.lower() if hasattr(settings, 'LOG_LEVEL') else 'info'
 
     logger.info(f"Starting Uvicorn server directly (for local dev)...", host="0.0.0.0", port=dev_port, log_level=log_level_cli)
     uvicorn.run(

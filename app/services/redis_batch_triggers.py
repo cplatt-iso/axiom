@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Set
 from datetime import datetime, timezone
 import asyncio
 import threading
+import signal
+import sys
 
 import structlog
 from app.core.config import settings
@@ -90,14 +92,24 @@ class RedisBatchTrigger:
         if not self._listening:
             return
         
+        logger.info("Stopping Redis batch trigger listener...")
         self._listening = False
+        
+        # Close the subscriber to interrupt the listen loop
         if self._subscriber:
-            self._subscriber.close()
+            try:
+                self._subscriber.close()
+            except Exception as e:
+                logger.debug("Error closing Redis subscriber", error=str(e))
         
+        # Wait for the thread to finish
         if self._listen_thread and self._listen_thread.is_alive():
+            logger.debug("Waiting for listener thread to stop...")
             self._listen_thread.join(timeout=5.0)
+            if self._listen_thread.is_alive():
+                logger.warning("Listener thread did not stop within timeout")
         
-        logger.info("Stopped Redis batch trigger listener")
+        logger.info("Redis batch trigger listener stopped")
     
     def _listen_worker(self, callback_func):
         """Background worker that listens for Redis messages."""
@@ -108,7 +120,9 @@ class RedisBatchTrigger:
             logger.info("Redis batch trigger listener started")
             
             for message in self._subscriber.listen():
+                # Check if we should stop listening
                 if not self._listening:
+                    logger.info("Redis batch trigger listener stopping (listening=False)")
                     break
                 
                 if message['type'] != 'message':
@@ -136,13 +150,51 @@ class RedisBatchTrigger:
                         exc_info=True
                     )
                     
+        except redis.ConnectionError as conn_error:
+            # Handle Redis connection errors during shutdown gracefully
+            if self._listening:
+                logger.error(
+                    "Redis connection error in batch trigger listener",
+                    error=str(conn_error),
+                    exc_info=True
+                )
+            else:
+                logger.info("Redis connection closed during shutdown")
+        except ValueError as val_error:
+            # Handle "I/O operation on closed file" and similar errors
+            if "closed file" in str(val_error) or "closed socket" in str(val_error):
+                if self._listening:
+                    logger.warning(
+                        "Redis connection closed unexpectedly",
+                        error=str(val_error)
+                    )
+                else:
+                    logger.info("Redis connection closed during shutdown")
+            else:
+                logger.error(
+                    "Value error in batch trigger listener", 
+                    error=str(val_error),
+                    exc_info=True
+                )
         except Exception as e:
             logger.error("Redis batch trigger listener error", error=str(e), exc_info=True)
         finally:
             if self._subscriber:
-                self._subscriber.close()
+                try:
+                    self._subscriber.close()
+                except Exception as close_error:
+                    logger.debug("Error closing subscriber", error=str(close_error))
             logger.info("Redis batch trigger listener stopped")
 
 
 # Global instance
 redis_batch_trigger = RedisBatchTrigger()
+
+def _shutdown_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    logger.info(f"Received signal {signum}, shutting down Redis batch trigger...")
+    redis_batch_trigger.stop_listening()
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGTERM, _shutdown_handler)
+signal.signal(signal.SIGINT, _shutdown_handler)

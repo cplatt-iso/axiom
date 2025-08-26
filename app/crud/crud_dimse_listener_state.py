@@ -3,6 +3,7 @@ import logging
 from typing import Optional, List, Any
 from datetime import datetime, timezone
 
+import structlog
 from sqlalchemy.orm import Session
 # Correct Imports
 from sqlalchemy import select, update as sql_update, func
@@ -10,7 +11,7 @@ from sqlalchemy import select, update as sql_update, func
 
 from app.db import models
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class CRUDDimseListenerState:
     """

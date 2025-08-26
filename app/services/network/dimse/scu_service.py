@@ -68,7 +68,7 @@ try:
     STRUCTLOG_AVAILABLE = True
 except ImportError:
     import logging # Fallback if structlog isn't there
-    logger = logging.getLogger(__name__)  # type: ignore
+    logger = structlog.get_logger(__name__)  # type: ignore
     STRUCTLOG_AVAILABLE = False
 
 

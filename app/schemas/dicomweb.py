@@ -1,11 +1,12 @@
 # app/schemas/dicomweb.py
 from typing import List, Optional, Dict, Any, Literal
+import structlog
 # Pydantic v2 specific imports if needed, assuming v2 features are used
 from pydantic import BaseModel, Field, HttpUrl, validator, root_validator, field_validator, model_validator # Added field_validator, model_validator
 from datetime import datetime
 import logging
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Based on PS3.18 Table 10.6.1-3. Attributes for Referenced SOP Sequence Item Macro
 class ReferencedSOP(BaseModel):

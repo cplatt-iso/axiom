@@ -11,6 +11,7 @@ import sys
 import os
 import signal
 import logging
+import structlog
 import time
 from pathlib import Path
 
@@ -30,7 +31,11 @@ logging.basicConfig(
     ]
 )
 
-logger = logging.getLogger(__name__)
+try:
+    import structlog
+    logger = structlog.get_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 # Global service manager
 service_manager = None

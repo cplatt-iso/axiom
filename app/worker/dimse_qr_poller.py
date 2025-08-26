@@ -38,7 +38,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging
-    logger = logging.getLogger(__name__)
+    logger = structlog.get_logger(__name__)
     logger.warning("structlog not found, using standard logging. Bind method will not work.")
 
 

@@ -1,6 +1,7 @@
 # app/services/storage_backends/filesystem.py
 
 import logging
+import structlog
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -9,7 +10,7 @@ from pydicom.dataset import Dataset
 
 from .base_backend import BaseStorageBackend, StorageBackendError
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class FilesystemStorage(BaseStorageBackend):
     """Stores DICOM files to a local filesystem directory."""

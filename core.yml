@@ -5,10 +5,29 @@ services:
     container_name: dicom_processor_db
     volumes:
       - postgres_data:/var/lib/postgresql/data/
+      - ./scripts/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-dicom_processor_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: ${POSTGRES_DB:-dicom_processor_db}
+      # Configure PostgreSQL for JSON logging
+      POSTGRES_INITDB_ARGS: --data-checksums
+    command:
+      - postgres
+      - -c
+      - log_destination=stderr
+      - -c
+      - log_min_duration_statement=5000
+      - -c
+      - log_checkpoints=on
+      - -c
+      - log_connections=off
+      - -c
+      - log_disconnections=off
+      - -c
+      - log_lock_waits=on
+      - -c
+      - logging_collector=off
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:

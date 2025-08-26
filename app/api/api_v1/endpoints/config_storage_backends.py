@@ -1,15 +1,15 @@
 # app/api/api_v1/endpoints/config_storage_backends.py
 import logging
-from typing import List, Any
-
+from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
+import structlog
 
 from app import crud, schemas
 from app.db import models
 from app.api import deps
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 

@@ -3,6 +3,7 @@ from typing import Any, List, Optional, Dict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+import structlog
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -146,7 +147,7 @@ async def test_google_healthcare_connection(
         )
     
     import logging
-    logger = logging.getLogger(__name__)
+    logger = structlog.get_logger(__name__)
     logger.info(f"User {current_user.email} testing connection for Google Healthcare source ID {id} (project: '{db_source.gcp_project_id}', dataset: '{db_source.gcp_dataset_id}').")
     
     try:

@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime
 
+import structlog
 from sqlalchemy.orm import Session
 # Ensure correct imports: select, sql_update
 from sqlalchemy import select, update as sql_update
@@ -13,7 +14,7 @@ from fastapi import HTTPException, status
 from app.db import models
 from app.schemas import dimse_qr_source as schemas_dimse_qr
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class CRUDDimseQueryRetrieveSource:
     """

@@ -1,5 +1,6 @@
 # app/crud/crud_api_key.py
 import logging
+import structlog
 from typing import List, Optional
 from datetime import datetime, timezone
 
@@ -10,7 +11,7 @@ from app.db import models # Use models from app.db
 from app.schemas import api_key as schemas_api_key # Use specific alias
 from app.core.security import generate_api_key_string, get_api_key_hash, verify_api_key
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 def create_api_key(db: Session, *, obj_in: schemas_api_key.ApiKeyCreate, user_id: int) -> tuple[models.ApiKey, str]:
     """

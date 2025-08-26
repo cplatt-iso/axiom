@@ -1,5 +1,6 @@
 # app/crud/crud_modality.py
 import logging
+import structlog
 from typing import List, Optional
 from datetime import datetime
 
@@ -9,7 +10,7 @@ from sqlalchemy import select, update as sql_update, and_
 from app.db import models
 from app.schemas import modality as schemas_modality
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 def create(db: Session, *, obj_in: schemas_modality.ModalityCreate) -> models.Modality:
     """Create a new modality."""

@@ -47,7 +47,6 @@ from app.schemas.system import (
     SystemInfo
 )
 
-logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Constants

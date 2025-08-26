@@ -363,11 +363,10 @@ class DustbinVerificationWorker:
 
 
 if __name__ == "__main__":
-    # Configure basic logging for standalone execution
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Configure JSON logging for standalone execution using centralized config
+    from app.core.logging_config import configure_json_logging
+    
+    configure_json_logging("dustbin_verification_worker")
     
     worker = DustbinVerificationWorker()
     worker.start_consuming()

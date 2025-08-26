@@ -3,12 +3,13 @@ from typing import List, Optional
 from sqlalchemy.orm import Session, SessionTransaction, joinedload # Import SessionTransaction
 from sqlalchemy import select
 import logging # Import logging
+import structlog
 
 from app.db.models.user import User, Role
 from app.schemas.user import UserCreate, UserUpdate
 from app.core.security import get_password_hash
 
-logger = logging.getLogger(__name__) # Setup logger for this module
+logger = structlog.get_logger(__name__) # Setup logger for this module
 
 
 def get_user_by_email(db: Session, *, email: str) -> User | None:

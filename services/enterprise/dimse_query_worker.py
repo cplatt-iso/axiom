@@ -31,9 +31,13 @@ from app.services.data_browser_service import (
     RemoteQueryError
 )
 from app.core import gcp_utils
+from app.core.logging_config import configure_json_logging
 from app.services.network.dimse.scu_service import TlsConfigError
+import structlog
 
-logger = logging.getLogger(__name__)
+# Configure JSON logging for enterprise service
+configure_json_logging("dimse_query_worker")
+logger = structlog.get_logger(__name__)
 
 # Disable pynetdicom debug logging in production
 pynet_logger = logging.getLogger('pynetdicom')

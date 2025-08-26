@@ -13,6 +13,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import pydicom
 from pydicom.errors import InvalidDicomError
 from fastapi import APIRouter, Depends, Request, HTTPException, status, Response
+import structlog
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -23,7 +24,7 @@ from app.worker.tasks import process_stow_instance_task
 from app.schemas.dicomweb import STOWResponse, ReferencedSOP, FailedSOP, FailureReasonCode
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 

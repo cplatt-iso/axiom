@@ -3,6 +3,7 @@ from typing import Any, List, Optional
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+import structlog
 from sqlalchemy.orm import Session
 
 from app.api import deps
@@ -15,7 +16,7 @@ from app.schemas.facility import (
     Facility, FacilityCreate, FacilityUpdate, FacilityModalityInfo
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 

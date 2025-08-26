@@ -1,5 +1,6 @@
 # app/crosswalk/tasks.py
 import logging
+import structlog
 import time
 from celery import shared_task
 from sqlalchemy.sql import func, text
@@ -10,7 +11,7 @@ from app.db import models
 from app.crud import crud_crosswalk_data_source
 from app.crosswalk import service as crosswalk_service
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 SYNC_CHUNK_SIZE = 10000
 PERFORM_PREWARMING_SYNC = True

@@ -1,5 +1,6 @@
 # app/crud/crud_processed_study_log.py
 import logging
+import structlog
 from datetime import datetime, timezone
 from typing import Optional, List # ADDED List
 
@@ -10,7 +11,7 @@ from sqlalchemy import select, exists
 from app.db.models import ProcessedStudyLog
 from app.schemas.enums import ProcessedStudySourceType
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class CRUDProcessedStudyLog:
     """

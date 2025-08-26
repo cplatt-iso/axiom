@@ -1,6 +1,7 @@
 # app/crud/crud_dicomweb_source.py
 from typing import Any, Dict, List, Optional, Union
 
+import structlog
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from fastapi import HTTPException, status
@@ -9,7 +10,7 @@ import logging
 from app.db import models
 from app.schemas import dicomweb as dicomweb_schemas # Import the dicomweb schemas module
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class DicomWebSourceCRUD:
     """

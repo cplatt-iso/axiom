@@ -28,6 +28,7 @@ from sqlalchemy import select, update as sql_update, func
 
 # Application imports
 from app.core.config import settings
+from app.core.logging_config import configure_json_logging
 from app.services.network.dimse.handlers import handle_store, handle_echo, handle_c_find, handle_n_create, handle_n_set, set_current_listener_context
 from app.db.session import SessionLocal, Session
 from app.crud import crud_dimse_listener_state, crud_dimse_listener_config
@@ -66,50 +67,9 @@ except ImportError as import_err:
     gcp_utils = _DummyGcpUtils()
 
 
-# --- Logging Setup with Structlog (Keep Existing) ---
-# Determine log level from settings first
-log_level_str = getattr(settings, 'LOG_LEVEL', "INFO").upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
-
-def configure_logging():
-    """Configures logging using structlog, adding a JSON handler to the root logger."""
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.format_exc_info,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
-    formatter = structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer(),
-    )
-    root_logger = logging.getLogger()
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-    root_logger.addHandler(handler)
-    root_logger.setLevel(log_level)
-    pynetdicom_logger = logging.getLogger('pynetdicom')
-    pynetdicom_log_level = logging.INFO if settings.DEBUG else logging.WARNING
-    pynetdicom_logger.setLevel(pynetdicom_log_level)
-    pynetdicom_logger.propagate = True
-    logger_instance = structlog.get_logger("dicom_listener")
-    logger_instance.info(
-        "Structlog logging configured for DICOM Listener",
-        configured_log_level=log_level_str,
-        pynetdicom_level=logging.getLevelName(pynetdicom_log_level)
-    )
-    return logger_instance
-
+# --- Logging Setup with Centralized Configuration ---
 try:
-    logger = configure_logging()
+    logger = configure_json_logging("dicom_listener")
 except Exception as log_config_error:
      logging.basicConfig(level=logging.ERROR)
      logging.getLogger("dicom_listener_startup").critical(

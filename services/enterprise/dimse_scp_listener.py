@@ -24,8 +24,12 @@ from pynetdicom.sop_class import (
     PatientRootQueryRetrieveInformationModelMove  # type: ignore[attr-defined]
 )
 from pydicom import Dataset
+from app.core.logging_config import configure_json_logging
+import structlog
 
-logger = logging.getLogger(__name__)
+# Configure JSON logging for enterprise service
+configure_json_logging("dimse_scp_listener")
+logger = structlog.get_logger(__name__)
 
 # Disable pynetdicom debug logging
 pynet_logger = logging.getLogger('pynetdicom')

@@ -1,5 +1,6 @@
 # app/crosswalk/service.py
 import logging
+import structlog
 from typing import Optional, List, Dict, Any, Tuple, cast # Import cast
 import redis
 import json as pyjson # Use standard json library
@@ -11,7 +12,7 @@ from pydantic import SecretStr
 from app.db import models
 from app.core.config import settings # Import settings for Redis URL
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # --- Redis Connection ---
 try:

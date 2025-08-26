@@ -1,6 +1,7 @@
 # app/services/dicomweb_client.py
 
 import logging
+import structlog
 import json
 from typing import List, Dict, Optional, Any, Tuple
 from urllib.parse import urljoin, urlencode
@@ -14,7 +15,7 @@ from requests.auth import HTTPBasicAuth, AuthBase # MODIFIED: Added AuthBase her
 from app.db.models import DicomWebSourceState
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class DicomWebClientError(Exception):
     """Custom exception for DICOMweb client errors."""

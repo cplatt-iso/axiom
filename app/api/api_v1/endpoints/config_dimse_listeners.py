@@ -1,15 +1,15 @@
 # app/api/api_v1/endpoints/config_dimse_listeners.py
 import logging
-from typing import List, Any
-
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
+import structlog
 
-from app import crud, schemas # Import top-level packages
-from app.db import models # Import DB models
-from app.api import deps # Import API dependencies (like get_db, get_current_active_user)
+from app import crud, schemas
+from app.db import models
+from app.api import deps
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # --- Dependency to get listener config by ID ---

@@ -4,13 +4,14 @@ from typing import List, Any, Dict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+import structlog
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
 from app.db import models
 from app.api import deps
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 

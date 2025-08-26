@@ -10,6 +10,13 @@ from datetime import datetime
 from pydantic import BaseModel
 from typing import Dict, Any, List, Union, Optional
 
+# Structured logging
+import structlog
+from app.core.logging_config import configure_json_logging
+
+# Configure logging for this service
+logger = configure_json_logging("dcm4che_sender")
+
 # Import dustbin service for confirmations
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,9 +48,6 @@ def send_with_dcm4che(job: CStoreJob):
     # Get normalized file paths using the helper method
     file_paths = job.get_file_paths()
 
-    print(f"Processing dcm4che job for {len(file_paths)} file(s)")
-    print(f"Destination: {config.get('remote_ae_title')}")
-    
     # Get destination name for confirmation tracking
     destination_name = config.get('remote_ae_title', 'UNKNOWN_DESTINATION')
     
@@ -51,10 +55,18 @@ def send_with_dcm4che(job: CStoreJob):
     verification_id = config.get('verification_id')
     task_id = config.get('task_id')
 
+    logger.info("Processing dcm4che job", 
+                file_count=len(file_paths), 
+                destination_ae_title=config.get('remote_ae_title'),
+                destination_host=config.get('remote_host'),
+                destination_port=config.get('remote_port'),
+                files=[os.path.basename(f) for f in file_paths[:5]],  # Show first 5 filenames
+                verification_id=verification_id)
+
     # Validate all files exist
     for file_path in file_paths:
         if not os.path.exists(file_path):
-            print(f"ERROR: File does not exist: {file_path}")
+            logger.error("File does not exist", file_path=file_path)
             raise FileNotFoundError(f"DICOM file not found: {file_path}")
 
     storescu_path = os.path.join(DCM4CHE_PREFIX, "bin", "storescu")
@@ -77,10 +89,14 @@ def send_with_dcm4che(job: CStoreJob):
 
     if config.get('tls_enabled'):
         command.append("--tls")
-        print("WARNING: TLS is enabled, but secret handling for dcm4che sender is not fully implemented.")
+        logger.warning("TLS is enabled, but secret handling for dcm4che sender is not fully implemented")
 
-    print(f"Executing dcm4che command for {len(file_paths)} files in single association:")
-    print(f"Command: {' '.join(shlex.quote(c) for c in command)}")
+    logger.info("Executing dcm4che storescu", 
+                file_count=len(file_paths), 
+                destination_ae_title=config.get('remote_ae_title'),
+                destination_host=config.get('remote_host'),
+                destination_port=config.get('remote_port'),
+                command_preview=' '.join(command[:5]) + '...' if len(command) > 5 else ' '.join(command))
 
     try:
         process = subprocess.run(
@@ -89,14 +105,95 @@ def send_with_dcm4che(job: CStoreJob):
             text=True,
             check=True  # Raise exception on non-zero exit code
         )
-        print(f"dcm4che storescu completed successfully for {len(file_paths)} files in single association.")
-        print(f"Output: {process.stdout}")
         
-        # Log each successful file
+        # Extract key metrics from dcm4che output instead of logging everything
+        output_lines = process.stdout.strip().split('\n') if process.stdout.strip() else []
+        
+        # Look for the final summary line (e.g., "Sent 10 objects (=5.011MB) in 2.022s (=2.478MB/s)")
+        summary_info = {}
+        for line in output_lines:
+            if "Sent " in line and " objects " in line and " in " in line:
+                # Extract key metrics from summary line
+                try:
+                    # Parse something like: "Sent 10 objects (=5.011MB) in 2.022s (=2.478MB/s)"
+                    if "objects" in line and "in" in line:
+                        parts = line.split()
+                        objects_sent = None
+                        total_size = None
+                        transfer_time = None
+                        transfer_rate = None
+                        
+                        for i, part in enumerate(parts):
+                            if part == "objects" and i > 0:
+                                objects_sent = parts[i-1]
+                            elif "MB)" in part:
+                                total_size = part.replace("(=", "").replace(")", "")
+                            elif part.endswith("s") and "." in part:
+                                transfer_time = part
+                            elif "MB/s)" in part:
+                                transfer_rate = part.replace("(=", "").replace(")", "")
+                        
+                        if objects_sent:
+                            summary_info["objects_sent"] = objects_sent
+                        if total_size:
+                            summary_info["total_size"] = total_size
+                        if transfer_time:
+                            summary_info["transfer_time"] = transfer_time
+                        if transfer_rate:
+                            summary_info["transfer_rate"] = transfer_rate
+                except Exception:
+                    # If parsing fails, just continue
+                    pass
+                break
+        
+        # Log success with concise summary
+        logger.info("dcm4che storescu completed successfully", 
+                    file_count=len(file_paths), 
+                    destination_ae_title=config.get('remote_ae_title'),
+                    destination_host=config.get('remote_host'),
+                    destination_port=config.get('remote_port'),
+                    files_sent_count=len(file_paths),  # Just the count, not full list
+                    verification_id=verification_id,
+                    **summary_info)  # Include parsed summary metrics
+        
+        # Log detailed file list at debug level only
+        if len(file_paths) <= 5:
+            # For small batches, include filenames in main log
+            logger.debug("Files sent details", 
+                        files_sent=[os.path.basename(f) for f in file_paths],
+                        destination_ae_title=config.get('remote_ae_title'))
+        else:
+            # For large batches, just show first few + count
+            sample_files = [os.path.basename(f) for f in file_paths[:3]]
+            logger.debug("Files sent details (sample)", 
+                        files_sent_sample=sample_files,
+                        total_files_sent=len(file_paths),
+                        destination_ae_title=config.get('remote_ae_title'))
+        
+        # Optionally log the full output at debug level for troubleshooting
+        if process.stdout.strip():
+            # Even for debug, truncate extremely long output
+            stdout_output = process.stdout.strip()
+            if len(stdout_output) > 2000:  # Limit debug output to 2000 chars
+                truncated_output = stdout_output[:2000] + f"... [TRUNCATED - full output was {len(stdout_output)} characters]"
+                logger.debug("dcm4che full output (truncated)", 
+                            destination_ae_title=config.get('remote_ae_title'),
+                            dcm4che_output=truncated_output)
+            else:
+                logger.debug("dcm4che full output", 
+                            destination_ae_title=config.get('remote_ae_title'),
+                            dcm4che_output=stdout_output)
+        
+        # Log transaction summary instead of individual files
         successful_files = []
         for file_path in file_paths:
-            print(f"Successfully sent: {file_path}")
             successful_files.append(file_path)
+        
+        logger.info("DICOM transmission completed", 
+                    transaction_status="SUCCESS",
+                    file_count=len(successful_files),
+                    destination_ae_title=config.get('remote_ae_title'),
+                    files_summary=f"{len(successful_files)} files sent successfully")
         
         # MEDICAL SAFETY: Send confirmation to dustbin verification system
         if verification_id and successful_files:
@@ -118,25 +215,37 @@ def send_with_dcm4che(job: CStoreJob):
                 )
                 
                 if success:
-                    print(f"MEDICAL SAFETY: Transmission confirmed for verification {verification_id} to dustbin system")
+                    logger.info("MEDICAL SAFETY: Transmission confirmed for verification to dustbin system", 
+                               verification_id=verification_id)
                 else:
-                    print(f"WARNING: Failed to confirm transmission to dustbin system for verification {verification_id}")
+                    logger.warning("Failed to confirm transmission to dustbin system for verification", 
+                                  verification_id=verification_id)
                     
             except Exception as conf_err:
-                print(f"ERROR: Failed to send dustbin confirmation: {conf_err}")
+                logger.error("Failed to send dustbin confirmation", error=str(conf_err))
                 # Continue execution - don't fail the transmission due to confirmation failure
             
     except FileNotFoundError:
-        print(f"CRITICAL: storescu command not found at {storescu_path}")
+        logger.critical("storescu command not found", path=storescu_path)
         raise
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: dcm4che storescu failed for batch of {len(file_paths)} files.")
-        print(f"Return Code: {e.returncode}")
-        print(f"Stderr: {e.stderr}")
-        print(f"Stdout: {e.stdout}")
-        print("Files that were attempted:")
-        for file_path in file_paths:
-            print(f"  - {file_path}")
+        # Extract key error information without dumping massive output
+        stderr_summary = e.stderr[:500] + "..." if e.stderr and len(e.stderr) > 500 else e.stderr
+        stdout_summary = e.stdout[:200] + "..." if e.stdout and len(e.stdout) > 200 else e.stdout
+        
+        logger.error("dcm4che storescu failed for batch", 
+                     file_count=len(file_paths),
+                     return_code=e.returncode,
+                     destination_ae_title=config.get('remote_ae_title'),
+                     error_summary=stderr_summary or stdout_summary or "No error details",
+                     files=len(file_paths))  # Just log file count, not full paths
+        
+        # Log full error details at debug level for troubleshooting
+        if e.stderr or e.stdout:
+            logger.debug("dcm4che full error output",
+                        stderr=e.stderr,
+                        stdout=e.stdout,
+                        destination_ae_title=config.get('remote_ae_title'))
         
         # MEDICAL SAFETY: Send failure confirmation to dustbin verification system
         if verification_id:
@@ -158,32 +267,51 @@ def send_with_dcm4che(job: CStoreJob):
                     confirmation_details=failure_details
                 )
                 
-                print(f"MEDICAL SAFETY: Transmission failure confirmed for verification {verification_id} to dustbin system")
+                logger.info("MEDICAL SAFETY: Transmission failure confirmed for verification to dustbin system", 
+                           verification_id=verification_id)
                 
             except Exception as conf_err:
-                print(f"ERROR: Failed to send dustbin failure confirmation: {conf_err}")
+                logger.error("Failed to send dustbin failure confirmation", error=str(conf_err))
         
         raise
     except Exception as e:
-        print(f"An unexpected error occurred during dcm4che execution: {e}")
-        print(f"Files involved: {file_paths}")
+        logger.error("Unexpected error during dcm4che execution", 
+                     error=str(e), 
+                     files=file_paths)
         raise
 
 def callback(ch, method, properties, body):
     try:
-        print(f"Received message from {DCM4CHE_QUEUE}")
         data = json.loads(body)
         job = CStoreJob(**data)
+        
+        # Log detailed message receipt information
+        logger.info("Received DICOM transmission job", 
+                    queue=DCM4CHE_QUEUE,
+                    file_count=len(job.get_file_paths()),
+                    destination_ae_title=job.destination_config.get('remote_ae_title'),
+                    destination_host=job.destination_config.get('remote_host'),
+                    destination_port=job.destination_config.get('remote_port'),
+                    verification_id=job.destination_config.get('verification_id'))
+        
+        # Execute the job
         send_with_dcm4che(job)
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        print("Job completed and acknowledged.")
+        
+        logger.info("DICOM transmission job completed", 
+                    queue=DCM4CHE_QUEUE,
+                    destination_ae_title=job.destination_config.get('remote_ae_title'),
+                    file_count=len(job.get_file_paths()),
+                    status="ACKNOWLEDGED")
     except Exception as e:
-        print(f"Failed to process message: {e}")
+        logger.error("Failed to process DICOM transmission job", 
+                     error=str(e),
+                     queue=DCM4CHE_QUEUE)
         # In a real system, you might want to requeue with a delay or send to a dead-letter queue
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 def main():
-    print("Starting dcm4che sender...")
+    logger.info("Starting dcm4che sender")
     connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
     channel = connection.channel()
 
@@ -191,7 +319,7 @@ def main():
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=DCM4CHE_QUEUE, on_message_callback=callback)
 
-    print(f"[*] Waiting for messages on {DCM4CHE_QUEUE}. To exit press CTRL+C")
+    logger.info("Waiting for messages. To exit press CTRL+C", queue=DCM4CHE_QUEUE)
     channel.start_consuming()
 
 if __name__ == "__main__":

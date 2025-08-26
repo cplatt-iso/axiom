@@ -3,6 +3,7 @@
 from typing import List, Optional
 from datetime import datetime
 import logging
+import structlog
 from sqlalchemy.orm import Session
 from sqlalchemy import update as sql_update, select
 
@@ -10,7 +11,7 @@ from sqlalchemy import update as sql_update, select
 
 from app.db.models import DicomWebSourceState # Import the model
 
-logger = logging.getLogger(__name__) # Setup logger
+logger = structlog.get_logger(__name__) # Setup logger
 
 # --- Standalone Functions (Original Structure) ---
 

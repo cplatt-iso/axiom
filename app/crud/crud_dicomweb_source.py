@@ -1,6 +1,7 @@
 # app/crud/crud_dicomweb_source.py
 from typing import Any, Dict, List, Optional, Union
 
+import structlog
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
@@ -11,7 +12,7 @@ import logging
 from app.db import models
 from app.schemas import dicomweb as dicomweb_schemas
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class DicomWebSourceCRUD:
     """

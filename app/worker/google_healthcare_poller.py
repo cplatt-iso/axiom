@@ -8,7 +8,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging
-    logger = logging.getLogger(__name__)
+    logger = structlog.get_logger(__name__)
 
 from celery import shared_task
 from app.db.session import SessionLocal

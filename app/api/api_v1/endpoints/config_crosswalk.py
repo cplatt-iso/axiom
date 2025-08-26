@@ -4,6 +4,7 @@ from typing import List, Any, Dict, Optional, Tuple # <-- ADD Tuple HERE
 
 # --- ADDED: Import JSONResponse ---
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, Response
+import structlog
 from fastapi.responses import JSONResponse
 # --- END ADDED ---
 from sqlalchemy.orm import Session
@@ -49,7 +50,7 @@ except ImportError:
     crosswalk_tasks = _DummyCrosswalkTasksModule()
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # === Crosswalk Data Source Endpoints ===

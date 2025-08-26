@@ -25,14 +25,13 @@ services:
       - dicom_incoming:/dicom_data/incoming
       - dicom_dustbin:/dicom_data/dustbin
       - ./scripts:/app/scripts:ro
-    command: ["/bin/bash", "-c", "/opt/dcm4che/bin/storescp -b ${AXIOM_AETITLE:-DCM4CHE}:11114 --directory \"/dicom_data/incoming\" --filepath \"{00080020}/{0020000d}/{00080018}.dcm\" & python /app/scripts/batching_listener.py --watch-dirs"]
+    command: ["/bin/bash", "-c", "python /app/scripts/structured_storescp.py & python /app/scripts/batching_listener.py --watch-dirs; wait"]
     restart: unless-stopped
     networks:
       - default
       - shared
     logging:
-      driver: "fluentd"
+      driver: "json-file"
       options:
-        mode: non-blocking
-        fluentd-address: "127.0.0.1:24224"
-        tag: "axiom.dcm4che-listener.${AXIOM_INSTANCE_ID:-unknown}.{{.Name}}"
+        max-size: "100m" 
+        max-file: "5"

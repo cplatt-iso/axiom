@@ -5,13 +5,14 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Path
 from sqlalchemy.orm import Session
+import structlog
 
 from app import crud, schemas
 from app.db import models
 from app.api import deps
 from app.services.spanner_engine import SpannerEngine
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 

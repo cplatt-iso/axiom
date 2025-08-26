@@ -1,5 +1,6 @@
 # app/services/dimse/spanner_service_manager.py
 import logging
+import structlog
 import threading
 import time
 from typing import Dict, List, Optional, Any
@@ -15,7 +16,7 @@ from app.services.dimse.spanner_scp import SpannerSCP
 from app.services.dimse.cmove_proxy import CMoveProxyService
 from app.services.spanner_engine import SpannerEngine
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class SpannerServiceManager:

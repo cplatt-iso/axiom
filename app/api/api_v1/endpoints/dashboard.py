@@ -1,6 +1,7 @@
 # app/api/api_v1/endpoints/dashboard.py
 
 import logging
+import structlog
 import time
 import socket
 from datetime import datetime, timezone, timedelta
@@ -19,7 +20,7 @@ from app.db import models # Import models for type hints
 from app.crud import crud_dimse_listener_state # Import CRUD for listener state
 
 # Configure Logger
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Constants
 LISTENER_HEARTBEAT_TIMEOUT_SECONDS = 90 # Consider listener stale after 90 seconds (3 heartbeats)

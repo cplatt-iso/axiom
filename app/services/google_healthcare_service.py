@@ -47,7 +47,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     # import logging # Already imported via standard logging above
-    logger = logging.getLogger(__name__)
+    logger = structlog.get_logger(__name__)
 
 
 class GoogleHealthcareQueryError(Exception):

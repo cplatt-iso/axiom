@@ -1,6 +1,7 @@
 # app/services/dimse/spanner_scp.py
 import asyncio
 import logging
+import structlog
 from typing import Dict, Any, Optional, List
 from pynetdicom import AE, evt  # type: ignore[attr-defined]
 from pynetdicom.sop_class import (
@@ -17,7 +18,7 @@ from app.db import models
 from app.services.spanner_engine import SpannerEngine
 from app import crud
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class SpannerSCP:

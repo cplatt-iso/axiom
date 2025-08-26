@@ -2,6 +2,7 @@
 import secrets
 import string
 import logging
+import structlog
 from datetime import datetime, timedelta, timezone
 from typing import Any, Union, Optional, Dict
 
@@ -20,7 +21,7 @@ from google.auth.transport import requests as google_requests
 import cachecontrol
 import requests
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # --- Password Hashing Context ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")

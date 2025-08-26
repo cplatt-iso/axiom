@@ -1,5 +1,6 @@
 # app/crud/crud_dimse_listener_config.py
 import logging
+import structlog
 from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy.orm import Session
@@ -11,7 +12,7 @@ from fastapi import HTTPException, status
 from app.db import models
 from app.schemas import dimse_listener_config as schemas_dimse
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 class CRUDDimseListenerConfig:
     """

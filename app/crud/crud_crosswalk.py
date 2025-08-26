@@ -1,5 +1,6 @@
 # app/crud/crud_crosswalk.py
 import logging
+import structlog
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime # Import datetime for type hints
 
@@ -14,7 +15,7 @@ from pydantic import SecretStr # Keep SecretStr if used elsewhere potentially
 from app.db import models
 from app.schemas import crosswalk as schemas_crosswalk
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # --- CRUD for CrosswalkDataSource ---
 class CRUDCrosswalkDataSource:

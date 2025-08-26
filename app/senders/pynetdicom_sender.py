@@ -10,6 +10,10 @@ from app.services.network.dimse.scu_service import store_dataset
 from app.schemas.storage_backend_config import CStoreBackendConfig
 from pydicom import dcmread
 
+# Structured logging
+from app.core.logging_config import configure_json_logging
+logger = configure_json_logging("pynetdicom_sender")
+
 # Basic configuration from environment variables
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
 PYNETDICOM_QUEUE = "cstore_pynetdicom_jobs"
@@ -26,16 +30,20 @@ def send_with_pynetdicom(job: CStoreJob):
     else:
         file_paths = job.file_paths
     
-    print(f"Processing pynetdicom job for {len(file_paths)} file(s)")
-    
     # Create a CStoreBackendConfig object from the dictionary
     config = CStoreBackendConfig(**job.destination_config)
-    print(f"Destination: {config.remote_ae_title}")
+    
+    logger.info("Processing pynetdicom job", 
+                file_count=len(file_paths),
+                destination_ae_title=config.remote_ae_title,
+                destination_host=config.remote_host,
+                destination_port=config.remote_port,
+                files=[os.path.basename(f) for f in file_paths[:5]])  # Show first 5 filenames
     
     # Validate all files exist
     for file_path in file_paths:
         if not os.path.exists(file_path):
-            print(f"ERROR: File does not exist: {file_path}")
+            logger.error("File does not exist", file_path=file_path)
             raise FileNotFoundError(f"DICOM file not found: {file_path}")
     
     try:
@@ -44,15 +52,18 @@ def send_with_pynetdicom(job: CStoreJob):
         for file_path in file_paths:
             dataset = dcmread(file_path, force=True)
             datasets.append(dataset)
-            print(f"Loaded dataset from: {file_path}")
+            logger.info("Loading DICOM dataset", file_path=os.path.basename(file_path))
         
-        print(f"Sending {len(datasets)} datasets to {config.remote_ae_title} in single association")
+        logger.info("Initiating pynetdicom transmission", 
+                    dataset_count=len(datasets), 
+                    destination_ae_title=config.remote_ae_title,
+                    destination_host=config.remote_host,
+                    destination_port=config.remote_port,
+                    files_to_send=[os.path.basename(f) for f in file_paths])
         
         # Send all datasets in a single association
-        # Note: This assumes store_dataset can handle multiple datasets
-        # If not, we might need to modify the scu_service to support batch operations
+        successful_transmissions = []
         for i, dataset in enumerate(datasets):
-            print(f"Sending dataset {i+1}/{len(datasets)}")
             result = store_dataset(
                 config=config,
                 dataset=dataset
@@ -61,29 +72,55 @@ def send_with_pynetdicom(job: CStoreJob):
             if result.get("status") != "success":
                 raise Exception(f"Pynetdicom sending failed for dataset {i+1}: {result.get('message')}")
             
-            print(f"Successfully sent dataset {i+1}/{len(datasets)}: {file_paths[i]}")
+            successful_transmissions.append(os.path.basename(file_paths[i]))
         
-        print(f"pynetdicom completed successfully for {len(file_paths)} files in batch.")
+        logger.info("pynetdicom transmission completed", 
+                    transaction_status="SUCCESS",
+                    file_count=len(file_paths),
+                    destination_ae_title=config.remote_ae_title,
+                    files_sent=successful_transmissions)
 
     except Exception as e:
-        print(f"An unexpected error occurred during pynetdicom batch execution: {e}")
-        print(f"Files involved: {file_paths}")
+        logger.error("Unexpected error during pynetdicom batch execution", 
+                     error=str(e), 
+                     files=file_paths)
         raise
 
 def callback(ch, method, properties, body):
     try:
-        print(f"Received message from {PYNETDICOM_QUEUE}")
         data = json.loads(body)
         job = CStoreJob(**data)
+        config = CStoreBackendConfig(**job.destination_config)
+        
+        # Handle both single file (legacy) and batch formats
+        if isinstance(job.file_paths, str):
+            file_paths = [job.file_paths]
+        else:
+            file_paths = job.file_paths
+        
+        logger.info("Received pynetdicom transmission job", 
+                    queue=PYNETDICOM_QUEUE,
+                    file_count=len(file_paths),
+                    destination_ae_title=config.remote_ae_title,
+                    destination_host=config.remote_host,
+                    destination_port=config.remote_port)
+        
         send_with_pynetdicom(job)
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        print("Job completed and acknowledged.")
+        
+        logger.info("pynetdicom transmission job completed", 
+                    queue=PYNETDICOM_QUEUE,
+                    destination_ae_title=config.remote_ae_title,
+                    file_count=len(file_paths),
+                    status="ACKNOWLEDGED")
     except Exception as e:
-        print(f"Failed to process message: {e}")
+        logger.error("Failed to process pynetdicom transmission job", 
+                     error=str(e),
+                     queue=PYNETDICOM_QUEUE)
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 def main():
-    print("Starting pynetdicom sender...")
+    logger.info("Starting pynetdicom sender...")
     connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
     channel = connection.channel()
 
@@ -91,7 +128,7 @@ def main():
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=PYNETDICOM_QUEUE, on_message_callback=callback)
 
-    print(f"[*] Waiting for messages on {PYNETDICOM_QUEUE}. To exit press CTRL+C")
+    logger.info("Waiting for messages. To exit press CTRL+C", queue=PYNETDICOM_QUEUE)
     channel.start_consuming()
 
 if __name__ == "__main__":

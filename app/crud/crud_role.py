@@ -1,5 +1,6 @@
 # app/crud/crud_role.py
 import logging
+import structlog
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from app.db import models # Use models from app.db
 from app.schemas import RoleCreate # Import needed schemas
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 def get_role_by_id(db: Session, role_id: int) -> Optional[models.Role]:
     """Gets a role by its primary key ID."""

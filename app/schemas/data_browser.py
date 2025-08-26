@@ -8,7 +8,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging
-    logger = logging.getLogger(__name__)
+    logger = structlog.get_logger(__name__)
 
 class QueryLevel(str, Enum):
     """Defines the DICOM Query/Retrieve levels."""
