@@ -25,6 +25,7 @@ from app.core.config import settings
 from app import crud  # For crosswalk
 from app.crosswalk import service as crosswalk_service  # For crosswalk
 from app.db.models import CrosswalkMap  # For crosswalk type hint
+from app.utils.config_helpers import get_config_value  # For dynamic configuration
 
 from app.worker.utils.dicom_utils import parse_dicom_tag
 
@@ -46,13 +47,14 @@ REASON = Tag(0x0400, 0x0565)   # Reason for Attribute Mod.       (LO)
 def _add_original_attribute(
     ds: Dataset,  # Changed from 'dataset' to 'ds' to match proposal
     original_element: Optional[DataElement],  # Matched type hint from proposal
-    description: str,  # Changed from 'modification_description'
-    source_id: str,   # Changed from 'source_identifier'
+    description: str,  # Free text description (for logging only)
+    source_id: str,   # Changed from 'source_identifier' - represents the modifying system
+    db_session,  # Added database session for dynamic config
+    source_of_previous_values: Optional[str] = None,  # Where original values came from (AE, institution, etc.)
+    modified_tag: Optional[BaseTag] = None,  # Required for ADD case when original_element is None
 ):
-    if not getattr(
-        settings,
-        "LOG_ORIGINAL_ATTRIBUTES",
-            False):  # Assuming 'settings' is available globally or passed in
+    # Use dynamic configuration instead of static settings
+    if not get_config_value(db_session, "LOG_ORIGINAL_ATTRIBUTES", True):
         return
 
     # never copy group-length elements (tag.elem ends in 0x0000)
@@ -83,39 +85,90 @@ def _add_original_attribute(
     # build one item of Original Attributes Sequence
     item = Dataset()
 
+    # Determine the reason code based on whether original element existed
+    if original_element is not None:
+        reason_code = "COERCE"  # Replaced an existing value
+    else:
+        reason_code = "ADD"     # Added a new value that wasn't there before
+
     # Modified Attributes Sequence (0x0400,0x0550) (exactly one item inside, containing the original element)
     # This sequence holds the attribute(s) as they were before modification.
-    if original_element is not None:  # Only add MAS if there was an original element
-        mas_item_content = Dataset()
-        # Add the original element itself into this item (e.g. (0010,0010),
-        # "Patient Name", "ORIGINAL^PATIENT")
+    mas_item_content = Dataset()
+    
+    if original_element is not None:  
+        # COERCE case: Add the original element as it was before modification
         mas_item_content.add(deepcopy(original_element))
+    else:
+        # ADD case (original_element is None): Create element with empty value to show it was previously missing
+        # According to DICOM spec, Modified Attributes Sequence should contain the tag with empty value
+        if modified_tag is None:
+            raise ValueError("modified_tag is required when original_element is None (ADD case)")
+        
+        # Create an empty element for the tag that was added
+        vr = dictionary_VR(modified_tag)
+        if not vr:
+            raise ValueError(f"Cannot determine VR for tag {modified_tag}")
+        
+        # Create empty value appropriate for the VR
+        if vr in ['LO', 'SH', 'PN', 'ST', 'LT', 'UT', 'CS']:
+            empty_value = ""
+        elif vr in ['IS', 'DS']:
+            empty_value = ""
+        elif vr in ['DA', 'TM', 'DT']:
+            empty_value = ""
+        elif vr == 'SQ':
+            empty_value = Sequence([])
+        else:
+            empty_value = ""  # Default to empty string
+            
+        empty_element = DataElement(modified_tag, vr, empty_value)
+        mas_item_content.add(empty_element)
+    
+    # Create the Modified Attributes Sequence and add the item
+    item.add_new(MAS_TAG, "SQ", Sequence([mas_item_content]))
 
-        # Create the Modified Attributes Sequence and add the item with
-        # original content to it
-        item.add_new(MAS_TAG, "SQ", Sequence([mas_item_content]))
-
-    # audit attributes, added directly to the 'item' of
-    # OriginalAttributesSequence
+    # audit attributes, added directly to the 'item' of OriginalAttributesSequence
     now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S.%f")[:26]
     item.add_new(MOD_DT, "DT", now)
-    # 'source_id' is our 'source_identifier'
+    
+    # ModifyingSystem (0x0400,0x0563) - The system that made the modification
     item.add_new(MOD_SYS, "LO", source_id[:64])
 
-    # SourceOfPreviousValues (0x0400,0x0564) - could be the same as ModifyingSystem, or more specific if known
-    # For now, let's use source_id, but this could be enhanced.
-    item.add_new(SRC_PREV, "LO", source_id[:64])
+    # SourceOfPreviousValues (0x0400,0x0564) - Where the original values came from
+    # This should be the sending AE, institution, or system that provided the original values
+    # If not specified, try to determine from the dataset itself, otherwise use empty string (Type 2)
+    prev_values_source = source_of_previous_values
+    if not prev_values_source:
+        # Try to determine source from DICOM headers
+        if hasattr(ds, 'SourceApplicationEntityTitle') and ds.SourceApplicationEntityTitle:
+            prev_values_source = str(ds.SourceApplicationEntityTitle)
+        elif hasattr(ds, 'InstitutionName') and ds.InstitutionName and original_element and original_element.tag != Tag(0x0008, 0x0080):
+            # Use institution name if available and we're not modifying the institution name itself
+            prev_values_source = f"@{ds.InstitutionName}"
+        else:
+            prev_values_source = ""  # Unknown source
+    
+    item.add_new(SRC_PREV, "LO", prev_values_source[:64])
 
-    # 'description' is our 'modification_description'
-    item.add_new(REASON, "LO", description[:64])
+    # ReasonForTheAttributeModification (0x0400,0x0565) - CS VR with defined terms
+    # COERCE = policy-driven replacement of existing value
+    # ADD = adding value where none existed before  
+    # CORRECT = fixing data entry/operator mistake
+    item.add_new(REASON, "CS", reason_code)
 
     # Append the fully constructed item to the OriginalAttributesSequence
     oas_sequence.append(item)
 
+    # Optional but recommended: Set InstanceCoercionDateTime (0008,0015) in main dataset
+    # This indicates when the instance was coerced during storage
+    if reason_code == "COERCE" and not hasattr(ds, 'InstanceCoercionDateTime'):
+        ds.add_new(Tag(0x0008, 0x0015), "DT", now)
+
     log_tag_repr = str(
         original_element.tag) if original_element else "N/A (Element new or created)"
     logger.debug(
-        f"Logged modification details for tag {log_tag_repr} to OriginalAttributesSequence (DICOM Spec Aligned).")
+        f"Logged modification details for tag {log_tag_repr} to OriginalAttributesSequence "
+        f"(Reason: {reason_code}, Source: {prev_values_source or 'Unknown'}).")
 
 
 # ... (rest of the file remains the same) ...
@@ -242,7 +295,8 @@ def _apply_crosswalk_modification(dataset: pydicom.Dataset, mod: TagCrosswalkMod
                     logger.debug(
                         f"Crosswalk: Set tag {target_tag_str} to '{str(processed_value)[:50]}...' VR '{final_vr}'.")
                     _add_original_attribute(
-                        dataset, original_target_element, mod_desc, source_identifier)
+                        dataset, original_target_element, mod_desc, source_identifier, db_session, 
+                        modified_tag=target_tag)
                     map_changed_dataset = True
                 else:
                     logger.debug(
@@ -375,7 +429,8 @@ def apply_standard_modifications(
                         dataset,
                         original_element_for_log,
                         modification_description,
-                        source_identifier)
+                        source_identifier, db_session,
+                        modified_tag=tag)
                     current_tag_changed_dataset = True
                 else:
                     logger.debug(f"Tag {tag_str_repr} not found for DELETE.")
@@ -432,7 +487,8 @@ def apply_standard_modifications(
                         dataset,
                         original_element_for_log,
                         modification_description,
-                        source_identifier)
+                        source_identifier, db_session,
+                        modified_tag=tag)
                     current_tag_changed_dataset = True
                 else:
                     logger.debug(
@@ -488,7 +544,8 @@ def apply_standard_modifications(
                         dataset,
                         original_element_for_log,
                         modification_description,
-                        source_identifier)
+                        source_identifier, db_session,
+                        modified_tag=tag)
                     current_tag_changed_dataset = True
                     logger.debug(
                         f"Applied {action.value} to tag {tag_str_repr}.")
@@ -542,7 +599,8 @@ def apply_standard_modifications(
                             dataset,
                             original_element_for_log,
                             modification_description,
-                            source_identifier)
+                            source_identifier, db_session,
+                            modified_tag=tag)
                         current_tag_changed_dataset = True
                         logger.debug(
                             f"Applied {action.value} to tag {tag_str_repr} with pattern '{pattern}'.")
@@ -607,7 +665,8 @@ def apply_standard_modifications(
                         dataset,
                         original_dest_element_before_mod,
                         modification_description,
-                        source_identifier)
+                        source_identifier, db_session,
+                        modified_tag=dest_tag)
                     current_tag_changed_dataset = True  # The destination tag was changed/created
                 else:
                     logger.debug(
@@ -625,7 +684,8 @@ def apply_standard_modifications(
                             dataset,
                             original_element_for_log,
                             move_delete_desc,
-                            source_identifier)
+                            source_identifier, db_session,
+                            modified_tag=tag)
                         del dataset[tag]
                         logger.debug(
                             f"Deleted original source tag {tag_str_repr} after move.")

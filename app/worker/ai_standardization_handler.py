@@ -166,7 +166,7 @@ def apply_ai_standardization_for_rule(
             original_element_for_oa_log = deepcopy(current_element)
             ai_mod_desc = (f"AI Standardize: '{prompt_config_schema.name}' for {tag_str_repr} "
                            f"(ID: {prompt_config_schema.id})")
-            _add_original_attribute(dataset, original_element_for_oa_log, ai_mod_desc, source_identifier)
+            _add_original_attribute(dataset, original_element_for_oa_log, ai_mod_desc, source_identifier, db, modified_tag=tag)
 
             # Determine VR for the new DataElement
             # current_element.VR should be reliable if the element exists.
