@@ -28,6 +28,7 @@ from app.api.api_v1.endpoints import (
     order_dicom_evidence,
     mpps,
     system_settings,
+    system_config,
     facilities,
     modalities,
     spanner_qido,
@@ -109,6 +110,7 @@ api_router.include_router(
     tags=["Configuration - Senders"]
 )
 api_router.include_router(system_settings.router, prefix="/system-settings", tags=["System Settings"])
+api_router.include_router(system_config.router, prefix="/system-config", tags=["System Configuration"])
 
 # Maintenance Service
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance Service"])
