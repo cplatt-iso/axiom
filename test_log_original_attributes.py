@@ -63,7 +63,7 @@ def test_log_original_attributes_false():
             
     finally:
         # Restore original function
-        config_helpers.get_config_value = original_get_config_value
+        handler_module.get_config_value = original_handler_get_config_value
 
 def test_log_original_attributes_true():
     """Test that _add_original_attribute respects LOG_ORIGINAL_ATTRIBUTES=True"""
@@ -83,9 +83,10 @@ def test_log_original_attributes_true():
             return True
         return original_get_config_value(db_session, key, default)
     
-    # Temporarily replace the function
-    import app.utils.config_helpers as config_helpers
-    config_helpers.get_config_value = mock_get_config_value
+    # Temporarily replace the function in the handler module  
+    import app.worker.standard_modification_handler as handler_module
+    original_handler_get_config_value = handler_module.get_config_value
+    handler_module.get_config_value = mock_get_config_value
     
     try:
         # Create test original element
@@ -112,7 +113,7 @@ def test_log_original_attributes_true():
             
     finally:
         # Restore original function
-        config_helpers.get_config_value = original_get_config_value
+        handler_module.get_config_value = original_handler_get_config_value
 
 if __name__ == "__main__":
     print("Testing LOG_ORIGINAL_ATTRIBUTES configuration fix...\n")
