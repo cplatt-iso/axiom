@@ -10,18 +10,10 @@ try:
     import structlog
     from app.core.logging_config import configure_json_logging
     configure_json_logging("test_connectivity")
-    try:
-    import structlog
     logger = structlog.get_logger(__name__)
-except ImportError:
-    logger = logging.getLogger(__name__)
 except ImportError:
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    try:
-    import structlog
-    logger = structlog.get_logger(__name__)
-except ImportError:
     logger = logging.getLogger(__name__)
 
 def check_connectivity(host, port):

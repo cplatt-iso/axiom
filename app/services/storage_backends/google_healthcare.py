@@ -41,7 +41,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging
-    logger = structlog.get_logger(__name__)
+    logger = logging.getLogger(__name__)
 
 from .base_backend import BaseStorageBackend, StorageBackendError
 # Keep schema import for type hints if used elsewhere, doesn't affect runtime here

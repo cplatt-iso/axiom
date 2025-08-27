@@ -14,17 +14,10 @@ try:
     import structlog
     from app.core.logging_config import configure_json_logging
     configure_json_logging("inspect_listeners")
-    try:
-    import structlog
     logger = structlog.get_logger(__name__)
 except ImportError:
-    logger = logging.getLogger(__name__)
-except ImportError:
+    import logging
     logging.basicConfig(level=logging.INFO)
-    try:
-    import structlog
-    logger = structlog.get_logger(__name__)
-except ImportError:
     logger = logging.getLogger(__name__)
 
 def inspect_dimse_listeners():

@@ -15,7 +15,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging
-    logger = structlog.get_logger(__name__)
+    logger = logging.getLogger(__name__)
 
 _RULESET_CACHE = TTLCache(maxsize=1, ttl=settings.RULES_CACHE_TTL_SECONDS)
 _LAST_REFRESH_TS: float = 0

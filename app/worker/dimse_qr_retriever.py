@@ -31,7 +31,7 @@ try:
     logger = structlog.get_logger(__name__)
 except ImportError:
     import logging
-    logger = structlog.get_logger(__name__)
+    logger = logging.getLogger(__name__)
     logger.warning("structlog not found, using standard logging.")
 
 
