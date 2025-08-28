@@ -29,6 +29,8 @@ services:
       - dicom_processed:/dicom_data/processed:ro
       - dicom_errors:/dicom_data/errors:ro
       - ./axiom-flow-gcs-key.json:/etc/gcp/axiom-flow-gcs-key.json:ro
+      # Mount Elasticsearch CA certificate for secure TLS verification
+      - /home/icculus/axiom/infra/logging/config/certs/ca/ca.crt:/etc/ssl/certs/elasticsearch-ca.crt:ro
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload", "--proxy-headers", "--forwarded-allow-ips='*'"]
     restart: unless-stopped
     networks:

@@ -586,8 +586,18 @@ async def get_system_info(db: Session = Depends(deps.get_db)) -> SystemInfo:
             elasticsearch_port=settings.ELASTICSEARCH_PORT,
             elasticsearch_tls_enabled=(settings.ELASTICSEARCH_SCHEME.lower() == 'https'),
             elasticsearch_auth_enabled=bool(settings.ELASTICSEARCH_USERNAME),
+            elasticsearch_username=settings.ELASTICSEARCH_USERNAME if settings.ELASTICSEARCH_USERNAME else None,
+            elasticsearch_password_configured=bool(settings.ELASTICSEARCH_PASSWORD),
             elasticsearch_cert_verification=settings.ELASTICSEARCH_VERIFY_CERTS,
+            elasticsearch_ca_cert_path=settings.ELASTICSEARCH_CA_CERT_PATH,
             elasticsearch_index_pattern=settings.ELASTICSEARCH_LOG_INDEX_PATTERN,
+            
+            # Fluentd Integration Configuration (Fluent Bit)
+            fluentd_configured=True,  # Fluentd is enabled via Docker Compose logging driver
+            fluentd_host="fluent-bit",  # Docker service name
+            fluentd_port=24224,  # Standard Fluentd port
+            fluentd_tag_prefix="axiom",  # From Docker Compose tag configuration
+            fluentd_buffer_size="10m",  # From Docker Compose max-buffer-size
             
             # Service Status
             services_status=services_status

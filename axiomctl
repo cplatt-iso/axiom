@@ -2,7 +2,7 @@
 # axiomctl: Wrapper for modular Docker Compose setup
 
 # Compose files to include
-COMPOSE_FILES=(-f core.yml -f docker/app.yml -f docker/docs.yml)
+COMPOSE_FILES=(-f core.yml -f docker/app.yml -f docker/docs.yml -f docker/logging.yml)
 
 # Add all listener YAMLs
 for f in docker/listeners/*.yml; do
@@ -31,5 +31,17 @@ for f in docker/spanner/listeners/*.yml; do
   fi
 done
 
-# Pass all arguments to docker compose
-exec docker compose "${COMPOSE_FILES[@]}" "$@"
+# Special handling for 'up' command to ensure proper startup order
+if [[ "$1" == "up" && ("$2" == "-d" || "$2" == "--detach") ]]; then
+  echo "Starting logging infrastructure first..."
+  docker compose "${COMPOSE_FILES[@]}" up -d elasticsearch fluent-bit
+  
+  echo "Waiting for logging services to be ready..."
+  sleep 5
+  
+  echo "Starting remaining services..."
+  docker compose "${COMPOSE_FILES[@]}" up -d
+else
+  # Pass all arguments to docker compose for other commands
+  exec docker compose "${COMPOSE_FILES[@]}" "$@"
+fi

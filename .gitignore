@@ -229,6 +229,9 @@ dicom_incoming/
 dicom_processed/
 dicom_errors/
 
+# SSL/TLS Certificates - sensitive cryptographic material
+config/certs/
+
 # --- OS Specific files ---
 .DS_Store
 .DS_Store?

@@ -279,8 +279,18 @@ class SystemInfo(BaseModel):
     elasticsearch_port: Optional[int] = Field(None, description="Elasticsearch port number")
     elasticsearch_tls_enabled: bool = Field(False, description="Whether TLS is enabled for Elasticsearch connection")
     elasticsearch_auth_enabled: bool = Field(False, description="Whether authentication is enabled for Elasticsearch")
+    elasticsearch_username: Optional[str] = Field(None, description="Username for Elasticsearch authentication")
+    elasticsearch_password_configured: bool = Field(False, description="Whether Elasticsearch password is configured (without exposing actual password)")
     elasticsearch_cert_verification: bool = Field(False, description="Whether TLS certificate verification is enabled")
+    elasticsearch_ca_cert_path: Optional[str] = Field(None, description="Path to CA certificate file for TLS verification")
     elasticsearch_index_pattern: Optional[str] = Field(None, description="Log index pattern used in Elasticsearch")
+    
+    # Fluentd Integration Configuration
+    fluentd_configured: bool = Field(False, description="Whether Fluentd logging integration is configured")
+    fluentd_host: Optional[str] = Field(None, description="Fluentd host address")
+    fluentd_port: Optional[int] = Field(None, description="Fluentd port number")
+    fluentd_tag_prefix: Optional[str] = Field(None, description="Tag prefix for Fluentd log entries")
+    fluentd_buffer_size: Optional[str] = Field(None, description="Fluentd buffer size configuration")
     
     # Service Status
     services_status: Dict[str, Any] = Field(default_factory=dict, description="Status of various services and connections")
