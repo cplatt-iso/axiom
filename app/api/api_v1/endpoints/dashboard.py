@@ -44,6 +44,7 @@ async def get_detailed_system_status(
     """
     component_statuses: Dict[str, ComponentStatus] = {
         "database": ComponentStatus(status="unknown", details=None),
+        "redis": ComponentStatus(status="unknown", details=None),
         "message_broker": ComponentStatus(status="unknown", details=None),
         "api_service": ComponentStatus(status="ok", details="Responding"), # API is working if this runs
         "dicom_listener": ComponentStatus(status="unknown", details=None),
@@ -60,7 +61,19 @@ async def get_detailed_system_status(
         component_statuses["database"] = ComponentStatus(status="error", details="Connection failed")
         logger.error(f"Dashboard: Database check failed: {e}", exc_info=settings.DEBUG)
 
-    # 2. Message Broker Check (Simple port check)
+    # 2. Redis Check
+    try:
+        from app.core.redis_client import redis_client
+        if redis_client is not None:
+            redis_client.ping()
+            component_statuses["redis"] = ComponentStatus(status="ok", details="Connected")
+        else:
+            component_statuses["redis"] = ComponentStatus(status="error", details="Redis client not initialized")
+    except Exception as e:
+        component_statuses["redis"] = ComponentStatus(status="error", details=f"Connection failed: {type(e).__name__}")
+        logger.warning(f"Dashboard: Redis check failed: {e}")
+
+    # 3. Message Broker Check (Simple port check)
     broker_reachable = False
     try:
         # Attempt to open a socket connection to the broker host/port
@@ -78,7 +91,7 @@ async def get_detailed_system_status(
          component_statuses["message_broker"] = ComponentStatus(status="error", details="Broker port check failed")
          logger.error(f"Dashboard: Message broker port check failed: {e}", exc_info=settings.DEBUG)
 
-    # 3. DICOM Listener Check (Database Status)
+    # 4. DICOM Listener Check (Database Status)
     try:
         # Fetch listener states from the database
         listener_states: List[models.DimseListenerState] = crud_dimse_listener_state.get_all_listener_states(db)
@@ -119,7 +132,7 @@ async def get_detailed_system_status(
         logger.error(f"Dashboard: Error checking listener status from DB: {e}", exc_info=settings.DEBUG)
 
 
-    # 4. Celery Worker Check
+    # 5. Celery Worker Check
     if broker_reachable:
         celery_inspect_timeout = 1.5 # Timeout for celery inspect command
         try:

@@ -160,19 +160,129 @@ class DiskUsageStats(BaseModel):
     directories: List[DirectoryUsageStats] = Field(..., description="Usage statistics for specific monitored directories.")
 
 class SystemInfo(BaseModel):
+    # Basic Project Information
     project_name: str
     project_version: str
     environment: str
     debug_mode: bool
+    log_level: str
+    
+    # API Configuration
+    api_v1_str: str
+    cors_origins: List[str]
+    
+    # Authentication Configuration
+    access_token_expire_minutes: int
+    algorithm: str
+    google_oauth_configured: bool
+    
+    # Database Configuration
+    postgres_server: str
+    postgres_port: int
+    postgres_user: str
+    postgres_db: str
+    database_connected: bool
+    
+    # File Processing Configuration
     log_original_attributes: bool
     delete_on_success: bool
     delete_unmatched_files: bool
     delete_on_no_destination: bool
     move_to_error_on_partial_failure: bool
+    
+    # Dustbin System Configuration
+    use_dustbin_system: bool
+    dustbin_retention_days: int
+    dustbin_verification_timeout_hours: int
+    
+    # File Storage Paths
     dicom_storage_path: str
     dicom_error_path: str
     filesystem_storage_path: str
-    temp_dir: Optional[str] = None # TEMP_DIR might be None
-    openai_configured: bool # Just indicate if key is set
+    dicom_retry_staging_path: str
+    dicom_dustbin_path: str
+    temp_dir: Optional[str] = None
+    
+    # Exam Batch Processing
+    exam_batch_completion_timeout: int
+    exam_batch_check_interval: int
+    exam_batch_send_interval: int
+    exam_batch_max_concurrent: int
+    
+    # Celery Configuration
+    celery_broker_configured: bool
+    celery_result_backend_configured: bool
+    celery_worker_concurrency: int
+    celery_prefetch_multiplier: int
+    celery_task_max_retries: int
+    celery_task_retry_delay: int
+    
+    # Cleanup Configuration
+    stale_data_cleanup_age_days: int
+    stale_retry_in_progress_age_hours: int
+    cleanup_batch_size: int
+    cleanup_stale_data_interval_hours: int
+    
+    # AI Configuration
+    openai_configured: bool
+    openai_model_name_rule_gen: Optional[str]
+    vertex_ai_configured: bool
+    vertex_ai_project: Optional[str]
+    vertex_ai_location: Optional[str]
+    vertex_ai_model_name: str
+    ai_invocation_counter_enabled: bool
+    ai_vocab_cache_enabled: bool
+    ai_vocab_cache_ttl_seconds: int
+    
+    # Redis Configuration
+    redis_configured: bool
+    redis_host: str
+    redis_port: int
+    redis_db: int
+    
+    # RabbitMQ Configuration
+    rabbitmq_host: str
+    rabbitmq_port: int
+    rabbitmq_user: str
+    rabbitmq_vhost: str
+    
+    # DICOM Configuration
+    listener_host: str
+    pydicom_implementation_uid: str
+    implementation_version_name: str
+    
+    # DICOMweb Poller Configuration
+    dicomweb_poller_default_fallback_days: int
+    dicomweb_poller_overlap_minutes: int
+    dicomweb_poller_qido_limit: int
+    dicomweb_poller_max_sources: int
+    
+    # DIMSE Q/R Configuration
+    dimse_qr_poller_max_sources: int
+    dimse_acse_timeout: int
+    dimse_dimse_timeout: int
+    dimse_network_timeout: int
+    
+    # DCM4CHE Configuration
+    dcm4che_prefix: str
+    
+    # Rules Engine Configuration
+    rules_cache_enabled: bool
+    rules_cache_ttl_seconds: int
+    
+    # Known Input Sources
+    known_input_sources: List[str]
+    
+    # Logging Integration Configuration
+    elasticsearch_configured: bool = Field(False, description="Whether Elasticsearch logging integration is configured")
+    elasticsearch_host: Optional[str] = Field(None, description="Elasticsearch host address")
+    elasticsearch_port: Optional[int] = Field(None, description="Elasticsearch port number")
+    elasticsearch_tls_enabled: bool = Field(False, description="Whether TLS is enabled for Elasticsearch connection")
+    elasticsearch_auth_enabled: bool = Field(False, description="Whether authentication is enabled for Elasticsearch")
+    elasticsearch_cert_verification: bool = Field(False, description="Whether TLS certificate verification is enabled")
+    elasticsearch_index_pattern: Optional[str] = Field(None, description="Log index pattern used in Elasticsearch")
+    
+    # Service Status
+    services_status: Dict[str, Any] = Field(default_factory=dict, description="Status of various services and connections")
 
     model_config = ConfigDict(from_attributes=True)

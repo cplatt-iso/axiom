@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_URL: Optional[str] = None
 
+    # --- Elasticsearch/ELK Stack Settings ---
+    ELASTICSEARCH_HOST: str = "elasticsearch"
+    ELASTICSEARCH_PORT: int = 9200
+    ELASTICSEARCH_SCHEME: str = "https"  # Your setup uses TLS
+    ELASTICSEARCH_USERNAME: str = "elastic"  # Default superuser for queries
+    ELASTICSEARCH_PASSWORD: Optional[SecretStr] = None  # Will need ELASTIC_PASSWORD from env
+    ELASTICSEARCH_LOG_INDEX_PATTERN: str = "axiom-flow-*"  # Updated to match your pattern
+    ELASTICSEARCH_TIMEOUT_SECONDS: int = 10
+    ELASTICSEARCH_MAX_RETRIES: int = 3
+    ELASTICSEARCH_VERIFY_CERTS: bool = False  # Set to True if you want to mount CA cert
+    ELASTICSEARCH_CA_CERT_PATH: Optional[str] = None  # Path to CA cert if using cert verification
+
     # --- Vertex AI Gemini Settings ---
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp/axiom-flow-gcs-key.json")
     VERTEX_AI_PROJECT: Optional[str] = None # Your GCP Project ID

@@ -409,38 +409,193 @@ async def get_disk_usage_stats() -> DiskUsageStats:
 @router.get(
     "/info",
     response_model=SystemInfo,
-    summary="Get Global System Information & Settings",
-    description="Retrieves read-only information about the application instance and key configuration settings.",
+    summary="Get Comprehensive System Information & Configuration",
+    description="Retrieves comprehensive system information including all configuration settings, service statuses, and runtime parameters.",
     dependencies=[Depends(deps.require_role("Admin"))], # Requires Admin
     tags=["System Info", "System Configuration"], # Add relevant tags
 )
-async def get_system_info() -> SystemInfo:
+async def get_system_info(db: Session = Depends(deps.get_db)) -> SystemInfo:
     """
-    Returns key system settings and configuration values.
+    Returns comprehensive system settings and configuration values.
+    Includes both static configuration from settings and dynamic configuration from database.
     Requires Admin privileges.
     """
-    logger.info("Fetching system information.")
+    logger.info("Fetching comprehensive system information.")
+    
     try:
+        from app.utils.config_helpers import (
+            get_config_value,
+            get_processing_config,
+            get_dustbin_config,
+            get_batch_processing_config,
+            get_celery_config,
+            get_dicomweb_config,
+            get_ai_config
+        )
+        
+        # Get dynamic configuration values
+        processing_config = get_processing_config(db)
+        dustbin_config = get_dustbin_config(db)
+        batch_config = get_batch_processing_config(db)
+        celery_config = get_celery_config(db)
+        dicomweb_config = get_dicomweb_config(db)
+        ai_config = get_ai_config(db)
+        
+        # Test various service connections
+        services_status = {}
+        
+        # Test database connection
+        try:
+            db.execute(text("SELECT 1"))
+            services_status["database"] = {"status": "connected", "error": None}
+        except Exception as e:
+            services_status["database"] = {"status": "error", "error": str(e)}
+        
+        # Test Redis connection
+        try:
+            from app.core.redis_client import redis_client
+            if redis_client is not None:
+                redis_client.ping()
+                services_status["redis"] = {"status": "connected", "error": None}
+            else:
+                services_status["redis"] = {"status": "error", "error": "Redis client not initialized"}
+        except Exception as e:
+            services_status["redis"] = {"status": "error", "error": str(e)}
+        
         # Convert Path objects to strings for the response model
         temp_dir_str = str(settings.TEMP_DIR) if isinstance(settings.TEMP_DIR, Path) else settings.TEMP_DIR
-
+        
+        # Build comprehensive system info
         info = SystemInfo(
+            # Basic Project Information
             project_name=settings.PROJECT_NAME,
-            project_version=settings.PROJECT_VERSION, # Assuming PROJECT_VERSION exists in settings
-            environment=settings.ENVIRONMENT, # Assuming ENVIRONMENT exists
+            project_version=settings.PROJECT_VERSION,
+            environment=settings.ENVIRONMENT,
             debug_mode=settings.DEBUG,
-            log_original_attributes=settings.LOG_ORIGINAL_ATTRIBUTES,
-            delete_on_success=settings.DELETE_ON_SUCCESS,
-            delete_unmatched_files=settings.DELETE_UNMATCHED_FILES,
-            delete_on_no_destination=settings.DELETE_ON_NO_DESTINATION,
-            move_to_error_on_partial_failure=settings.MOVE_TO_ERROR_ON_PARTIAL_FAILURE,
+            log_level=settings.LOG_LEVEL,
+            
+            # API Configuration
+            api_v1_str=settings.API_V1_STR,
+            cors_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
+            
+            # Authentication Configuration
+            access_token_expire_minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
+            algorithm=settings.ALGORITHM,
+            google_oauth_configured=bool(settings.GOOGLE_OAUTH_CLIENT_ID),
+            
+            # Database Configuration
+            postgres_server=settings.POSTGRES_SERVER,
+            postgres_port=settings.POSTGRES_PORT,
+            postgres_user=settings.POSTGRES_USER,
+            postgres_db=settings.POSTGRES_DB,
+            database_connected=services_status.get("database", {}).get("status") == "connected",
+            
+            # File Processing Configuration (using dynamic config)
+            log_original_attributes=processing_config["log_original_attributes"],
+            delete_on_success=processing_config["delete_on_success"],
+            delete_unmatched_files=processing_config["delete_unmatched_files"],
+            delete_on_no_destination=processing_config["delete_on_no_destination"],
+            move_to_error_on_partial_failure=processing_config["move_to_error_on_partial_failure"],
+            
+            # Dustbin System Configuration
+            use_dustbin_system=dustbin_config["use_dustbin_system"],
+            dustbin_retention_days=dustbin_config["retention_days"],
+            dustbin_verification_timeout_hours=dustbin_config["verification_timeout_hours"],
+            
+            # File Storage Paths
             dicom_storage_path=str(settings.DICOM_STORAGE_PATH),
             dicom_error_path=str(settings.DICOM_ERROR_PATH),
             filesystem_storage_path=str(settings.FILESYSTEM_STORAGE_PATH),
+            dicom_retry_staging_path=str(settings.DICOM_RETRY_STAGING_PATH),
+            dicom_dustbin_path=str(settings.DICOM_DUSTBIN_PATH),
             temp_dir=temp_dir_str,
-            openai_configured=bool(settings.OPENAI_API_KEY)
+            
+            # Exam Batch Processing
+            exam_batch_completion_timeout=batch_config["completion_timeout"],
+            exam_batch_check_interval=batch_config["check_interval"],
+            exam_batch_max_concurrent=batch_config["max_concurrent"],
+            exam_batch_send_interval=settings.EXAM_BATCH_SEND_INTERVAL,
+            
+            # Celery Configuration
+            celery_broker_configured=bool(settings.CELERY_BROKER_URL),
+            celery_result_backend_configured=bool(settings.CELERY_RESULT_BACKEND),
+            celery_worker_concurrency=celery_config["worker_concurrency"],
+            celery_prefetch_multiplier=celery_config["prefetch_multiplier"],
+            celery_task_max_retries=celery_config["task_max_retries"],
+            celery_task_retry_delay=settings.CELERY_TASK_RETRY_DELAY,
+            
+            # Cleanup Configuration
+            stale_data_cleanup_age_days=settings.STALE_DATA_CLEANUP_AGE_DAYS,
+            stale_retry_in_progress_age_hours=settings.STALE_RETRY_IN_PROGRESS_AGE_HOURS,
+            cleanup_batch_size=settings.CLEANUP_BATCH_SIZE,
+            cleanup_stale_data_interval_hours=settings.CLEANUP_STALE_DATA_INTERVAL_HOURS,
+            
+            # AI Configuration
+            openai_configured=bool(settings.OPENAI_API_KEY),
+            openai_model_name_rule_gen=settings.OPENAI_MODEL_NAME_RULE_GEN,
+            vertex_ai_configured=bool(settings.VERTEX_AI_PROJECT),
+            vertex_ai_project=settings.VERTEX_AI_PROJECT,
+            vertex_ai_location=settings.VERTEX_AI_LOCATION,
+            vertex_ai_model_name=settings.VERTEX_AI_MODEL_NAME,
+            ai_invocation_counter_enabled=settings.AI_INVOCATION_COUNTER_ENABLED,
+            ai_vocab_cache_enabled=ai_config["vocab_cache_enabled"],
+            ai_vocab_cache_ttl_seconds=ai_config["vocab_cache_ttl_seconds"],
+            
+            # Redis Configuration
+            redis_configured=bool(settings.REDIS_URL),
+            redis_host=settings.REDIS_HOST,
+            redis_port=settings.REDIS_PORT,
+            redis_db=settings.REDIS_DB,
+            
+            # RabbitMQ Configuration
+            rabbitmq_host=settings.RABBITMQ_HOST,
+            rabbitmq_port=settings.RABBITMQ_PORT,
+            rabbitmq_user=settings.RABBITMQ_USER,
+            rabbitmq_vhost=settings.RABBITMQ_VHOST,
+            
+            # DICOM Configuration
+            listener_host=settings.LISTENER_HOST,
+            pydicom_implementation_uid=settings.PYDICOM_IMPLEMENTATION_UID,
+            implementation_version_name=settings.IMPLEMENTATION_VERSION_NAME,
+            
+            # DICOMweb Poller Configuration
+            dicomweb_poller_default_fallback_days=dicomweb_config["poller_default_fallback_days"],
+            dicomweb_poller_overlap_minutes=settings.DICOMWEB_POLLER_OVERLAP_MINUTES,
+            dicomweb_poller_qido_limit=dicomweb_config["poller_qido_limit"],
+            dicomweb_poller_max_sources=dicomweb_config["poller_max_sources"],
+            
+            # DIMSE Q/R Configuration
+            dimse_qr_poller_max_sources=settings.DIMSE_QR_POLLER_MAX_SOURCES,
+            dimse_acse_timeout=settings.DIMSE_ACSE_TIMEOUT,
+            dimse_dimse_timeout=settings.DIMSE_DIMSE_TIMEOUT,
+            dimse_network_timeout=settings.DIMSE_NETWORK_TIMEOUT,
+            
+            # DCM4CHE Configuration
+            dcm4che_prefix=settings.DCM4CHE_PREFIX,
+            
+            # Rules Engine Configuration
+            rules_cache_enabled=settings.RULES_CACHE_ENABLED,
+            rules_cache_ttl_seconds=settings.RULES_CACHE_TTL_SECONDS,
+            
+            # Known Input Sources
+            known_input_sources=settings.KNOWN_INPUT_SOURCES,
+            
+            # Logging Integration Configuration
+            elasticsearch_configured=bool(settings.ELASTICSEARCH_HOST),
+            elasticsearch_host=settings.ELASTICSEARCH_HOST,
+            elasticsearch_port=settings.ELASTICSEARCH_PORT,
+            elasticsearch_tls_enabled=(settings.ELASTICSEARCH_SCHEME.lower() == 'https'),
+            elasticsearch_auth_enabled=bool(settings.ELASTICSEARCH_USERNAME),
+            elasticsearch_cert_verification=settings.ELASTICSEARCH_VERIFY_CERTS,
+            elasticsearch_index_pattern=settings.ELASTICSEARCH_LOG_INDEX_PATTERN,
+            
+            # Service Status
+            services_status=services_status
         )
+        
+        logger.info("Successfully compiled comprehensive system information.")
         return info
+        
     except AttributeError as e:
         logger.error(f"AttributeError fetching system info: Setting '{e.name}' not found in config.", exc_info=False)
         raise HTTPException(
@@ -471,6 +626,7 @@ async def get_dashboard_status(
     """
     component_statuses: Dict[str, ComponentStatus] = {
         "database": ComponentStatus(status="unknown", details=None),
+        "redis": ComponentStatus(status="unknown", details=None),
         "message_broker": ComponentStatus(status="unknown", details=None),
         "api_service": ComponentStatus(status="ok", details="Responding"),
         "dicom_listener": ComponentStatus(status="unknown", details=None),
@@ -486,7 +642,19 @@ async def get_dashboard_status(
         component_statuses["database"] = ComponentStatus(status="error", details="Connection failed")
         logger.warning(f"Dashboard Status: DB check failed: {e}")
 
-    # 2. Message Broker Check
+    # 2. Redis Check
+    try:
+        from app.core.redis_client import redis_client
+        if redis_client is not None:
+            redis_client.ping()
+            component_statuses["redis"] = ComponentStatus(status="ok", details="Connected")
+        else:
+            component_statuses["redis"] = ComponentStatus(status="error", details="Redis client not initialized")
+    except Exception as e:
+        component_statuses["redis"] = ComponentStatus(status="error", details=f"Connection failed: {type(e).__name__}")
+        logger.warning(f"Dashboard Status: Redis check failed: {e}")
+
+    # 3. Message Broker Check
     broker_reachable = False
     try:
         with socket.create_connection((settings.RABBITMQ_HOST, settings.RABBITMQ_PORT), timeout=1):
@@ -496,7 +664,7 @@ async def get_dashboard_status(
          component_statuses["message_broker"] = ComponentStatus(status="error", details=f"Broker port check failed: {type(e).__name__}")
          logger.warning(f"Dashboard Status: Broker check failed: {e}")
 
-    # 3. DICOM Listener Check
+    # 4. DICOM Listener Check
     try:
         listener_states: List[models.DimseListenerState] = crud.crud_dimse_listener_state.get_all_listener_states(db, limit=10)
         if not listener_states:
@@ -530,7 +698,7 @@ async def get_dashboard_status(
         component_statuses["dicom_listener"] = ComponentStatus(status="error", details="DB query failed.")
         logger.error(f"Dashboard Status: Error checking listener DB status: {e}", exc_info=settings.DEBUG)
 
-    # 4. Celery Worker Check
+    # 5. Celery Worker Check
     if broker_reachable:
         celery_inspect_timeout = 1.5
         try:

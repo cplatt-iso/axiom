@@ -36,12 +36,14 @@ from app.api.api_v1.endpoints import (
     spanner_services,
     senders,
     maintenance,
+    logs,
 )
 
 api_router = APIRouter()
 
 # Include routers - using consistent '/resource' pattern (no trailing slash)
 api_router.include_router(system.router, prefix="/system", tags=["System"])
+api_router.include_router(logs.router, prefix="/logs", tags=["Logs"])
 api_router.include_router(rules.router, prefix="/rules-engine", tags=["Rules Engine"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(api_keys.router, prefix="/apikeys", tags=["API Keys"])
