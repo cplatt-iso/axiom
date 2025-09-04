@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: docker/dockerfiles/Dockerfile.docs
-    container_name: axiom_docs
+    container_name: axiom-docs
     ports:
       - "8000:80"
     depends_on:

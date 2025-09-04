@@ -3,12 +3,12 @@ services:
     build:
       context: .
       dockerfile: docker/dockerfiles/Dockerfile.listener
-    container_name: dicom_processor_storescp_1
+    container_name: axiom-storescp-1
     env_file:
       - ./.env
     environment:
       - AXIOM_INSTANCE_ID=storescp_1
-      - GOOGLE_APPLICATION_CREDENTIALS=/etc/g./axiom-flow-gcs-key.json
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/axiom-flow-gcs-key.json
     depends_on:
       rabbitmq:
         condition: service_healthy

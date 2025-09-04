@@ -96,6 +96,10 @@ app = FastAPI(
 
 
 # --- Middleware ---
+# Add correlation ID middleware for request tracing
+from app.core.middleware.correlation import CorrelationMiddleware
+app.add_middleware(CorrelationMiddleware)
+
 if settings.BACKEND_CORS_ORIGINS:
     origins = settings.BACKEND_CORS_ORIGINS
     if origins:
@@ -159,6 +163,10 @@ async def health_check(db: Session = Depends(get_db)):
 # Mount the main API router for V1 endpoints
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+# Mount the log management router
+from app.api.log_management import router as log_management_router
+app.include_router(log_management_router, prefix=settings.API_V1_STR)
+
 
 # --- Startup Event Handler ---
 @app.on_event("startup")
@@ -166,6 +174,9 @@ async def startup_event():
     """Initialize services on application startup."""
     global rabbitmq_connection
     logger.info("Application starting up...")
+    
+    # Create database tables if they don't exist
+    create_tables()
     
     # Initialize RabbitMQ connection
     try:

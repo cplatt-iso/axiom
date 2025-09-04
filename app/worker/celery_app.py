@@ -70,7 +70,7 @@ except Exception as ai_init_err:
 
 
 app = Celery(
-    "dicom_processor_tasks",
+    "axiom_flow_tasks",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
     include=[

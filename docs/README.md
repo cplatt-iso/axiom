@@ -120,7 +120,7 @@ docker logs -f backend-dimse-query-worker-1
 
 # System status
 docker stats
-docker exec dicom_processor_rabbitmq rabbitmqctl list_queues
+docker exec axiom-rabbitmq rabbitmqctl list_queues
 ```
 
 ### Configuration Access

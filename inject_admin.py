@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 # --- Database Configuration ---
 # Replace with your actual connection string
 # Use environment variable if possible for security
-DATABASE_URI = os.getenv("ADMIN_SCRIPT_DB_URI", "postgresql+psycopg://dicom_processor_user:tipper@localhost:5432/dicom_processor_db")
+DATABASE_URI = os.getenv("ADMIN_SCRIPT_DB_URI", "postgresql+psycopg://axiom_user:tipper@localhost:5432/axiom_db")
 # NOTE: Using localhost assumes you map the DB port in docker-compose or run the script where 'localhost' resolves to the DB.
 # If running script on host and DB is only in docker, use host IP or mapped port. If NPM is port 5432, it will not resolve.
 # Consider changing 'localhost' above if needed, or map port 5432 from db container to host 5432.

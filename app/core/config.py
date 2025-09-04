@@ -44,10 +44,19 @@ class Settings(BaseSettings):
 
     POSTGRES_SERVER: str = "db"
     POSTGRES_PORT: int = 5432
-    POSTGRES_USER: str = "dicom_processor_user"
+    POSTGRES_USER: str = "axiom_user"
     POSTGRES_PASSWORD: SecretStr = SecretStr("changeme")
-    POSTGRES_DB: str = "dicom_processor_db"
+    POSTGRES_DB: str = "axiom_db"
     SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None
+
+    # Elasticsearch configuration for log management
+    ELASTICSEARCH_HOST: str = "elasticsearch"
+    ELASTICSEARCH_PORT: int = 9200
+    ELASTICSEARCH_PASSWORD: SecretStr = SecretStr("changeme")
+    ELASTICSEARCH_SSL_ENABLED: bool = True
+    
+    # Kubernetes mode detection
+    KUBERNETES_MODE: bool = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
 
     STALE_DATA_CLEANUP_AGE_DAYS: int = 30 # For general old data, not used yet by this task directly for files
     STALE_RETRY_IN_PROGRESS_AGE_HOURS: int = 6 # How long before a RETRY_IN_PROGRESS is considered stuck
@@ -129,7 +138,6 @@ class Settings(BaseSettings):
     ELASTICSEARCH_PORT: int = 9200
     ELASTICSEARCH_SCHEME: str = "https"  # Your setup uses TLS
     ELASTICSEARCH_USERNAME: str = "elastic"  # Default superuser for queries
-    ELASTICSEARCH_PASSWORD: Optional[SecretStr] = None  # Will need ELASTIC_PASSWORD from env
     ELASTICSEARCH_LOG_INDEX_PATTERN: str = "axiom-flow-*"  # Updated to match your pattern
     ELASTICSEARCH_TIMEOUT_SECONDS: int = 10
     ELASTICSEARCH_MAX_RETRIES: int = 3

@@ -177,7 +177,7 @@ docker logs -f axiom-spanner-coordinator
 docker logs -f backend-dimse-query-worker-1
 
 # Check queue status
-docker exec dicom_processor_rabbitmq rabbitmqctl list_queues
+docker exec axiom-rabbitmq rabbitmqctl list_queues
 ```
 
 ## Example Queries
@@ -225,7 +225,7 @@ docker logs backend-dimse-query-worker-1
 docker compose up -d
 
 # 2. Check database connectivity
-docker exec dicom_processor_db pg_isready
+docker exec axiom-db pg_isready
 
 # 3. Restart services
 docker compose -f docker-compose.yml -f docker-compose.enterprise.yml restart
@@ -253,7 +253,7 @@ docker compose -f docker-compose.yml -f docker-compose.enterprise.yml up -d --sc
 docker stats
 
 # Monitor queue depth
-docker exec dicom_processor_rabbitmq rabbitmqctl list_queues
+docker exec axiom-rabbitmq rabbitmqctl list_queues
 ```
 
 ## Next Steps

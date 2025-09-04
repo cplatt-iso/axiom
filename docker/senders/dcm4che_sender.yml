@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/dockerfiles/Dockerfile.dcm4che-sender
-    container_name: dicom_processor_dcm4che_sender
+    container_name: axiom-dcm4che-sender
     env_file:
       - .env
     environment:

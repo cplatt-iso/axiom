@@ -333,14 +333,14 @@ CREATE INDEX CONCURRENTLY idx_spanner_sources_source_type ON spanner_sources(sou
 #### Redis Configuration
 ```bash
 # Increase memory limit for large result sets
-docker exec dicom_processor_redis redis-cli CONFIG SET maxmemory 2gb
-docker exec dicom_processor_redis redis-cli CONFIG SET maxmemory-policy allkeys-lru
+docker exec axiom-redis redis-cli CONFIG SET maxmemory 2gb
+docker exec axiom-redis redis-cli CONFIG SET maxmemory-policy allkeys-lru
 ```
 
 #### RabbitMQ Optimization
 ```bash
 # Increase queue limits for high throughput
-docker exec dicom_processor_rabbitmq rabbitmqctl set_policy spanning_policy "spanning_.*" \
+docker exec axiom-rabbitmq rabbitmqctl set_policy spanning_policy "spanning_.*" \
   '{"max-length":10000,"overflow":"reject-publish"}'
 ```
 
@@ -397,10 +397,10 @@ curl http://localhost:8002/spanning-query/{query_id}
 #### 3. Performance Issues
 ```bash
 # Check queue depth
-docker exec dicom_processor_rabbitmq rabbitmqctl list_queues
+docker exec axiom-rabbitmq rabbitmqctl list_queues
 
 # Check Redis memory usage
-docker exec dicom_processor_redis redis-cli INFO memory
+docker exec axiom-redis redis-cli INFO memory
 
 # Check worker status
 docker stats backend-dimse-query-worker-1

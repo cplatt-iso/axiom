@@ -1,9 +1,9 @@
 services:
-  dcm4che_1:
+  axiom-dcm4che-listener:
     build:
       context: .
       dockerfile: docker/dockerfiles/Dockerfile.dcm4che-listener
-    container_name: dicom_processor_dcm4che_listener
+    container_name: axiom-dcm4che-listener
     env_file:
       - ./.env
     environment:
@@ -31,7 +31,11 @@ services:
       - default
       - shared
     logging:
-      driver: "json-file"
+      driver: "fluentd"
       options:
-        max-size: "100m" 
-        max-file: "5"
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.dcm4che-listener.{{.Name}}"

@@ -37,6 +37,7 @@ from app.db.models import crosswalk
 from app.db.models import schedule
 from app.db.models import ai_prompt_config
 from app.db.models import spanner               # <--- Added for query spanning
+from app.log_management import models as log_models  # <--- Added for log management
 # Import your models here so Alembic can see them
 # This relies on app/db/models/__init__.py importing all model classes
 # from app.db import models # noqa F401 - Imports __init__, which imports all models

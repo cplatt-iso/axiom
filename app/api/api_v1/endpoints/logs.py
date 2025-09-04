@@ -313,40 +313,97 @@ async def get_log_services(
     Get a list of services/containers that are generating logs.
     
     This helps the frontend populate dropdowns and filters.
+    Uses Elasticsearch aggregation for better performance.
     """
+    # Import log service at the top level to avoid "possibly unbound" errors
+    from app.services.log_service import log_service
+    
     try:
-        # Query for recent logs to extract unique services
-        params = LogQueryParams(
-            start_time=datetime.now(timezone.utc) - timedelta(hours=24),
-            limit=1000  # Get a good sample of recent logs
+        # Check if Elasticsearch client is available
+        if not log_service.client:
+            raise Exception("Elasticsearch client not available")
+        
+        # Build aggregation query for last 24 hours
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=24)
+        
+        aggregation_query = {
+            "size": 0,  # We only want aggregations, not actual log entries
+            "query": {
+                "range": {
+                    "@timestamp": {
+                        "gte": start_time.isoformat(),
+                        "lte": end_time.isoformat()
+                    }
+                }
+            },
+            "aggs": {
+                "services": {
+                    "terms": {"field": "service.keyword", "size": 100}
+                },
+                "containers": {
+                    "terms": {"field": "container_name.keyword", "size": 100}
+                },
+                "levels": {
+                    "terms": {"field": "level.keyword", "size": 10}
+                }
+            }
+        }
+        
+        # Execute the aggregation query
+        result = log_service.client.search(
+            index=f"{log_service.index_pattern}",
+            body=aggregation_query
         )
         
-        result = log_service.query_logs(params)
+        # Extract unique values from aggregations
+        services = [bucket["key"] for bucket in result["aggregations"]["services"]["buckets"]]
+        containers = [bucket["key"] for bucket in result["aggregations"]["containers"]["buckets"]]
+        levels = [bucket["key"] for bucket in result["aggregations"]["levels"]["buckets"]]
         
-        # Extract unique services from recent logs
-        services = set()
-        containers = set()
+        # Ensure standard log levels are included
+        standard_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        all_levels = list(set(levels + standard_levels))
         
-        for entry in result.get('entries', []):
-            if entry.get('service'):
-                services.add(entry['service'])
-            if entry.get('container_name'):
-                containers.add(entry['container_name'])
-        
-        logger.info("Retrieved log services", 
+        logger.info("Retrieved log services via aggregation", 
                    services_count=len(services),
                    containers_count=len(containers),
                    user_id=getattr(current_user, 'id', 'unknown'))
         
         return {
-            "services": sorted(list(services)),
-            "containers": sorted(list(containers)),
-            "levels": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+            "services": sorted(services),
+            "containers": sorted(containers), 
+            "levels": sorted(all_levels)
         }
         
     except Exception as e:
         logger.error("Failed to get log services", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get log services: {str(e)}"
-        )
+        # Fallback to the existing method if aggregation fails
+        try:
+            params = LogQueryParams(
+                start_time=datetime.now(timezone.utc) - timedelta(hours=24),
+                limit=1000
+            )
+            
+            result = log_service.query_logs(params)
+            
+            services = set()
+            containers = set()
+            
+            for entry in result.get('entries', []):
+                if entry.get('service'):
+                    services.add(entry['service'])
+                if entry.get('container_name'):
+                    containers.add(entry['container_name'])
+            
+            return {
+                "services": sorted(list(services)),
+                "containers": sorted(list(containers)),
+                "levels": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+            }
+        except Exception as fallback_error:
+            logger.error("Fallback method also failed", error=str(fallback_error))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to get log services: {str(e)}"
+            )

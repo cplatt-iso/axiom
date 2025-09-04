@@ -317,7 +317,7 @@ class ElasticsearchLogService:
             # Try to get service name from logger field or container name
             service = (source.get('service_name') or 
                       source.get('logger') or
-                      source.get('container_name', '').replace('/dicom_processor_', '').replace('/', ''))
+                      source.get('container_name', '').replace('/axiom-', '').replace('/', ''))
             
             container_name = source.get('container_name', '').replace('/', '')
             

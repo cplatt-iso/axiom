@@ -31,17 +31,20 @@ for f in docker/spanner/listeners/*.yml; do
   fi
 done
 
-# Special handling for 'up' command to ensure proper startup order
+# Special handling for 'up -d' to ensure proper startup order
 if [[ "$1" == "up" && ("$2" == "-d" || "$2" == "--detach") ]]; then
   echo "Starting logging infrastructure first..."
   docker compose "${COMPOSE_FILES[@]}" up -d elasticsearch fluent-bit
   
-  echo "Waiting for logging services to be ready..."
-  sleep 5
+  echo "Waiting for Fluent Bit to be ready..."
+  while ! nc -z localhost 24224; do   
+    sleep 0.5 # wait for 1/2 a second before check again
+  done
+  echo "Fluent Bit is up and running."
   
   echo "Starting remaining services..."
-  docker compose "${COMPOSE_FILES[@]}" up -d
+  docker compose "${COMPOSE_FILES[@]}" "$@"
 else
-  # Pass all arguments to docker compose for other commands
+  # Pass all arguments to docker compose for all other commands
   exec docker compose "${COMPOSE_FILES[@]}" "$@"
 fi

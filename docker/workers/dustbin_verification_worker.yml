@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/dockerfiles/Dockerfile.worker
-    container_name: dicom_processor_dustbin_verification
+    container_name: axiom-dustbin-verification
     env_file:
       - .env
     environment:

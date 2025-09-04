@@ -1,0 +1,8 @@
+{
+  "exclude": [
+    "alembic/versions"
+  ],
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.11"
+}

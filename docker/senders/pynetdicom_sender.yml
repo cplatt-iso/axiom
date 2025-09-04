@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/dockerfiles/Dockerfile.pynetdicom-sender
-    container_name: dicom_processor_pynetdicom_sender
+    container_name: axiom-pynetdicom-sender
     env_file:
       - .env
     environment:

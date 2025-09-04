@@ -1,4 +1,3 @@
-# app/core/logging_config.py
 """
 Centralized logging configuration for all Axiom services.
 This ensures consistent JSON logging across API, workers, listeners, etc.
@@ -11,6 +10,7 @@ from typing import Optional
 
 import structlog
 from app.core.config import settings
+from app.core.service_naming import get_axiom_service_name
 
 
 def get_log_level() -> str:
@@ -43,6 +43,10 @@ def configure_json_logging(
     
     if not isinstance(log_level, str):
         log_level = str(log_level)
+        
+    # Use standardized service naming if not provided
+    if service_name is None:
+        service_name = get_axiom_service_name()
     
     # Configure standard Python logging to use simple formatter
     # Let structlog handle the JSON formatting
