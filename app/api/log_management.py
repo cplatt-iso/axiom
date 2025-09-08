@@ -379,24 +379,200 @@ async def apply_index_templates(
 
 
 @router.get("/statistics")
-async def get_log_statistics():
-    """Get comprehensive log management statistics."""
+async def get_log_statistics(db: Session = Depends(get_db)):
+    """Get comprehensive log management statistics and analytics."""
     try:
-        # Get Elasticsearch statistics
+        # Get basic Elasticsearch cluster statistics
         es_stats = await elasticsearch_manager.get_cluster_stats()
         
-        # Get index statistics for axiom patterns
+        # Get basic index statistics for axiom patterns
         axiom_indices = await elasticsearch_manager.get_indices_stats(
             index_pattern="axiom*"
         )
         
+        # Fetch database policies for enhanced analytics
+        db_policies = crud.get_retention_policies(db)
+        
+        # Get enhanced analytics (Phase 2 implementation with policy correlation)
+        enhanced_analytics = await elasticsearch_manager.get_enhanced_analytics(db_policies)
+        
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "version": "2.1.0",  # Updated version with Phase 2 policy correlation
+            
+            # Basic cluster information
             "elasticsearch": es_stats,
             "axiom_indices": axiom_indices,
+            
+            # Enhanced analytics for UI dashboard (Phase 2)
+            "analytics": {
+                "storage_distribution": enhanced_analytics["storage_distribution"],
+                "log_levels": enhanced_analytics["log_level_distribution"],
+                "ingestion_trends": enhanced_analytics["ingestion_trends"],
+                "retention_compliance": enhanced_analytics["retention_compliance"],
+                "service_breakdown": enhanced_analytics["service_breakdown"],
+                "policy_efficiency": enhanced_analytics["policy_efficiency"]  # NEW Phase 2C
+            },
+            
+            # Summary metrics for quick dashboard display
+            "summary": {
+                "total_storage_tb": round(enhanced_analytics["storage_distribution"]["total_storage_gb"] / 1024, 2),
+                "daily_ingestion_gb": enhanced_analytics["ingestion_trends"]["average_daily_storage_gb"],
+                "compliance_percentage": enhanced_analytics["retention_compliance"]["compliance_percentage"],
+                "total_services": len(enhanced_analytics["service_breakdown"]["services"]),
+                "most_active_service": enhanced_analytics["service_breakdown"]["services"][0]["service"] if enhanced_analytics["service_breakdown"]["services"] else "none"
+            }
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get statistics: {str(e)}"
+        )
+
+
+@router.get("/analytics/dashboard")
+async def get_dashboard_analytics(db: Session = Depends(get_db)):
+    """Get detailed analytics specifically formatted for dashboard UI."""
+    try:
+        # Fetch database policies to include in efficiency analysis
+        db_policies = crud.get_retention_policies(db)
+        
+        enhanced_analytics = await elasticsearch_manager.get_enhanced_analytics(db_policies)
+        
+        # Format data specifically for dashboard consumption
+        dashboard_data = {
+            "timestamp": enhanced_analytics["timestamp"],
+            
+            # Storage metrics formatted for charts
+            "storage": {
+                "total_tb": round(enhanced_analytics["storage_distribution"]["total_storage_gb"] / 1024, 2),
+                "by_tier": {
+                    "hot": {
+                        "size_tb": round(enhanced_analytics["storage_distribution"]["by_tier"]["hot"]["size_gb"] / 1024, 2),
+                        "percentage": enhanced_analytics["storage_distribution"]["by_tier"]["hot"]["percentage"]
+                    },
+                    "warm": {
+                        "size_tb": round(enhanced_analytics["storage_distribution"]["by_tier"]["warm"]["size_gb"] / 1024, 2), 
+                        "percentage": enhanced_analytics["storage_distribution"]["by_tier"]["warm"]["percentage"]
+                    },
+                    "cold": {
+                        "size_tb": round(enhanced_analytics["storage_distribution"]["by_tier"]["cold"]["size_gb"] / 1024, 2),
+                        "percentage": enhanced_analytics["storage_distribution"]["by_tier"]["cold"]["percentage"]
+                    },
+                    "archived": {
+                        "size_tb": round(enhanced_analytics["storage_distribution"]["by_tier"]["archived"]["size_gb"] / 1024, 2),
+                        "percentage": enhanced_analytics["storage_distribution"]["by_tier"]["archived"]["percentage"]
+                    }
+                }
+            },
+            
+            # Log level distribution for pie charts
+            "log_levels": enhanced_analytics["log_level_distribution"]["distribution"],
+            
+            # Ingestion trends for time series charts
+            "ingestion": {
+                "daily_average_gb": enhanced_analytics["ingestion_trends"]["average_daily_storage_gb"],
+                "trends": enhanced_analytics["ingestion_trends"]["last_30_days"],
+                "total_documents_30d": enhanced_analytics["ingestion_trends"]["total_documents_30d"]
+            },
+            
+            # Compliance metrics for progress indicators
+            "compliance": {
+                "percentage": enhanced_analytics["retention_compliance"]["compliance_percentage"],
+                "compliant_indices": enhanced_analytics["retention_compliance"]["compliant_indices"],
+                "non_compliant_indices": enhanced_analytics["retention_compliance"]["non_compliant_indices"],
+                "total_indices": enhanced_analytics["retention_compliance"]["total_indices"]
+            },
+            
+            # Top services for bar charts
+            "services": {
+                "top_10": enhanced_analytics["service_breakdown"]["services"][:10],
+                "total_services": len(enhanced_analytics["service_breakdown"]["services"])
+            },
+            
+            # Policy efficiency metrics (NEW Phase 2C)
+            "policy_efficiency": {
+                "coverage_percentage": enhanced_analytics["policy_efficiency"]["coverage_percentage"],
+                "efficiency_score": enhanced_analytics["policy_efficiency"]["efficiency_score"],
+                "uncovered_indices_count": enhanced_analytics["policy_efficiency"]["total_uncovered_count"],
+                "uncovered_storage_gb": enhanced_analytics["policy_efficiency"]["uncovered_storage_gb"],
+                "policy_count": len(enhanced_analytics["policy_efficiency"]["policy_details"]),
+                "recommendations": enhanced_analytics["policy_efficiency"]["recommendations"][:3]  # Top 3 for UI
+            }
+        }
+        
+        return dashboard_data
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get dashboard analytics: {str(e)}"
+        )
+
+
+@router.get("/analytics/retention-efficiency")
+async def get_retention_efficiency(db: Session = Depends(get_db)):
+    """Get detailed retention policy efficiency metrics with real correlation analysis."""
+    try:
+        # Fetch database policies for real correlation analysis
+        db_policies = crud.get_retention_policies(db)
+        
+        enhanced_analytics = await elasticsearch_manager.get_enhanced_analytics(db_policies)
+        
+        policy_efficiency_data = enhanced_analytics["policy_efficiency"]
+        
+        # Detailed efficiency breakdown by policy
+        policy_breakdown = []
+        for policy_name, policy_data in policy_efficiency_data["policy_details"].items():
+            efficiency_score = 0
+            if policy_data["pattern_matches"] > 0:
+                # Score based on coverage and storage managed
+                coverage_factor = min(policy_data["pattern_matches"] / 10, 1.0)  # Max score at 10+ matches
+                storage_factor = min(policy_data["covered_storage_gb"] / 50, 1.0)  # Max score at 50GB+
+                efficiency_score = round((coverage_factor + storage_factor) * 50, 1)
+            
+            policy_breakdown.append({
+                "policy_name": policy_name,
+                "patterns": policy_data["patterns"],
+                "tier": policy_data["tier"],
+                "retention_days": policy_data["retention_days"],
+                "covered_indices": policy_data["pattern_matches"],
+                "covered_storage_gb": policy_data["covered_storage_gb"],
+                "covered_documents": policy_data["covered_documents"],
+                "efficiency_score": efficiency_score,
+                "sample_indices": [idx["name"] for idx in policy_data["covered_indices"][:3]]  # Top 3 examples
+            })
+        
+        return {
+            "timestamp": enhanced_analytics["timestamp"],
+            "overall_efficiency": {
+                "coverage_percentage": policy_efficiency_data["coverage_percentage"],
+                "total_policies": len(policy_breakdown),
+                "active_policies": len([p for p in policy_breakdown if p["covered_indices"] > 0]),
+                "uncovered_indices": policy_efficiency_data["total_uncovered_count"],
+                "uncovered_storage_gb": policy_efficiency_data["uncovered_storage_gb"]
+            },
+            "policy_breakdown": sorted(policy_breakdown, key=lambda x: x["efficiency_score"], reverse=True),
+            "uncovered_samples": policy_efficiency_data["uncovered_indices"][:5],  # Top 5 largest
+            "recommendations": policy_efficiency_data["recommendations"],
+            "improvement_opportunities": [
+                {
+                    "type": "coverage_gap",
+                    "description": f"{policy_efficiency_data['total_uncovered_count']} indices without policy coverage",
+                    "impact": f"{policy_efficiency_data['uncovered_storage_gb']} GB at risk",
+                    "priority": "high" if policy_efficiency_data["uncovered_storage_gb"] > 10 else "medium"
+                },
+                {
+                    "type": "pattern_optimization", 
+                    "description": f"Review patterns for {len([p for p in policy_breakdown if p['covered_indices'] == 0])} inactive policies",
+                    "impact": "Better automation coverage",
+                    "priority": "medium"
+                }
+            ]
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get retention efficiency: {str(e)}"
         )
