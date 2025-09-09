@@ -193,11 +193,23 @@ docker-compose ps
 # Initialize database
 docker-compose exec api alembic upgrade head
 
-# Create development admin user
-docker-compose exec api python inject_admin.py
+# No admin script needed! First user becomes admin automatically
 ```
 
-#### 5. Verify Development Setup
+#### 5. Create Your First Admin User
+
+Instead of running a script, simply:
+
+1. **Start the frontend/login interface** (if available)
+2. **Log in with Google OAuth**
+3. **First user automatically gets admin privileges!**
+
+The system will automatically:
+- ✅ Assign Admin role to the first user
+- ✅ Grant superuser status  
+- ✅ Enable full administrative access
+
+#### 6. Verify Development Setup
 ```bash
 # Test API health
 curl http://localhost:8001/health
@@ -382,8 +394,12 @@ cp .env.example .env.prod
 
 # Initialize database
 ./axiomctl exec api alembic upgrade head
-./axiomctl exec api python inject_admin.py
+
+# No inject_admin script needed! 
+# First user to log in becomes admin automatically
 ```
+
+**🎉 Admin User Creation**: The first user to log in via Google OAuth will automatically receive admin privileges. No manual script execution required!
 
 ### 4. SSL/TLS Setup
 ```bash

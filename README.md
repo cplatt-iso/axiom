@@ -71,10 +71,15 @@ The Axiom backend is a high-performance medical imaging processing platform that
 3. **Initialize Database**
    ```bash
    ./axiomctl exec api alembic upgrade head
-   ./axiomctl exec api python inject_admin.py
    ```
 
-4. **Verify Installation**
+4. **Create First Admin User**
+   ```bash
+   # No script needed! Just log in via Google OAuth
+   # The first user to log in automatically becomes admin
+   ```
+
+5. **Verify Installation**
    ```bash
    curl http://localhost:8001/health
    # Open http://localhost:8001/api/v1/docs for API documentation

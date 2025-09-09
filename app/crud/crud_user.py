@@ -1,7 +1,7 @@
 # app/crud/crud_user.py
 from typing import List, Optional
 from sqlalchemy.orm import Session, SessionTransaction, joinedload # Import SessionTransaction
-from sqlalchemy import select
+from sqlalchemy import select, func
 import logging # Import logging
 import structlog
 
@@ -22,6 +22,11 @@ def get_user_by_google_id(db: Session, *, google_id: str) -> User | None:
     statement = select(User).where(User.google_id == google_id)
     return db.execute(statement).scalar_one_or_none()
 
+def get_user_count(db: Session) -> int:
+    """Gets the total count of users in the database."""
+    statement = select(func.count(User.id))
+    return db.execute(statement).scalar_one() or 0
+
 def create_user_from_google(db: Session, *, google_info: dict) -> User:
     """Creates a new user from validated Google token info."""
     email = google_info.get("email")
@@ -36,27 +41,43 @@ def create_user_from_google(db: Session, *, google_info: dict) -> User:
 
     logger.info(f"Creating new user for email: {email}, google_id: {google_id[:5]}...") # Log creation
 
+    # Check if this is the first user in the system
+    user_count = get_user_count(db)
+    is_first_user = user_count == 0
+    
+    if is_first_user:
+        logger.info(f"This is the first user in the system. Automatically assigning Admin role to {email}")
+
     db_user = User(
         email=email,
         full_name=full_name,
         google_id=google_id,
         picture=picture,
         is_active=True,
-        is_superuser=False,
+        is_superuser=is_first_user,  # First user becomes superuser
         hashed_password=get_password_hash("!") # Use an unusable hash
     )
 
-    # --- Assign Default 'User' Role ---
-    default_role_name = "User"
-    default_role = db.query(Role).filter(Role.name == default_role_name).first()
-    if default_role:
-        logger.info(f"Assigning default role '{default_role_name}' to new user {email}")
-        db_user.roles.append(default_role)
+    # --- Assign Role Based on First User Status ---
+    if is_first_user:
+        # First user gets Admin role
+        role_name = "Admin"
+        role_description = "First user - automatically assigned Admin privileges"
+    else:
+        # Subsequent users get default User role
+        role_name = "User"
+        role_description = "Standard user privileges"
+
+    target_role = db.query(Role).filter(Role.name == role_name).first()
+    if target_role:
+        logger.info(f"Assigning {role_name} role to new user {email}")
+        db_user.roles.append(target_role)
     else:
         # This should ideally not happen if seeding works, but handle it
-        logger.error(f"Default role '{default_role_name}' not found in database. Cannot assign to new user.")
-        # Decide if this should prevent user creation or just log a warning
-        # raise ValueError(f"Default role '{default_role_name}' missing.")
+        logger.error(f"Role '{role_name}' not found in database. Cannot assign to new user.")
+        # For the first user, we absolutely need the Admin role, so this is a critical error
+        if is_first_user:
+            raise ValueError(f"Critical: Admin role '{role_name}' missing from database. Cannot create first user.")
     # --- End Role Assignment ---
 
     db.add(db_user)
@@ -66,10 +87,17 @@ def create_user_from_google(db: Session, *, google_info: dict) -> User:
         db.commit()
         # Refresh the instance to load DB-generated values like id, created_at, updated_at
         db.refresh(db_user)
-        logger.info(f"Successfully created user ID: {db_user.id}")
+        logger.info(f"Successfully created user ID: {db_user.id} with role: {role_name}")
+        
+        if is_first_user:
+            logger.info("🎉 First admin user successfully created! No need to run inject_admin script.")
+        
         # Log timestamps to verify they are loaded
         logger.debug(f"User timestamps after refresh - Created: {db_user.created_at}, Updated: {db_user.updated_at}")
-        logger.debug(f"User roles: {[role.name for role in db_user.roles]}")
+        try:
+            logger.debug(f"User roles: {[role.name for role in db_user.roles]}")
+        except (TypeError, AttributeError):
+            logger.debug(f"User roles: {db_user.roles}")  # Fallback for mocked objects
         return db_user
     except Exception as e:
         logger.error(f"Error during user creation commit/refresh: {e}", exc_info=True)

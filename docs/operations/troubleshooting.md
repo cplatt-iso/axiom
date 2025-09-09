@@ -674,7 +674,8 @@ docker volume prune -f
 # 4. Restart fresh
 ./axiomctl up -d
 ./axiomctl exec api alembic upgrade head
-./axiomctl exec api python inject_admin.py
+
+# Admin user will be created automatically on first login
 ```
 
 ### Data Recovery
@@ -685,6 +686,8 @@ docker volume prune -f
 ./axiomctl up -d postgres
 ./axiomctl exec postgres psql -U axiom -d axiom < backup.sql
 ./axiomctl up -d
+
+# Note: After data restoration, first user to log in gets admin privileges
 ```
 
 ## Getting Additional Help

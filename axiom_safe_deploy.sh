@@ -88,7 +88,7 @@ function safe_rename_deployment() {
         echo "🔄 Rolling back..."
         ./axiomctl down
         # Restore old config files and restart
-        git checkout HEAD -- core.yml core-bootstrap.yml app/core/config.py inject_admin.py
+        git checkout HEAD -- core.yml core-bootstrap.yml app/core/config.py scripts/inject_admin.py
         ./axiomctl up -d
         exit 1
     fi

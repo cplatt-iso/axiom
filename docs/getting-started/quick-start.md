@@ -63,12 +63,24 @@ You should see containers for:
 ```bash
 # Run database migrations
 ./axiomctl exec api alembic upgrade head
-
-# Create admin user
-./axiomctl exec api python inject_admin.py
 ```
 
-## 5. Verify Installation
+## 5. Create Your First Admin User
+
+No manual script required! Simply:
+
+1. **Navigate to your Axiom instance** (e.g., `http://localhost:8001`)
+2. **Log in with Google OAuth**
+3. **You're automatically the admin!** 🎉
+
+The first user to log in receives:
+- ✅ Admin role with full privileges  
+- ✅ Superuser status
+- ✅ Access to all administrative functions
+
+All subsequent users will get standard user permissions by default.
+
+## 6. Verify Installation
 
 ### Check API Health
 ```bash
