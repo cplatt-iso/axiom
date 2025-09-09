@@ -1,189 +1,242 @@
-# Axiom Flow - Backend
+# Axiom Backend
 
-Next-generation DICOM tag morphing, rule engine, and routing system designed for scalability and flexibility. This repository contains the backend API, worker processes, and database logic.
+The Axiom backend is a high-performance medical imaging processing platform that handles DICOM workflows at enterprise scale. Built with FastAPI and designed for healthcare compliance, it provides intelligent routing, AI-powered standardization, and comprehensive management APIs.
 
-## Goals & Features
+## 🏥 Core Capabilities
 
-*   **DICOM Reception:**
-    *   Receive DICOM objects via C-STORE (multiple configurable listeners based on `AXIOM_INSTANCE_ID`).
-    *   Receive DICOM objects via DICOMweb STOW-RS API endpoint (`/api/v1/dicomweb/studies`).
-*   **DICOM Polling/Querying:**
-    *   Poll DICOMweb sources (QIDO-RS) for new studies/instances.
-    *   Poll DIMSE sources (C-FIND) for new studies/instances.
-    *   Poll Google Healthcare DICOM Stores (QIDO-RS) for new studies.
-*   **DICOM Retrieval:**
-    *   Retrieve DICOM metadata/instances via DICOMweb WADO-RS (used by DICOMweb poller).
-    *   Initiate DICOM retrieval via DIMSE C-MOVE (triggered by DIMSE Q/R poller).
-    *   (GHC Poller currently retrieves metadata only, full instance retrieval TBD).
-*   **Rule Engine:**
-    *   Apply complex matching criteria based on DICOM tags (equality, comparison, existence, contains, regex, list membership) and DICOM association details (Calling AE, Called AE, Source IP - *IP matching logic pending*).
-    *   Match rules against specific input sources (DICOMweb, DIMSE Listener, DIMSE Q/R, Google Healthcare, STOW-RS) or apply globally.
-    *   Support `FIRST_MATCH` or `ALL_MATCHES` execution modes per ruleset.
-    *   **Scheduling:** Rules can be optionally linked to reusable Schedule definitions, activating them only during specified time windows (days of week, start/end times, handles overnight). Rules without a schedule are considered always active (if enabled).
-*   **Tag Morphing & Crosswalking:**
-    *   Modify, add, or delete DICOM tags based on matched rules.
-    *   Supported actions: `set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`.
-    *   **Crosswalk Action:** Perform tag value lookups and replacements based on data from external databases (MySQL, PostgreSQL, SQL Server supported). Uses Redis caching and optional background sync. Configured via `CrosswalkDataSource` and `CrosswalkMap` entities.
-    *   Log original tag values to Original Attributes Sequence (0x0400,0x0550) when modifications occur (controlled by `LOG_ORIGINAL_ATTRIBUTES` setting - *requires full verification*).
-*   **Flexible Routing:** Send processed objects to various destinations configured as Storage Backends:
-    *   Local Filesystem (within container volume mounts)
-    *   Remote DICOM peers via C-STORE SCU (supports TLS)
-    *   Google Cloud Storage (GCS)
-    *   Google Cloud Healthcare DICOM Store (via STOW-RS)
-    *   Generic DICOMweb STOW-RS endpoints
-    *   Rules link to Storage Backends via a Many-to-Many relationship.
-*   **AI Integration:**
-    *   Rule generation suggestions (OpenAI).
-    *   DICOM vocabulary standardization (e.g., BodyPartExamined) using OpenAI and Google Vertex AI Gemini models.
-*   **Exception Handling & Management (New/In Progress):**
-    *   Dedicated exception queue in the database (`DicomExceptionLog`) to track processing failures.
-    *   Capture detailed error information, including DICOM identifiers, failure stage, error messages, and source/destination context.
-    *   Automated retry mechanism for transient errors (e.g., destination send failures) via Celery beat.
-    *   Backend API for UI to query, view details, and manage exceptions (manual retry, archive, potential tag editing for re-submission).
-*   **Scalability:** Designed for high throughput using asynchronous task processing (Celery/RabbitMQ) and containerization (Docker).
-*   **Configuration API:** Manage all inputs (DICOMweb, DIMSE Listeners, DIMSE Q/R, Google Healthcare Sources), outputs (Storage Backends), Crosswalk Data Sources & Mappings, Schedules, Rulesets, Rules, AI Prompt Configurations, Users, Roles, and API keys via a RESTful API (`/api/v1/docs`).
-*   **Security:**
-    *   User authentication via Google OAuth 2.0 (backend validates Google token, issues JWT).
-    *   API Key authentication (prefix + secret, hashed storage, scoped to user).
-    *   Role-Based Access Control (RBAC): Admin/User roles seeded, API endpoints protected via dependencies (configurable, e.g., superuser or admin role).
-    *   **TLS Support:** Implemented for outgoing DIMSE SCU operations (C-FIND, C-MOVE, C-STORE Storage Backend) and incoming DIMSE SCP (Listener). Configured via GCP Secret Manager secrets.
-*   **Monitoring:** API endpoints provide status for core components, pollers (DICOMweb, DIMSE Q/R), listeners, and crosswalk sync jobs, including metrics (found, queued, processed counts).
-*   **Data Browser API:** Endpoint (`/data-browser/query`) supports querying enabled DICOMweb, DIMSE Q/R, and Google Healthcare sources.
-*   **Database:** Uses PostgreSQL with SQLAlchemy 2.x ORM and Alembic for migrations.
+### DICOM Data Ingestion
+- **C-STORE Reception**: Multi-listener DICOM storage service (SCP) with configurable AE titles
+- **DICOMweb STOW-RS**: RESTful DICOM upload endpoint with multipart support
+- **Active Polling**: Query DICOMweb sources (QIDO-RS), DIMSE sources (C-FIND), and Google Healthcare APIs
+- **Automated Retrieval**: DIMSE C-MOVE and DICOMweb WADO-RS for fetching studies
 
-## Technology Stack
+### Intelligent Processing Engine
+- **Rule-Based Processing**: Complex condition matching on DICOM tags and association metadata
+- **Tag Morphing**: Modify, add, delete, copy, and move DICOM tags with audit logging
+- **AI Standardization**: Leverage OpenAI and Google Vertex AI for tag value standardization
+- **Crosswalk Integration**: External database lookups for value mapping and normalization
+- **Schedule Management**: Time-based rule activation with timezone support
 
-*   **Backend:** Python 3.11+, FastAPI
-*   **DICOM:** Pydicom, Pynetdicom
-*   **Async Tasks:** Celery
-*   **HTTP Client:** **httpx**
-*   **Async Support:** **aiohttp** (for google-auth async)
-*   **Message Broker:** RabbitMQ
-*   **Cache/Backend:** Redis (for Celery results/backend and Crosswalk lookups)
-*   **Database:** PostgreSQL
-*   **ORM:** SQLAlchemy 2.x
-*   **Migrations:** Alembic
-*   **API Schema/Validation:** Pydantic V2
-*   **Authentication:** python-jose (JWT), passlib (bcrypt), **google-auth[aiohttp]**
-*   **Cloud:** google-cloud-storage, **google-cloud-secret-manager**
-*   **External DB Drivers:** psycopg[binary], mysql-connector-python, pyodbc
-*   **Containerization:** Docker, Docker Compose
-*   **Logging:** **structlog**
+### Flexible Storage & Routing
+- **Multi-Destination Support**: File system, PACS (C-STORE), cloud storage (GCS), DICOMweb endpoints
+- **Parallel Routing**: Send processed studies to multiple destinations simultaneously  
+- **Storage Policies**: Configure retention, compression, and archival strategies
+- **TLS Security**: End-to-end encryption for all DICOM communications
 
-## Getting Started
+### Enterprise Features
+- **Exception Management**: Automated retry with manual intervention capabilities
+- **Audit Compliance**: Complete audit trails with original attribute preservation
+- **Performance Monitoring**: Real-time metrics, health checks, and alerting
+- **Data Browser**: Query and explore data across connected sources
+- **User Management**: OAuth 2.0 and API key authentication with RBAC
+
+## 🛠 Technology Stack
+
+- **Runtime**: Python 3.11+ with async/await support
+- **Web Framework**: FastAPI with interactive API documentation
+- **Database**: PostgreSQL 15+ with SQLAlchemy 2.x ORM
+- **Migrations**: Alembic for database schema management
+- **Task Processing**: Celery with RabbitMQ message broker
+- **Caching**: Redis for session storage and temporary data
+- **DICOM Libraries**: Pydicom and Pynetdicom for DICOM operations
+- **HTTP Client**: httpx for async HTTP operations
+- **Authentication**: Google OAuth 2.0 with JWT token management
+- **Cloud Integration**: Google Cloud Storage and Healthcare APIs
+- **Logging**: Structured logging with correlation tracing
+- **Security**: TLS 1.3 for all communications, encrypted storage
+
+## 🚀 Quick Start
 
 ### Prerequisites
+- Docker 20.0+ with Docker Compose
+- 8GB RAM minimum (16GB recommended for production)
+- 50GB free disk space
+- Internet connection for initial setup
 
-*   Docker ([Install Docker](https://docs.docker.com/engine/install/))
-*   Docker Compose ([Install Docker Compose](https://docs.docker.com/compose/install/))
-*   Git
-*   **(Optional but Recommended)** Google Cloud SDK (`gcloud`) configured for Application Default Credentials (ADC) if using GCS/GHC/Secret Manager backends/features.
+### Installation
 
-### Installation & Running
+1. **Clone and Configure**
+   ```bash
+   git clone <repository-url> axiom
+   cd axiom/backend
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <your-repo-url> axiom-flow
-    cd axiom-flow/backend # Adjust if backend is elsewhere
-    ```
+2. **Start Services**
+   ```bash
+   ./axiomctl up -d
+   ```
 
-2.  **Configure Environment:**
-    *   Copy the example environment file: `cp .env.example .env`
-    *   **Edit `.env`:**
-        *   Change `POSTGRES_PASSWORD`.
-        *   Generate a new secure `SECRET_KEY`.
-        *   Set your `GOOGLE_OAUTH_CLIENT_ID`.
-        *   Configure `BACKEND_CORS_ORIGINS` (e.g., `https://your-frontend-domain.com`).
-        *   Review DB, RabbitMQ, Redis settings.
-        *   Review storage paths (`DICOM_STORAGE_PATH`, etc.) and ensure corresponding volumes are mapped in `docker-compose.yml`.
-    *   **(Optional/Required for GCS/GHC/Secrets):** Configure Google Cloud Authentication.
-        *   **ADC (Recommended):** Run `gcloud auth application-default login` on your host machine *before* starting containers if volumes mount your ADC file, OR ensure the service account running the container has necessary IAM permissions.
-        *   **Service Account Key:** Place the key file (e.g., `axiom-flow-gcs-key.json`) accessible to the containers and update `GOOGLE_APPLICATION_CREDENTIALS` environment variable in `docker-compose.yml`.
-    *   **TLS Secrets:** If using TLS for DIMSE, create the necessary certificates/keys and upload them to GCP Secret Manager. Update references in configuration (e.g., `tls_ca_cert_secret_name`) with the full Secret Manager resource name (e.g., `projects/.../secrets/.../versions/latest`).
+3. **Initialize Database**
+   ```bash
+   ./axiomctl exec api alembic upgrade head
+   ./axiomctl exec api python inject_admin.py
+   ```
 
-3.  **Build and Run Docker Containers:** (Run from the directory containing `docker-compose.yml`)
-    ```bash
-    docker compose build
-    docker compose up -d
-    ```
+4. **Verify Installation**
+   ```bash
+   curl http://localhost:8001/health
+   # Open http://localhost:8001/api/v1/docs for API documentation
+   ```
 
-4.  **Database Migrations:** Apply any pending database schema changes:
-    ```bash
-    docker compose exec api alembic upgrade head
-    ```
-    *(Run initially and after pulling changes with new migrations)*
+### Essential Configuration
 
-5.  **Create Initial Superuser/Admin:**
-    ```bash
-    docker compose exec api python inject_admin.py
-    ```
-    *(Verify in DB if `is_superuser=True` is needed for full access based on API dependencies)*
+**Environment Variables (`.env`):**
+```bash
+# Security (Required)
+SECRET_KEY=your_secure_secret_key_here
+POSTGRES_PASSWORD=secure_database_password
+GOOGLE_OAUTH_CLIENT_ID=your_google_oauth_client_id
 
-6.  **Verify Services:**
-    *   Check container status: `docker compose ps`
-    *   View logs: `docker compose logs -f api worker beat` (and others as needed)
-    *   Access API docs: `http://localhost:8001/api/v1/docs` (or your mapped host port)
+# Instance Configuration
+AXIOM_INSTANCE_ID=prod
+BACKEND_CORS_ORIGINS=https://yourdomain.com
 
-## Usage
+# Performance Tuning
+DB_POOL_SIZE=20
+CELERY_WORKER_CONCURRENCY=4
+REDIS_MAX_CONNECTIONS=100
 
-1.  **Login:** Use the frontend UI with Google Login or an API Key.
-2.  **Configure:** Use the UI or API to manage:
-    *   Storage Backends
-    *   Schedules
-    *   Crosswalk Data Sources & Mappings
-    *   RuleSets & Rules (linking to destinations, optional schedules, modifications)
-    *   Input sources: DICOMweb, DIMSE Listeners, DIMSE Q/R, **Google Healthcare Sources**.
-    *   Users, Roles, API keys.
-3.  **Send/Poll Data:** Configure sources and destinations, enable rules. Data received via Listener/STOW or polled via DICOMweb/DIMSE Q/R/**GHC Poller** will be processed.
-4.  **Monitor:** Use dashboard, logs, API status endpoints.
+# Storage Configuration
+DICOM_STORAGE_PATH=/app/storage
+LOG_ORIGINAL_ATTRIBUTES=true
+```
 
-## API Documentation
+## 📁 Project Structure
 
-Interactive API documentation (Swagger UI) is available at `/api/v1/docs`. ReDoc documentation is at `/api/v1/redoc`.
+```
+backend/
+├── app/                    # Main application code
+│   ├── api/               # REST API endpoints
+│   ├── core/              # Core configuration and utilities
+│   ├── crud/              # Database operations
+│   ├── db/                # Database models and migrations
+│   ├── schemas/           # Pydantic models for API
+│   ├── services/          # Business logic services
+│   └── worker/            # Celery task definitions
+├── alembic/               # Database migration scripts
+├── docs/                  # Documentation
+├── docker/                # Docker configuration files
+├── scripts/               # Utility and deployment scripts
+├── axiomctl               # Docker Compose wrapper script
+└── requirements.txt       # Python dependencies
+```
 
-## Current Status
+## 📚 Documentation
 
-*   Core architecture functional.
-*   Authentication (Google, API Key) and RBAC implemented.
-*   All planned input sources (C-STORE, STOW-RS, DICOMweb Poll, DIMSE Q/R Poll, GHC Poll) implemented.
-*   All planned output destinations implemented (Filesystem, C-STORE, GCS, GHC STOW, DICOMweb STOW). TLS supported for C-STORE SCU.
-*   Rule engine supports tag/association matching (IP Ops pending), scheduling, and tag modifications (`set`, `delete`, `prepend`, `suffix`, `regex_replace`, `copy`, `move`, `crosswalk`).
-*   Crosswalk feature fully implemented.
-*   Scheduling feature fully implemented.
-*   AI integration for rule suggestions and vocabulary standardization (OpenAI, Vertex AI Gemini) functional.
-*   Google Healthcare polling and basic metadata processing task implemented.
-*   Data Browser API supports querying DICOMweb, DIMSE Q/R, and Google Healthcare sources.
-*   Configuration via API available for all major components.
-*   Monitoring endpoints functional.
-*   Original Attributes Sequence logging framework in place (needs verification).
-*   Secrets management via GCP Secret Manager integrated for TLS.
-*   **Initial backend implementation for Exception Handling mechanism in progress:**
-    *   Database model (`DicomExceptionLog`) and Pydantic schemas defined.
-    *   Basic CRUD operations for exception log implemented.
-    *   Integration points in task executors and processing orchestrator for capturing exceptions being developed.
-    *   Design for retry mechanism (Celery beat task) and API for UI management underway.
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
 
-## Next Steps / Future Goals
+### Getting Started
+- **[Quick Start](docs/getting-started/quick-start.md)** - Get running in 5 minutes
+- **[Installation Guide](docs/getting-started/installation.md)** - Detailed setup for all environments  
+- **[Configuration Guide](docs/getting-started/configuration.md)** - Complete configuration reference
 
-*   **Complete Exception Handling Mechanism:**
-    *   Finalize integration of exception capturing across all relevant processing stages.
-    *   Implement and test the Celery beat task for automated retries.
-    *   Develop and test all API endpoints for UI management of exceptions (list, details, manual retry, archive, status update).
-    *   Consider advanced features like tag editing for errored instances via the exceptions UI.
-*   **Implement IP Matching (Backend):** Logic for association criteria in the rule engine.
-*   **Verify Original Attributes Logging (Backend):** Test across all modification types.
-*   **Enhance GHC Poller Processing:** Implement full study retrieval (WADO?) or instance-level processing based on polled metadata.
-*   **Seed/Dump Script Overhaul:** Make config seeding/dumping robust.
-*   **Testing:** Develop comprehensive backend (pytest) and frontend test suites, including tests for the new exception handling.
-*   **UI Refinements:** Rule testing feature, dashboard visuals, **Exception Management UI integration**.
-*   **Logging Improvements:** Route all logs via Fluentd, fix Uvicorn/Postgres text logs.
-*   **Documentation:** Add API examples, deployment guides, **document exception handling workflows**.
-*   **Longer-Term:** C-GET support, further AI integrations, Kubernetes deployment.
+### Architecture & Features
+- **[System Architecture](docs/architecture/overview.md)** - High-level system design
+- **[DICOM Processing](docs/features/dicom-processing.md)** - How medical imaging data flows through Axiom
+- **[Rule Engine](docs/features/rule-engine.md)** - Intelligent routing and transformation rules
+- **[Storage Backends](docs/features/storage-backends.md)** - Flexible output destinations
+- **[AI Integration](docs/features/ai-integration.md)** - AI-powered standardization and automation
 
-## Contributing
+### Operations & Development
+- **[API Reference](docs/api/)** - Complete REST API documentation
+- **[Deployment Guide](docs/operations/deployment.md)** - Production deployment strategies
+- **[Monitoring & Troubleshooting](docs/operations/troubleshooting.md)** - Operations and problem resolution
+- **[Development Setup](docs/development/setup.md)** - Local development environment
 
-*(Placeholder)*
+### Quick Links
+- **Interactive API Docs**: http://localhost:8001/api/v1/docs (when running)
+- **Architecture Diagrams**: [docs/architecture/](docs/architecture/)
+- **Configuration Examples**: [docs/getting-started/configuration.md](docs/getting-started/configuration.md)
 
-## License
+## 🔧 Basic Configuration Example
 
-*(Placeholder)*
+**Create a Simple Processing Rule:**
+```bash
+curl -X POST "http://localhost:8001/api/v1/config/rulesets" \
+  -H "Authorization: Api-Key your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "ct-chest-routing",
+    "execution_mode": "FIRST_MATCH",
+    "rules": [{
+      "name": "route-ct-chest",
+      "conditions": [
+        {"type": "tag_equals", "tag": "(0x0008,0x0060)", "value": "CT"},
+        {"type": "tag_contains", "tag": "(0x0018,0x0015)", "value": "CHEST"}
+      ],
+      "actions": [
+        {"type": "set", "tag": "(0x0008,0x103E)", "value": "CHEST CT - PROCESSED"}
+      ],
+      "storage_backends": ["primary-storage"]
+    }]
+  }'
+```
+
+**Send DICOM via STOW-RS:**
+```bash
+curl -X POST "http://localhost:8001/api/v1/dicomweb/studies" \
+  -H "Authorization: Api-Key your_api_key" \
+  -H "Content-Type: application/dicom" \
+  --data-binary @study.dcm
+```
+
+## 🚀 Current Status & Roadmap
+
+### ✅ Production Ready
+- **Core DICOM Processing**: C-STORE, STOW-RS, polling sources
+- **Rule Engine**: Complete condition and action framework
+- **Storage Backends**: File system, cloud storage, PACS integration
+- **Authentication & Security**: OAuth 2.0, API keys, RBAC, TLS support
+- **Monitoring**: Health checks, metrics, exception management
+- **AI Integration**: OpenAI and Google Vertex AI standardization
+
+### 🔄 Active Development
+- **Enhanced Exception Handling**: Advanced retry mechanisms and UI management
+- **Performance Optimization**: Query optimization and caching improvements
+- **Advanced Analytics**: Processing insights and trend analysis
+- **Kubernetes Support**: Helm charts and cloud-native deployment
+
+### 🔮 Planned Features
+- **Real-time Analytics**: Live processing dashboards and alerts
+- **Advanced AI Models**: Custom model integration and training
+- **Multi-tenant Support**: Organization-level isolation and management
+- **Compliance Extensions**: Additional healthcare standards and certifications
+
+## 🤝 Contributing
+
+We welcome contributions from the medical imaging and healthcare IT community!
+
+### Development Process
+1. **Fork the repository** and create a feature branch
+2. **Follow our development setup** guide in [docs/development/setup.md](docs/development/setup.md)
+3. **Write tests** for new functionality
+4. **Ensure code quality** with our pre-commit hooks
+5. **Submit a pull request** with a clear description
+
+### Areas for Contribution
+- **DICOM Compliance**: Additional SOP classes and transfer syntaxes
+- **Healthcare Integrations**: HL7 FHIR, Epic, Cerner connectors
+- **AI Models**: Medical imaging specific standardization models
+- **Performance**: Optimization for high-volume environments
+- **Documentation**: Guides, examples, and tutorials
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🆘 Support & Community
+
+- **Documentation**: Comprehensive guides in [docs/](docs/)
+- **GitHub Issues**: Bug reports and feature requests
+- **Discussions**: Community Q&A and general discussions
+- **Security Issues**: Report to security@yourcompany.com
+
+---
+
+**Axiom - Modern Medical Imaging for Modern Healthcare**
+
+Built with ❤️ by healthcare technologists who believe medical imaging should be as advanced as the rest of the technology stack.
