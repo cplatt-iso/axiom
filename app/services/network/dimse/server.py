@@ -33,6 +33,66 @@ from app.services.network.dimse.handlers import handle_store, handle_echo, handl
 from app.db.session import SessionLocal, Session
 from app.crud import crud_dimse_listener_state, crud_dimse_listener_config
 from app.db import models
+from pydicom.errors import InvalidDicomError
+
+# Monkey patch for pynetdicom to handle malformed DICOM command sets
+def _patch_pynetdicom_for_malformed_dicom():
+    """
+    Patch pynetdicom to gracefully handle malformed DICOM data that's missing CommandDataSetType.
+    This prevents the reactor thread from crashing when receiving garbage DICOM.
+    """
+    import structlog
+    patch_logger = structlog.get_logger("pynetdicom_patch")
+    
+    try:
+        from pynetdicom.dimse_messages import DIMSEMessage
+        from pydicom.dataset import Dataset
+        
+        # Store the original decode_msg method
+        original_decode_msg = DIMSEMessage.decode_msg
+        
+        def safe_decode_msg(self, primitive, assoc=None):
+            """
+            Safely decode DIMSE messages with error handling for malformed command sets.
+            """
+            try:
+                return original_decode_msg(self, primitive, assoc)
+            except AttributeError as e:
+                if "CommandDataSetType" in str(e) or "Dataset" in str(e):
+                    # Log the error but don't crash
+                    patch_logger.error(
+                        "Malformed DICOM command set received - missing required fields",
+                        error=str(e),
+                        calling_ae=assoc.requestor.ae_title if assoc and assoc.requestor else "unknown",
+                        called_ae=assoc.acceptor.ae_title if assoc and assoc.acceptor else "unknown",
+                        error_type="malformed_command_set"
+                    )
+                    
+                    # Return False to indicate decoding failed
+                    # This will cause pynetdicom to reject the message instead of crashing
+                    return False
+                else:
+                    # Re-raise other AttributeErrors
+                    raise
+            except Exception as e:
+                patch_logger.error(
+                    "Unexpected error during DICOM message decoding",
+                    error=str(e),
+                    error_type="dimse_decode_error"
+                )
+                return False
+        
+        # Apply the patch
+        DIMSEMessage.decode_msg = safe_decode_msg
+        patch_logger.info("Applied pynetdicom monkey patch for malformed DICOM handling")
+        
+    except ImportError as e:
+        patch_logger.warning("Could not apply pynetdicom patch - module not found", error=str(e))
+    except Exception as e:
+        patch_logger.error("Failed to apply pynetdicom patch", error=str(e))
+
+# Apply the patch immediately when this module is imported
+_patch_pynetdicom_for_malformed_dicom()
 
 # --- CORRECTED: GCP Secret Manager Imports ---
 # Import the main utility module and the specific exceptions we might handle
@@ -150,12 +210,173 @@ def log_assoc_event(event, msg_prefix):
         logger.info(msg_prefix, raw_event_assoc=str(event.assoc))
 
 
+def handle_malformed_dicom_error(event):
+    """
+    Handle errors that occur during DICOM message processing.
+    This catches cases where the sender provides malformed DICOM data
+    that pynetdicom can't decode properly.
+    """
+    assoc = event.assoc
+    log = logger.bind(
+        event_type="ERROR_HANDLER",
+        assoc_id=assoc.native_id if assoc else "unknown",
+        calling_ae=assoc.requestor.ae_title if assoc and assoc.requestor else "unknown",
+        called_ae=assoc.acceptor.ae_title if assoc and assoc.acceptor else "unknown",
+        source_ip=assoc.requestor.address if assoc and assoc.requestor else "unknown"
+    )
+    
+    log.error(
+        "Malformed DICOM data received - aborting association",
+        error_type="malformed_dicom",
+        error_details=str(event) if hasattr(event, '__str__') else "Unknown error event"
+    )
+    
+    # Abort the association gracefully
+    if assoc and assoc.is_established:
+        try:
+            assoc.abort()
+            log.info("Association aborted due to malformed DICOM data")
+        except Exception as abort_error:
+            log.error("Failed to abort association", abort_error=str(abort_error))
+    
+    return None
+
+
+def handle_data_recv(event):
+    """
+    Handle raw data reception to catch malformed DICOM before it reaches the DIMSE decoder.
+    This can help identify problematic senders before they crash the reactor thread.
+    """
+    try:
+        # Log reception for debugging
+        data_size = len(event.data) if hasattr(event, 'data') and event.data else 0
+        
+        log = logger.bind(
+            event_type="DATA_RECV",
+            assoc_id=event.assoc.native_id if hasattr(event, 'assoc') and event.assoc else "unknown",
+            calling_ae=event.assoc.requestor.ae_title if hasattr(event, 'assoc') and event.assoc and event.assoc.requestor else "unknown",
+            data_size=data_size
+        )
+        
+        log.debug("Received raw DICOM data", data_bytes=data_size)
+        
+        # Let pynetdicom continue processing
+        return None
+        
+    except Exception as e:
+        logger.error("Error in data reception handler", error=str(e))
+        return None
+
+
+def handle_dimse_recv(event):
+    """
+    Handle DIMSE message reception with error checking for malformed command sets.
+    This catches errors before they reach the specific operation handlers.
+    """
+    try:
+        log = logger.bind(
+            event_type="DIMSE_RECV",
+            assoc_id=event.assoc.native_id if hasattr(event, 'assoc') and event.assoc else "unknown",
+            calling_ae=event.assoc.requestor.ae_title if hasattr(event, 'assoc') and event.assoc and event.assoc.requestor else "unknown"
+        )
+        
+        # Try to access the primitive to see if it's malformed
+        if hasattr(event, 'primitive') and event.primitive:
+            primitive = event.primitive
+            log.debug("Received DIMSE primitive", primitive_type=type(primitive).__name__)
+            
+            # Check if this is a C-STORE with command set issues
+            if hasattr(primitive, 'MessageID'):
+                log.debug("DIMSE message received", message_id=primitive.MessageID)
+        
+        # Let pynetdicom continue processing
+        return None
+        
+    except AttributeError as e:
+        if "CommandDataSetType" in str(e):
+            log = logger.bind(
+                event_type="MALFORMED_DIMSE",
+                assoc_id=event.assoc.native_id if hasattr(event, 'assoc') and event.assoc else "unknown"
+            )
+            log.error(
+                "Malformed DIMSE message - missing CommandDataSetType",
+                error=str(e),
+                action="aborting_association"
+            )
+            # Abort the association
+            if hasattr(event, 'assoc') and event.assoc and event.assoc.is_established:
+                event.assoc.abort()
+            return None
+        else:
+            raise
+    except Exception as e:
+        logger.error("Error in DIMSE reception handler", error=str(e))
+        return None
+
+
+# Wrapper function to add error handling to existing handlers
+def safe_handler_wrapper(handler_func):
+    """
+    Wraps a handler function with error handling for malformed DICOM data.
+    Specifically catches AttributeError for missing CommandDataSetType and similar issues.
+    """
+    def wrapped_handler(event):
+        try:
+            return handler_func(event)
+        except AttributeError as e:
+            if "CommandDataSetType" in str(e) or "Dataset" in str(e):
+                log = logger.bind(
+                    event_type="MALFORMED_DICOM_ERROR",
+                    assoc_id=event.assoc.native_id if hasattr(event, 'assoc') and event.assoc else "unknown",
+                    calling_ae=event.assoc.requestor.ae_title if hasattr(event, 'assoc') and event.assoc and event.assoc.requestor else "unknown",
+                    error_type="missing_command_field"
+                )
+                
+                log.error(
+                    "Received malformed DICOM with missing command fields",
+                    error=str(e),
+                    error_details="Sender provided DICOM data missing required command elements like CommandDataSetType"
+                )
+                
+                # Return appropriate DICOM status
+                if "C_STORE" in handler_func.__name__ or handler_func == handle_store:
+                    return 0xC000  # DICOM status: Failure - Cannot understand
+                elif "C_ECHO" in handler_func.__name__ or handler_func == handle_echo:
+                    return 0xC000  # DICOM status: Failure - Cannot understand  
+                elif "C_FIND" in handler_func.__name__ or handler_func == handle_c_find:
+                    return 0xC000  # DICOM status: Failure - Cannot understand
+                else:
+                    return 0xC000  # Generic failure status
+            else:
+                # Re-raise if it's not the specific error we're handling
+                raise
+        except InvalidDicomError as e:
+            log = logger.bind(
+                event_type="INVALID_DICOM_ERROR", 
+                assoc_id=event.assoc.native_id if hasattr(event, 'assoc') and event.assoc else "unknown"
+            )
+            log.error("Invalid DICOM data received", error=str(e))
+            return 0xC000  # DICOM status: Failure - Cannot understand
+        except Exception as e:
+            # Log unexpected errors but don't crash the server
+            log = logger.bind(
+                event_type="HANDLER_ERROR",
+                assoc_id=event.assoc.native_id if hasattr(event, 'assoc') and event.assoc else "unknown"
+            )
+            log.error("Unexpected error in DICOM handler", error=str(e), exc_info=True)
+            return 0xC000  # DICOM status: Failure
+    
+    return wrapped_handler
+
+
 HANDLERS = [
-    (evt.EVT_C_STORE, handle_store),
-    (evt.EVT_C_ECHO, handle_echo),
-    (evt.EVT_C_FIND, handle_c_find),
-    (evt.EVT_N_CREATE, handle_n_create),
-    (evt.EVT_N_SET, handle_n_set),
+    (evt.EVT_C_STORE, safe_handler_wrapper(handle_store)),
+    (evt.EVT_C_ECHO, safe_handler_wrapper(handle_echo)),
+    (evt.EVT_C_FIND, safe_handler_wrapper(handle_c_find)),
+    (evt.EVT_N_CREATE, safe_handler_wrapper(handle_n_create)),
+    (evt.EVT_N_SET, safe_handler_wrapper(handle_n_set)),
+    (evt.EVT_DATA_RECV, handle_data_recv),
+    (evt.EVT_DIMSE_RECV, handle_dimse_recv),
     (evt.EVT_ACCEPTED, lambda event: log_assoc_event(event, "Association Accepted")),
     (evt.EVT_ESTABLISHED, lambda event: log_assoc_event(event, "Association Established")),
     (evt.EVT_REJECTED, lambda event: log_assoc_event(event, "Association Rejected")),
@@ -289,6 +510,19 @@ def _run_server_thread(ae: AE, address: tuple, ssl_context: Optional[ssl.SSLCont
         thread_log.info(f"Starting pynetdicom AE server {tls_status}...")
         ae.start_server(address, evt_handlers=HANDLERS, block=True, ssl_context=ssl_context)
         thread_log.info("Pynetdicom server stopped normally.")
+    except AttributeError as e:
+        if "CommandDataSetType" in str(e):
+            thread_log.error(
+                "Malformed DICOM received - missing CommandDataSetType field",
+                error=str(e),
+                error_type="malformed_dicom_command_set",
+                details="Remote system sent DICOM data missing required command elements"
+            )
+            # Don't set server_thread_exception for this - it's an expected error from bad clients
+            # Just log it and continue
+        else:
+            thread_log.error("AttributeError in server thread", error=str(e), exc_info=True)
+            server_thread_exception = e
     except Exception as e:
         thread_log.error("Exception in server thread", error=str(e), exc_info=True)
         server_thread_exception = e

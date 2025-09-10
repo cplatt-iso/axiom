@@ -138,6 +138,20 @@ class CStoreBackendConfig(StorageBackendConfig):
         nullable=True,
         comment="Identifier of the sender configuration to use for this destination."
     )
+    transfer_syntax_strategy: Mapped[str] = mapped_column(
+        String(50),
+        nullable=True,
+        default="conservative",
+        server_default='conservative',
+        comment="Strategy for transfer syntax negotiation (pynetdicom only)."
+    )
+    max_association_retries: Mapped[int] = mapped_column(
+        Integer,
+        nullable=True,
+        default=3,
+        server_default='3',
+        comment="Max association retries with different strategies (pynetdicom only)."
+    )
     __mapper_args__ = {"polymorphic_identity": "cstore"}
     __table_args__ = {'extend_existing': True}
 

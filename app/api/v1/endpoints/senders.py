@@ -14,6 +14,11 @@ AVAILABLE_SENDERS = [
         "identifier": "dcm4che",
         "name": "dcm4che",
         "description": "Sender using the dcm4che toolkit's storescu utility."
+    },
+    {
+        "identifier": "dicom-rs",
+        "name": "dicom-rs",
+        "description": "High-performance sender using the Rust dicom-rs library."
     }
 ]
 

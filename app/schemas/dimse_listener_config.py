@@ -11,6 +11,8 @@ from typing import Optional, Any # <-- Added Any
 from datetime import datetime
 import re
 
+from app.schemas.enums import DicomImplementationType
+
 AE_TITLE_PATTERN = re.compile(r"^[ A-Za-z0-9._-]{1,16}$")
 
 class DimseListenerConfigBase(BaseModel):
@@ -21,7 +23,7 @@ class DimseListenerConfigBase(BaseModel):
     is_enabled: bool = Field(True, description="Whether this listener configuration is active and should be started.")
     instance_id: Optional[str] = Field(None, min_length=1, max_length=255, description="Optional: Unique ID matching AXIOM_INSTANCE_ID env var of the listener process.")
 
-    # --- TLS Fields Added to Base ---
+    # --- TLS Configuration Fields ---
     tls_enabled: bool = Field(False, description="Enable TLS for incoming connections.")
     tls_cert_secret_name: Optional[str] = Field(None, description="Secret Manager resource name for the listener's server certificate (PEM). REQUIRED if TLS enabled.")
     tls_key_secret_name: Optional[str] = Field(None, description="Secret Manager resource name for the listener's private key (PEM). REQUIRED if TLS enabled.")
@@ -73,13 +75,12 @@ class DimseListenerConfigBase(BaseModel):
 
 class DimseListenerConfigCreate(DimseListenerConfigBase):
     # Inherits TLS fields and validation from Base
-    listener_type: str = Field("pynetdicom", description="The type of listener implementation ('pynetdicom' or 'dcm4che').")
+    listener_type: DicomImplementationType = Field(DicomImplementationType.PYNETDICOM, description="The type of listener implementation.")
 
     @field_validator('listener_type')
     @classmethod
-    def validate_listener_type(cls, value: str) -> str:
-        if value not in ["pynetdicom", "dcm4che"]:
-            raise ValueError("Listener type must be either 'pynetdicom' or 'dcm4che'")
+    def validate_listener_type(cls, value: DicomImplementationType) -> DicomImplementationType:
+        # Enum validation is automatic, but we can add extra logic here if needed
         return value
 
 
@@ -91,7 +92,7 @@ class DimseListenerConfigUpdate(BaseModel):
     port: Optional[int] = Field(None, gt=0, lt=65535)
     is_enabled: Optional[bool] = None
     instance_id: Optional[str] = Field(None, min_length=1, max_length=255)
-    listener_type: Optional[str] = None
+    listener_type: Optional[DicomImplementationType] = None
 
     # --- TLS Fields Added to Update ---
     tls_enabled: Optional[bool] = None
@@ -117,9 +118,8 @@ class DimseListenerConfigUpdate(BaseModel):
 
     @field_validator('listener_type')
     @classmethod
-    def validate_update_listener_type(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in ["pynetdicom", "dcm4che"]:
-            raise ValueError("Listener type must be either 'pynetdicom' or 'dcm4che'")
+    def validate_update_listener_type(cls, value: Optional[DicomImplementationType]) -> Optional[DicomImplementationType]:
+        # Enum validation is automatic, but we can add extra logic here if needed
         return value
 
     # --- Model Validator for Update Schema ---

@@ -121,6 +121,9 @@ python scripts/inject_admin.py --force-old-behavior
 
 # Run test suite
 python -m pytest app/tests/crud/test_crud_user_first_admin.py -v
+
+# Run validation test
+python app/tests/test_first_user_admin.py
 ```
 
 ### Validation Script

@@ -1,0 +1,66 @@
+# Multi-stage build for Rust DICOM service with enhanced features
+FROM rust:1.89-slim-bookworm as builder
+
+# Install dependencies for building
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/docker/rust-dicom-service
+
+# Copy the source code
+COPY docker/rust-dicom-service/ .
+
+# Build the application in release mode
+RUN cargo build --release --bin axiom-dicom-service
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN groupadd -r axiom && useradd -r -g axiom axiom
+
+# Create necessary directories
+RUN mkdir -p /dicom_data/incoming /dicom_data/dustbin \
+    && chown -R axiom:axiom /dicom_data
+
+# Copy the built binary from builder stage
+COPY --from=builder /app/docker/rust-dicom-service/target/release/axiom-dicom-service /usr/local/bin/axiom-dicom-service
+
+# Make sure the binary is executable
+RUN chmod +x /usr/local/bin/axiom-dicom-service
+
+# Switch to non-root user
+USER axiom
+
+# Set default environment variables
+ENV RUST_LOG=info
+ENV RABBITMQ_HOST=rabbitmq
+ENV RABBITMQ_PORT=5672
+ENV RABBITMQ_USER=guest
+ENV RABBITMQ_PASSWORD=guest
+ENV RABBITMQ_QUEUE=rules_engine_intake
+ENV DICOM_INCOMING_DIR=/dicom_data/incoming
+ENV DICOM_DUSTBIN_DIR=/dicom_data/dustbin
+ENV API_BASE_URL=http://api:8000
+ENV API_KEY=""
+ENV STUDY_INACTIVITY_TIMEOUT=5
+ENV HEARTBEAT_INTERVAL=30
+ENV DATABASE_URL=postgresql://postgres:password@postgres:5432/axiom
+ENV CELERY_TASK_NAME=app.worker.rules_engine.process_dicom_file
+
+# Expose the DICOM port
+EXPOSE 11112
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ps aux | grep axiom-dicom-service | grep -v grep || exit 1
+
+# Run the service
+CMD ["/usr/local/bin/axiom-dicom-service"]

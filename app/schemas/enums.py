@@ -66,6 +66,12 @@ class MppsStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     DISCONTINUED = "DISCONTINUED"
 
+class DicomImplementationType(str, enum.Enum):
+    """Types of DICOM implementation engines available for listeners and senders."""
+    PYNETDICOM = "pynetdicom"
+    DCM4CHE = "dcm4che"
+    DICOM_RS = "dicom-rs"  # Our new Rust implementation
+
 class HealthStatus(str, enum.Enum):
     """Health status of a scraper source."""
     UNKNOWN = "UNKNOWN"

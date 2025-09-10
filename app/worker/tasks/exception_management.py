@@ -8,8 +8,10 @@ import uuid
 import structlog
 from structlog.stdlib import BoundLogger
 from celery import shared_task
+from celery.exceptions import Retry
 from sqlalchemy.orm import Session
 import pydicom
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import crud
 from app.db.session import SessionLocal
@@ -18,6 +20,7 @@ from app.db.models.dicom_exception_log import DicomExceptionLog
 from app.schemas.enums import ExceptionStatus, ExceptionProcessingStage
 from app.services.storage_backends import get_storage_backend
 from app.worker.task_utils import build_storage_backend_config_dict, _safe_get_dicom_value
+from app.worker.error_handlers import RedisConnectionHandler
 
 # Logger setup
 logger = structlog.get_logger(__name__)
@@ -307,6 +310,17 @@ def retry_pending_exceptions_task(self):
             "rescheduled_count": rescheduled_this_run,
             "permanently_failed_count": permanently_failed_this_run,
             "skipped_count": skipped_this_run}
+    except RedisConnectionError as redis_exc:
+        log.error(
+            "Redis connection error in retry_pending_exceptions_task - Redis service may be down",
+            error=str(redis_exc),
+            error_type="RedisConnectionError",
+            exc_info=True
+        )
+        if db and db.is_active:
+            db.rollback()
+        # Retry the task later when Redis is available
+        raise self.retry(countdown=300, max_retries=3, exc=redis_exc)
     except Exception as task_level_exc:
         log.error(
             "Unhandled critical exception in retry_pending_exceptions_task itself.",

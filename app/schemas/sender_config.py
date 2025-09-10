@@ -2,6 +2,7 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Literal, Union, Annotated
 from datetime import datetime
+from .enums import DicomImplementationType
 
 class SenderConfigBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Unique name for this sender configuration.")
@@ -20,6 +21,11 @@ class Dcm4cheSenderConfig(BaseModel):
     local_ae_title: str = Field("AXIOM_SCU", max_length=16, description="The AE Title our dcm4che sender will use when associating.")
     # Add any other dcm4che-specific fields here in the future
 
+class DicomRsSenderConfig(BaseModel):
+    sender_type: Literal["dicom-rs"] = "dicom-rs"
+    local_ae_title: str = Field("AXIOM_SCU", max_length=16, description="The AE Title our dicom-rs sender will use when associating.")
+    # Add any other dicom-rs-specific fields here in the future
+
 # --- Create Schemas ---
 
 class SenderConfigCreate_Pynetdicom(SenderConfigBase, PynetdicomSenderConfig):
@@ -28,10 +34,14 @@ class SenderConfigCreate_Pynetdicom(SenderConfigBase, PynetdicomSenderConfig):
 class SenderConfigCreate_Dcm4che(SenderConfigBase, Dcm4cheSenderConfig):
     pass
 
+class SenderConfigCreate_DicomRs(SenderConfigBase, DicomRsSenderConfig):
+    pass
+
 SenderConfigCreate = Annotated[
     Union[
         SenderConfigCreate_Pynetdicom,
         SenderConfigCreate_Dcm4che,
+        SenderConfigCreate_DicomRs,
     ],
     Field(discriminator="sender_type")
 ]
@@ -68,10 +78,19 @@ class SenderConfigRead_Dcm4che(SenderConfigBase, Dcm4cheSenderConfig):
     class Config:
         from_attributes = True
 
+class SenderConfigRead_DicomRs(SenderConfigBase, DicomRsSenderConfig):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 SenderConfigRead = Annotated[
     Union[
         SenderConfigRead_Pynetdicom,
-        SenderConfigRead_Dcm4che
+        SenderConfigRead_Dcm4che,
+        SenderConfigRead_DicomRs
     ],
     Field(discriminator="sender_type")
 ]

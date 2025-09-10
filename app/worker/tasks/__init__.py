@@ -36,6 +36,12 @@ from .health_monitoring import (
     health_monitoring_task,
 )
 
+# Redis Health Tasks
+from .redis_health import (
+    redis_health_check_task,
+    worker_startup_check_task,
+)
+
 # Utility functions (not tasks, but shared utilities)
 from .utils import (
     _move_to_error_dir,
@@ -62,6 +68,10 @@ __all__ = [
     
     # Health Monitoring
     "health_monitoring_task",
+    
+    # Redis Health
+    "redis_health_check_task",
+    "worker_startup_check_task",
     
     # Utilities (for internal use)
     "_move_to_error_dir",

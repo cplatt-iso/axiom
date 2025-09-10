@@ -1,0 +1,57 @@
+[package]
+name = "axiom-dicom-service"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+test-utils = []
+
+[lib]
+name = "axiom_dicom_service"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime - compatible with Rust 1.75, add signal feature
+tokio = { version = "1.20", features = ["rt", "rt-multi-thread", "macros", "net", "fs", "time", "signal"] }
+
+# Serialization
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.91"
+
+# CLI - use older clap v3 with proper syntax
+clap = { version = "3.2.25", features = ["derive"] }
+
+# Logging
+tracing = "0.1.37"
+
+# Error handling
+anyhow = "1.0.68"
+
+# File system operations
+walkdir = "2.3"
+
+# RabbitMQ / AMQP client - simpler implementation for now
+# TODO: Add proper RabbitMQ when we upgrade Rust version
+
+# Database - simpler approach for now
+# TODO: Add SQLx when we upgrade Rust version
+
+# HTTP client for API calls
+reqwest = { version = "0.11", features = ["json"] }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+# Testing framework
+tokio-test = "0.4"
+tempfile = "3.0"
+assert_fs = "1.0"
+predicates = "3.0"
+
+[[bench]]
+name = "performance_tests"
+harness = false

@@ -11,6 +11,7 @@ import sys
 
 import structlog
 from app.core.config import settings
+from app.worker.error_handlers import RedisConnectionHandler
 
 logger = structlog.get_logger(__name__)
 
@@ -34,39 +35,36 @@ class RedisBatchTrigger:
         self._listening = False
         self._listen_thread = None
     
+    @RedisConnectionHandler.handle_redis_error
     def trigger_batch_ready(self, study_instance_uid: str, destination_id: int) -> bool:
         """
         Signal that a study batch is ready for sending.
         This is a non-blocking operation that immediately notifies listeners.
         """
-        try:
-            message = {
-                "study_uid": study_instance_uid,
-                "destination_id": destination_id,
-                "triggered_at": datetime.now(timezone.utc).isoformat()
-            }
-            
-            # Publish to Redis channel for immediate pickup
-            result = self.redis_client.publish(self.channel, json.dumps(message))  # type: ignore
-            
-            logger.info(
-                "Triggered batch ready signal",
-                study_uid=study_instance_uid,
-                destination_id=destination_id,
-                subscribers=result
-            )
-            
-            return result > 0  # True if there were subscribers  # type: ignore
-            
-        except Exception as e:
-            logger.error(
-                "Failed to trigger batch ready signal",
-                study_uid=study_instance_uid,
-                destination_id=destination_id,
-                error=str(e),
-                exc_info=True
-            )
-            return False
+        message = {
+            "study_uid": study_instance_uid,
+            "destination_id": destination_id,
+            "triggered_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Publish to Redis channel for immediate pickup
+        result = self.redis_client.publish(self.channel, json.dumps(message))  # type: ignore
+        
+        logger.info(
+            "Triggered batch ready signal",
+            study_uid=study_instance_uid,
+            destination_id=destination_id,
+            subscribers=result
+        )
+        
+        return result > 0  # True if there were subscribers  # type: ignore
+    
+    def health_check(self) -> bool:
+        """
+        Check if Redis connection is healthy.
+        Returns True if healthy, False otherwise.
+        """
+        return RedisConnectionHandler.test_redis_connection(self.redis_client)
     
     def start_listening(self, callback_func):
         """

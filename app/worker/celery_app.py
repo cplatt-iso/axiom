@@ -25,6 +25,13 @@ try:
 except Exception as e:
     print(f"ERROR: Failed to configure logging on import: {e}")
 
+# Set up enhanced error handling early
+try:
+    from app.worker.error_handlers import setup_enhanced_error_handling
+    setup_enhanced_error_handling()
+except Exception as e:
+    print(f"ERROR: Failed to setup enhanced error handling: {e}")
+
 # Disable Celery's automatic logging configuration to prevent conflicts
 @signals.setup_logging.connect
 def setup_celery_logging(**kwargs):
@@ -80,6 +87,7 @@ app = Celery(
         'app.worker.dimse_qr_retriever',
         'app.crosswalk.tasks',
         'app.worker.google_healthcare_poller',
+        'app.worker.tasks.redis_health',  # Include Redis health monitoring tasks
         ]
 )
 
@@ -121,6 +129,10 @@ app.conf.beat_schedule = {
     "cleanup-stale-exception-data": {
         "task": "app.worker.tasks.cleanup_stale_exception_data_task",
         "schedule": timedelta(hours=settings.CLEANUP_STALE_DATA_INTERVAL_HOURS),
+    },
+    "redis-health-check": {
+        "task": "redis_health_check_task",
+        "schedule": timedelta(minutes=5),  # Check Redis health every 5 minutes
     },
 }
 

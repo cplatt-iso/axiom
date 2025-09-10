@@ -1,0 +1,51 @@
+services:
+  axiom-rust-dicom-listener:
+    build:
+      context: .
+      dockerfile: docker/rust-dicom-service/Dockerfile.enhanced
+    container_name: axiom-rust-dicom-listener
+    env_file:
+      - ./.env
+    environment:
+      - AXIOM_INSTANCE_ID=rust_dicom_1
+      - AXIOM_AETITLE=RUST_SCP
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - RABBITMQ_QUEUE=rules_engine_intake
+      - DICOM_INCOMING_DIR=/dicom_data/incoming
+      - DICOM_DUSTBIN_DIR=/dicom_data/dustbin
+      - API_BASE_URL=http://api:80
+      - API_KEY=${API_KEY:-}
+      - STUDY_INACTIVITY_TIMEOUT=5
+      - HEARTBEAT_INTERVAL=30
+      - RUST_LOG=info
+    ports:
+      - "11115:11112"  # Port 11115 as configured in database
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - dicom_incoming:/dicom_data/incoming
+      - dicom_dustbin:/dicom_data/dustbin
+    command: ["/usr/local/bin/axiom-dicom-service", "listen", "--bind", "0.0.0.0:11112", "--aet", "RUST_SCP", "--instance-id", "rust_dicom_1"]
+    restart: unless-stopped
+    networks:
+      - default
+      - shared
+    logging:
+      driver: "fluentd"
+      options:
+        mode: non-blocking
+        max-buffer-size: "10m"
+        fluentd-retry-wait: "1s"
+        fluentd-max-retries: "60"
+        fluentd-address: "127.0.0.1:24224"
+        tag: "axiom.rust-dicom-listener.{{.Name}}"
+
+networks:
+  default:
+    driver: bridge
+  shared:
+    external: true
+    name: axiom_shared_network

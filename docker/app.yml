@@ -24,7 +24,7 @@ services:
       - ./alembic.ini:/app/alembic.ini
       - ./pytest.ini:/app/pytest.ini
       - ./alembic:/app/alembic
-      - ./seed_dcm4che_listener.py:/app/seed_dcm4che_listener.py
+      - ./scripts/misc/seed_dcm4che_listener.py:/app/seed_dcm4che_listener.py
       - dicom_incoming:/dicom_data/incoming:ro
       - dicom_processed:/dicom_data/processed:ro
       - dicom_errors:/dicom_data/errors:ro

@@ -238,10 +238,25 @@ def process_dicom_association_task(self,
                                     log.warning(
                                         f"No Redis subscribers for study {study_uid} to {dest_name} - batch will remain PENDING")
                             except Exception as redis_exc:
-                                log.error(
-                                    f"Failed to trigger Redis signal for study {study_uid} to {dest_name}",
-                                    error=str(redis_exc),
-                                    exc_info=True)
+                                # Enhanced Redis error handling
+                                from redis.exceptions import ConnectionError as RedisConnectionError
+                                if isinstance(redis_exc, RedisConnectionError):
+                                    log.error(
+                                        f"Redis connection error while triggering batch signal - Redis service may be down",
+                                        study_uid=study_uid,
+                                        destination=dest_name,
+                                        destination_id=dest_config.id,
+                                        error_type="RedisConnectionError",
+                                        error=str(redis_exc),
+                                        batch_status="will_remain_pending",
+                                        exc_info=True
+                                    )
+                                else:
+                                    log.error(
+                                        f"Failed to trigger Redis signal for study {study_uid} to {dest_name}",
+                                        error=str(redis_exc),
+                                        error_type=type(redis_exc).__name__,
+                                        exc_info=True)
                         else:
                             log.debug(
                                 f"Skipping Redis trigger for non-DIMSE destination: {dest_name} (type: {dest_config.backend_type})")

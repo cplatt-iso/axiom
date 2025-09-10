@@ -5,6 +5,8 @@ from datetime import datetime
 import enum # You'll need this for the shiny new enum!
 import json as pyjson
 
+from app.schemas.enums import DicomImplementationType
+
 # --- NEW: Enum for STOW-RS Authentication Types ---
 # Because magic strings are for amateurs and debugging nightmares.
 class StowRsAuthType(str, enum.Enum):
@@ -48,14 +50,13 @@ class CStoreBackendConfig(StorageBackendConfigBase):
     tls_ca_cert_secret_name: Optional[str] = Field(None, description="REQUIRED if TLS enabled: Secret Manager name for CA cert to verify remote server.")
     tls_client_cert_secret_name: Optional[str] = Field(None, description="Optional (for mTLS): Secret Manager name for OUR client certificate.")
     tls_client_key_secret_name: Optional[str] = Field(None, description="Optional (for mTLS): Secret Manager name for OUR client private key.")
-    sender_type: str = Field("pynetdicom", description="The type of sender to use ('pynetdicom' or 'dcm4che').")
+    sender_type: DicomImplementationType = Field(DicomImplementationType.PYNETDICOM, description="The type of sender to use.")
     sender_identifier: Optional[str] = Field(None, description="Identifier of the sender configuration to use for this destination.")
 
     @field_validator('sender_type')
     @classmethod
-    def validate_sender_type(cls, value: str) -> str:
-        if value not in ["pynetdicom", "dcm4che"]:
-            raise ValueError("Sender type must be either 'pynetdicom' or 'dcm4che'")
+    def validate_sender_type(cls, value: DicomImplementationType) -> DicomImplementationType:
+        # Enum validation is automatic, but we can add extra logic here if needed
         return value
 
     @model_validator(mode='after')
@@ -200,6 +201,8 @@ class StorageBackendConfigUpdate(BaseModel):
     local_ae_title: Optional[str] = Field(None, max_length=16)
     sender_type: Optional[str] = None
     sender_identifier: Optional[str] = None
+    transfer_syntax_strategy: Optional[str] = None
+    max_association_retries: Optional[int] = None
     tls_enabled: Optional[bool] = None
     # tls_ca_cert_secret_name is shared by CStore and STOW-RS for their respective custom CAs
     tls_ca_cert_secret_name: Optional[str] = None 

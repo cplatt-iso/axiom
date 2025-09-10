@@ -17,7 +17,7 @@ structlog.configure(
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.JSONRenderer()
     ],
-    wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO level
+    wrapper_class=structlog.make_filtering_bound_logger(20),  # Back to INFO level
     logger_factory=structlog.PrintLoggerFactory(),
     cache_logger_on_first_use=True,
 )
@@ -97,12 +97,21 @@ def read_stream(stream, stream_name):
                     
                     # Check if parsed is None or handle it properly
                     if parsed is None:
-                        logger.debug("dcm4che raw output", message=line_str, stream=stream_name)
+                        # Smart filtering: log important messages at INFO, routine at DEBUG
+                        if any(keyword in line_str.lower() for keyword in ['error', 'exception', 'failed', 'refused', 'abort', 'reject']):
+                            logger.info("dcm4che error output", message=line_str, stream=stream_name)
+                        else:
+                            logger.debug("dcm4che raw output", message=line_str, stream=stream_name)
                         continue
                         
-                    # Log based on event type
+                    # Log structured events at INFO, raw logs based on content
                     if parsed.get('event') == 'dcm4che raw log':
-                        logger.debug("dcm4che raw output", message=line_str, stream=stream_name)
+                        # Smart filtering for raw logs too
+                        message = parsed.get('message', '')
+                        if any(keyword in message.lower() for keyword in ['error', 'exception', 'failed', 'refused', 'abort', 'reject']):
+                            logger.info("dcm4che error output", message=message, stream=stream_name)
+                        else:
+                            logger.debug("dcm4che raw output", message=message, stream=stream_name)
                     else:
                         # Use 'dicom_event' instead of 'event' to avoid parameter conflicts
                         event_data = parsed.copy() if parsed else {}
@@ -141,7 +150,7 @@ def main():
     directory = '/dicom_data/incoming'
     filepath_pattern = '{00080020}/{0020000d}/{00080018}.dcm'
     
-    # Construct storescp command (remove -v as it's not supported)
+    # Construct storescp command with verbose logging
     command = [
         '/opt/dcm4che/bin/storescp',
         '-b', f'{ae_title}:{port}',
